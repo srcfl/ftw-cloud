@@ -1,0 +1,50 @@
+# FTW Cloud on one small instance. Nothing deploys this by itself.
+#
+# One container, and no TLS terminator in front of it: each box binds its
+# handshake to the TLS session it opened, so ftwcloudd ends TLS itself. The
+# relay can sit behind Caddy because what it carries is Noise inside; this
+# service reads what it carries, so the box checks that nobody in between
+# can. A TCP load balancer is fine; an HTTP one is not.
+
+name: ftw-cloud
+
+services:
+  ftwcloudd:
+    image: ${FTW_CLOUD_IMAGE:?set FTW_CLOUD_IMAGE to an image digest}
+    restart: unless-stopped
+    ports:
+      - '443:443'
+    command:
+      - -listen=:443
+      - -domain=cloud.ftw.energy
+      - -state=/state
+      - -service-key=/run/secrets/ftw-cloud-service.key
+      - -acme-email=${FTW_CLOUD_ACME_EMAIL:-}
+    volumes:
+      # The registry and certificates. No readings are ever written here.
+      - ftw-cloud-state:/state
+    secrets:
+      - ftw-cloud-service.key
+    read_only: true
+    tmpfs:
+      - /tmp
+    # Household readings live in memory. No core file may carry them out.
+    ulimits:
+      core: 0
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: '10m'
+        max-file: '3'
+
+secrets:
+  # Fetched from Secrets Manager at boot into a tmpfs path; never baked
+  # into the image or the volume.
+  ftw-cloud-service.key:
+    file: /run/ftw-cloud/service.key
+
+volumes:
+  ftw-cloud-state:
