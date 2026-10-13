@@ -22,47 +22,67 @@ printf '* hard core 0\n' > /etc/security/limits.d/ftw-cloud.conf
 # No SSH, not even behind the security group. Administration is through SSM.
 systemctl disable --now sshd.service
 
-# Docker, Compose and buildx, as the relay host does it.
-dnf install -y docker git
+# Docker and Compose. The host builds nothing: CI builds the image.
+dnf install -y docker git awscli-2
 systemctl enable --now docker
 
 install -d /usr/local/lib/docker/cli-plugins
 case "$(uname -m)" in
-  aarch64) PLUGIN_ARCH=arm64 ; COMPOSE_ARCH=aarch64 ;;
-  *)       PLUGIN_ARCH=amd64 ; COMPOSE_ARCH=x86_64 ;;
+  aarch64) COMPOSE_ARCH=aarch64 ;;
+  *)       COMPOSE_ARCH=x86_64 ;;
 esac
 curl -fsSL "https://github.com/docker/compose/releases/latest/download/docker-compose-linux-${COMPOSE_ARCH}" \
   -o /usr/local/lib/docker/cli-plugins/docker-compose
 chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
-# sed reads to the end. head or grep -m1 closes the pipe early, and under
-# pipefail that fails the script.
-BUILDX_URL=$(curl -fsS https://api.github.com/repos/docker/buildx/releases/latest \
-  | grep -o "https://[^\"]*linux-${PLUGIN_ARCH}" | sed -n 1p)
-curl -fsSL "$BUILDX_URL" -o /usr/local/lib/docker/cli-plugins/docker-buildx
-chmod +x /usr/local/lib/docker/cli-plugins/docker-buildx
 docker compose version
-docker buildx version
 
+# The checkout supplies compose.yml. ftw-cloud-deploy moves it to the commit
+# the running image was built from.
 if [ ! -d /opt/ftw-cloud ]; then
   git clone https://github.com/srcfl/ftw-cloud /opt/ftw-cloud
 fi
 
-install -d -m 0700 /var/lib/ftw-cloud /etc/ftw-cloud
+install -d -m 0700 /etc/ftw-cloud
 
-# The service key rests on the encrypted root volume, readable by root only.
-# At boot, before Docker starts, a copy goes to tmpfs, where compose.yml
-# mounts it into the container.
+# The service key lives in Secrets Manager. At boot, before Docker starts,
+# it comes into tmpfs, where compose.yml mounts it into the container. It is
+# never on disk.
+cat > /usr/local/sbin/ftw-cloud-key <<'KEY'
+#!/bin/bash
+# Fetch the service key from Secrets Manager into /run/ftw-cloud (tmpfs).
+set -euo pipefail
+export AWS_PAGER=""
+umask 077
+install -d -m 0700 /run/ftw-cloud
+tmp=$(mktemp /run/ftw-cloud/service.key.XXXXXX)
+trap 'rm -f "$tmp"' EXIT
+# At boot the network and the instance's credentials may lag a little.
+for try in $(seq 30); do
+  if aws secretsmanager get-secret-value --region eu-north-1 \
+      --secret-id ftw-cloud/service-key --query SecretString --output text >"$tmp"; then
+    break
+  fi
+  [ "$try" -lt 30 ] || exit 1
+  sleep 2
+done
+grep -q '^-----BEGIN EC PRIVATE KEY-----$' "$tmp"
+chown 65532:65532 "$tmp"
+chmod 0400 "$tmp"
+mv -f "$tmp" /run/ftw-cloud/service.key
+KEY
+chmod 0755 /usr/local/sbin/ftw-cloud-key
+
 cat > /etc/systemd/system/ftw-cloud-key.service <<'UNIT'
 [Unit]
-Description=FTW Cloud service key into tmpfs
+Description=FTW Cloud service key from Secrets Manager into tmpfs
+Wants=network-online.target
+After=network-online.target
 Before=docker.service
-ConditionPathExists=/var/lib/ftw-cloud/service.key
 
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=/usr/bin/install -d -m 0700 /run/ftw-cloud
-ExecStart=/usr/bin/install -m 0400 -o 65532 -g 65532 /var/lib/ftw-cloud/service.key /run/ftw-cloud/service.key
+ExecStart=/usr/local/sbin/ftw-cloud-key
 
 [Install]
 WantedBy=docker.service
@@ -87,48 +107,66 @@ ExecStop=/usr/bin/docker compose --env-file /etc/ftw-cloud/compose.env down
 WantedBy=multi-user.target
 UNIT
 
-# One command updates the host: pull, build, run. The checkout's branch
-# decides what runs.
+# One command updates the host to an image CI built, named by its digest.
 cat > /usr/local/sbin/ftw-cloud-deploy <<'DEPLOY'
 #!/bin/bash
-# Build the commit checked out in /opt/ftw-cloud and run it. Every box
-# reconnects within seconds; there is nothing to drain.
+# Run an image CI built, named by its digest:
+#
+#   ftw-cloud-deploy sha256:<64 hex>
+#
+# The Image workflow's run on main shows the digest. With no argument, it
+# runs the digest in /etc/ftw-cloud/compose.env again. Every box reconnects
+# within seconds; there is nothing to drain.
 set -euo pipefail
 export HOME=${HOME:-/root}
-cd /opt/ftw-cloud
-git pull --ff-only
-rev=$(git rev-parse --short=12 HEAD)
-docker build --pull -t "ftw-cloud:$rev" .
+repo=ghcr.io/srcfl/ftw-cloud
+env=/etc/ftw-cloud/compose.env
 
-# The key is made once, on this host, and never leaves it. Its public half
-# is what Core carries in cloudlink.ServiceKeys.
-if [ ! -s /var/lib/ftw-cloud/service.key ]; then
-  docker run --rm --user 0:0 --network none -v /var/lib/ftw-cloud:/out \
-    "ftw-cloud:$rev" keygen -out /out/service.key
+digest=${1:-$(sed -n "s|^FTW_CLOUD_IMAGE=$repo@||p" "$env" 2>/dev/null || true)}
+if ! [[ $digest =~ ^sha256:[0-9a-f]{64}$ ]]; then
+  echo "usage: ftw-cloud-deploy sha256:<64 hex>" >&2
+  exit 2
 fi
-systemctl enable ftw-cloud-key.service ftw-cloud.service
+image=$repo@$digest
+docker pull --quiet "$image"
+
+# Run only what CI built from main, and take compose.yml from that same
+# commit, so the two cannot drift apart.
+rev=$(docker image inspect -f '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$image")
+cd /opt/ftw-cloud
+git fetch --quiet origin main
+if ! [[ $rev =~ ^[0-9a-f]{40}$ ]] || ! git merge-base --is-ancestor "$rev" origin/main; then
+  echo "$image was not built from a commit on main" >&2
+  exit 1
+fi
+git checkout --quiet --detach "$rev"
+
+# Fetch the key again, so a new version in Secrets Manager takes effect.
 systemctl restart ftw-cloud-key.service
 
-printf 'FTW_CLOUD_IMAGE=ftw-cloud:%s\n' "$rev" > /etc/ftw-cloud/compose.env
+printf 'FTW_CLOUD_IMAGE=%s\n' "$image" > "$env"
 cd deploy
 # Always a new container. A file mounted on its own, such as the key, keeps
 # the copy the container started with even after the file on the host
 # changes; only a new container reads it again.
-docker compose --env-file /etc/ftw-cloud/compose.env up -d --force-recreate
-
-for img in $(docker image ls ftw-cloud --format '{{.Repository}}:{{.Tag}}'); do
-  [ "$img" = "ftw-cloud:$rev" ] || docker image rm "$img"
-done
-docker image prune -f
-docker builder prune -f --filter until=168h
-echo "ftw-cloud:$rev running"
+docker compose --env-file "$env" up -d --force-recreate
+docker image prune --all --force >/dev/null
+echo "$image running, built from $rev"
 DEPLOY
 chmod 0755 /usr/local/sbin/ftw-cloud-deploy
 
 systemctl daemon-reload
-/usr/local/sbin/ftw-cloud-deploy
+systemctl enable ftw-cloud-key.service ftw-cloud.service
 
 # Show that the host rules hold.
 swapon --show
 sysctl kernel.core_pattern
-docker compose --env-file /etc/ftw-cloud/compose.env -f /opt/ftw-cloud/deploy/compose.yml ps
+
+# A host that already runs an image from CI runs it again with the new
+# tooling. A new host waits for the owner to name a digest.
+if grep -q '^FTW_CLOUD_IMAGE=ghcr.io/srcfl/ftw-cloud@sha256:' /etc/ftw-cloud/compose.env 2>/dev/null; then
+  /usr/local/sbin/ftw-cloud-deploy
+  docker compose --env-file /etc/ftw-cloud/compose.env -f /opt/ftw-cloud/deploy/compose.yml ps
+else
+  echo "Next: ftw-cloud-deploy sha256:<digest from the Image workflow on main>"
+fi

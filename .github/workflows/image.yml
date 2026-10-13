@@ -1,0 +1,70 @@
+name: Image
+
+# Builds the host's image (linux/arm64) from every commit on main and pushes
+# it to ghcr.io/srcfl/ftw-cloud, a public package the host pulls without a
+# credential. A pull request builds the image and pushes nothing. Nothing
+# here deploys: the owner picks a digest from a run on main and runs
+# ftw-cloud-deploy with it (deploy/README.md).
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    env:
+      PUSH: ${{ github.event_name == 'push' }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: docker/setup-buildx-action@v4
+      - if: env.PUSH == 'true'
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: build
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/arm64
+          push: ${{ env.PUSH == 'true' }}
+          tags: ghcr.io/srcfl/ftw-cloud:${{ github.sha }}
+          build-args: REVISION=${{ github.sha }}
+          # ftw-cloud-deploy reads the revision label to check out the
+          # matching compose.yml and to refuse an image built off main.
+          labels: |
+            org.opencontainers.image.source=https://github.com/srcfl/ftw-cloud
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.licenses=AGPL-3.0-only
+          # One plain manifest, so the digest names exactly one image. The
+          # provenance goes to GitHub's attestation store below.
+          provenance: false
+          sbom: false
+      # Anyone can check that a digest came from this workflow on a commit
+      # in this repository: gh attestation verify oci://<image> -R srcfl/ftw-cloud
+      - if: env.PUSH == 'true'
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-name: ghcr.io/srcfl/ftw-cloud
+          subject-digest: ${{ steps.build.outputs.digest }}
+      - if: env.PUSH == 'true'
+        name: The digest to deploy
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          {
+            echo "Built \`${GITHUB_SHA}\` as \`ghcr.io/srcfl/ftw-cloud@${DIGEST}\`."
+            echo
+            echo "Deploy it with \`ftw-cloud-deploy ${DIGEST}\` (deploy/README.md)."
+          } >> "$GITHUB_STEP_SUMMARY"
