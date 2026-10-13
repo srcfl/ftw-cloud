@@ -22,13 +22,21 @@ both in `srcfl/ftw`. Both are proposed; nothing here is deployed.
 - The registry (SQLite) holds the home id, the box key and the signed roster.
   A box that turns FTW Cloud off gets its home deleted and a signed receipt.
 - `/source` serves the source of the running build, as AGPL-3.0 asks.
+- **Alerts (C4).** A box's signed `event` goes to its phones through APNs,
+  wrapped unchanged: the phone checks the signature, writes its own words and
+  picks the buttons from the verified kind. Every alert has the same aps,
+  priority and push type and no collapse id. Ten minutes without the box's
+  socket sends `box.unreachable`, unless the box said `bye` for an update,
+  which holds it back for an hour. Tokens are bound to roster entries that
+  may read `ftw.events.read` and go when the roster drops them or Apple says
+  they are gone. Apple's key comes from Parameter Store
+  ([deploy/apns.md](deploy/apns.md)).
 
 Not built yet, with a marked place in the code:
 
 | Step | What | Where |
 |---|---|---|
 | C3 | The app's Noise session, `/v1/app` | `internal/server`, `store.For` with a `Device` principal |
-| C4 | Alerts over APNs, `box.unreachable` | not started |
 | C5 | Widget token reads, `/v1/now`, tiles | `internal/server` |
 | C7–C8 | Statistics | not started |
 
@@ -83,8 +91,12 @@ curl http://127.0.0.1:8080/api/cloud/preview
 ```
 
 `-tags ftwclouddev` adds `/dev/held?home=<id>` on loopback, which shows what
-the service holds so a test can compare it with the preview. Release builds
-do not have it.
+the service holds so a test can compare it with the preview, and
+`-dev-push-listen 127.0.0.1:18444`, where `POST /dev/push/register` with
+`{home, deviceId, apnsToken (hex), environment}` registers a token for a
+device in the home's roster, as the app session will. `-apns-dir` names a
+directory holding `key.p8`, `key-id` and `team-id`; without it nothing is
+sent. Release builds have neither dev route.
 
 ## Develop
 

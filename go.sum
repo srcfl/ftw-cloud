@@ -18,6 +18,8 @@ github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec h1:W09IVJc94
 github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec/go.mod h1:qqbHyh8v60DhA7CoWK5oRCqLrMHRGoxYCSS9EjAz6Eo=
 github.com/srcfl/ftw/go/protocol v0.0.0-20261012183740-8a030e2e4805 h1:DmeVlx+LhctSDD4sQS1ltcN8QD2EdaKiHtqU1Qn3K1U=
 github.com/srcfl/ftw/go/protocol v0.0.0-20261012183740-8a030e2e4805/go.mod h1:VEjr/o0yZijJ1nApuJK+nak6FxJ/fubAUBNOunqNrUU=
+github.com/srcfl/ftw/go/protocol v0.0.0-20261013054921-8cca42036665 h1:xN63Svp0XMecqe5N5daGFM8gsF7vo095Z+qk/1WhKeM=
+github.com/srcfl/ftw/go/protocol v0.0.0-20261013054921-8cca42036665/go.mod h1:VEjr/o0yZijJ1nApuJK+nak6FxJ/fubAUBNOunqNrUU=
 github.com/x448/float16 v0.8.4 h1:qLwI1I70+NjRFUR3zs1JPUCgaCXSh3SW62uAKT1mSBM=
 github.com/x448/float16 v0.8.4/go.mod h1:14CWIYCyZA/cWjXOioeEpHeN/83MdbZDRQHoFcYsOfg=
 golang.org/x/crypto v0.57.0 h1:3ZVCjf8Ggz7zneR/EHRVx68Ctf+2pmIMP2UFhh9cC6M=
