@@ -13,9 +13,11 @@ import (
 	"slices"
 	"testing"
 
+	"github.com/srcfl/ftw-cloud/internal/appsession"
 	"github.com/srcfl/ftw-cloud/internal/registry"
 	"github.com/srcfl/ftw-cloud/internal/store"
 	"github.com/srcfl/ftw-cloud/internal/uplink"
+	"github.com/srcfl/ftw/go/protocol/appwire"
 	"github.com/srcfl/ftw/go/protocol/cloudwire"
 )
 
@@ -29,13 +31,16 @@ func newServer(t *testing.T) (*Server, string) {
 	t.Cleanup(func() { _ = reg.Close() })
 	st := store.New(nil)
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	s := &Server{Store: st, Registry: reg, Uplink: uplink.New(st, reg, key, log), Log: log}
+	up := uplink.New(st, reg, key, log)
+	noise, _ := appwire.GenerateKeyPair()
+	s := &Server{Store: st, Registry: reg, Uplink: up, App: appsession.New(st, reg, up, noise, log), Log: log}
 
 	// A home with readings in it, held the way a box's uplink holds them.
-	box, _ := st.For(store.Principal{Kind: store.Box, Home: "canaryhome"})
+	const home = "canaryhomecanaryhomecanary"
+	box, _ := st.For(store.Principal{Kind: store.Box, Home: home})
 	box.Connected()
 	_ = box.Put(cloudwire.MsgLive, []byte("CANARY-READING"), 1, true)
-	return s, "canaryhome"
+	return s, home
 }
 
 // No route reads a home. Every path answers without the canary, whatever the
@@ -73,11 +78,13 @@ func TestSourceSaysWhereTheSourceIs(t *testing.T) {
 	}
 }
 
-func TestTheUplinkRefusesPlainHTTP(t *testing.T) {
-	s, _ := newServer(t)
-	w := httptest.NewRecorder()
-	s.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/v1/box", nil))
-	if w.Code != http.StatusUpgradeRequired {
-		t.Fatalf("plain HTTP to /v1/box: %d", w.Code)
+func TestTheSocketsRefusePlainHTTP(t *testing.T) {
+	s, home := newServer(t)
+	for _, p := range []string{"/v1/box", "/v1/app?home=" + home} {
+		w := httptest.NewRecorder()
+		s.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodGet, p, nil))
+		if w.Code != http.StatusUpgradeRequired {
+			t.Fatalf("plain HTTP to %s: %d", p, w.Code)
+		}
 	}
 }

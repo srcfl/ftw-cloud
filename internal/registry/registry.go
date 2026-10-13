@@ -63,6 +63,13 @@ CREATE TABLE IF NOT EXISTS tombstones (
 	home TEXT PRIMARY KEY,
 	grant_id BLOB,
 	deleted_ms INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS suspensions (
+	home TEXT NOT NULL,
+	device_id TEXT NOT NULL,
+	epoch INTEGER NOT NULL,
+	since_ms INTEGER NOT NULL,
+	PRIMARY KEY (home, device_id)
 );`)
 	if err != nil {
 		_ = db.Close()
@@ -130,6 +137,9 @@ func (r *Registry) Purge(home string, grantID []byte, now time.Time) error {
 	if _, err := tx.Exec(`DELETE FROM homes WHERE home = ?`, home); err != nil {
 		return err
 	}
+	if _, err := tx.Exec(`DELETE FROM suspensions WHERE home = ?`, home); err != nil {
+		return err
+	}
 	if _, err := tx.Exec(`INSERT INTO tombstones (home, grant_id, deleted_ms) VALUES (?, ?, ?)
 		ON CONFLICT (home) DO NOTHING`, home, grantID, now.UnixMilli()); err != nil {
 		return err
@@ -182,7 +192,66 @@ func (r *Registry) Expire(now time.Time) ([]string, error) {
 		if _, err := r.db.Exec(`DELETE FROM homes WHERE home = ?`, h); err != nil {
 			return nil, err
 		}
+		if _, err := r.db.Exec(`DELETE FROM suspensions WHERE home = ?`, h); err != nil {
+			return nil, err
+		}
 	}
 	_, err = r.db.Exec(`DELETE FROM tombstones WHERE deleted_ms < ?`, now.Add(-TombstoneKept).UnixMilli())
 	return gone, err
+}
+
+// Suspend records an owner's suspension of one roster device at its current
+// epoch. It only narrows access: the device must already be in the roster,
+// which the caller checks, and the suspension ends when the roster drops the
+// device or its epoch changes.
+func (r *Registry) Suspend(home, deviceID string, epoch uint64, now time.Time) error {
+	_, err := r.db.Exec(`INSERT INTO suspensions (home, device_id, epoch, since_ms) VALUES (?, ?, ?, ?)
+		ON CONFLICT (home, device_id) DO UPDATE SET epoch = excluded.epoch, since_ms = excluded.since_ms`,
+		home, deviceID, int64(epoch), now.UnixMilli())
+	return err
+}
+
+// Unsuspend lifts a suspension.
+func (r *Registry) Unsuspend(home, deviceID string) error {
+	_, err := r.db.Exec(`DELETE FROM suspensions WHERE home = ? AND device_id = ?`, home, deviceID)
+	return err
+}
+
+// Suspended reports whether a device is suspended at this epoch. A read that
+// fails counts as suspended: the safe answer narrows.
+func (r *Registry) Suspended(home, deviceID string, epoch uint64) bool {
+	var held int64
+	err := r.db.QueryRow(`SELECT epoch FROM suspensions WHERE home = ? AND device_id = ?`, home, deviceID).Scan(&held)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false
+	}
+	return err != nil || uint64(held) == epoch
+}
+
+// PruneSuspensions drops the suspensions a new roster ended: devices it no
+// longer lists, and devices whose epoch moved.
+func (r *Registry) PruneSuspensions(home string, epochs map[string]uint64) error {
+	rows, err := r.db.Query(`SELECT device_id, epoch FROM suspensions WHERE home = ?`, home)
+	if err != nil {
+		return err
+	}
+	var gone []string
+	for rows.Next() {
+		var id string
+		var epoch int64
+		if err := rows.Scan(&id, &epoch); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		if e, ok := epochs[id]; !ok || e != uint64(epoch) {
+			gone = append(gone, id)
+		}
+	}
+	_ = rows.Close()
+	for _, id := range gone {
+		if err := r.Unsuspend(home, id); err != nil {
+			return err
+		}
+	}
+	return nil
 }

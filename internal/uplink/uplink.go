@@ -62,6 +62,10 @@ type Uplink struct {
 	// Dropped counts box messages of a type this service does not know. A
 	// newer box works with an older service by this rule.
 	Dropped atomic.Int64
+
+	// OnConnect runs after a box's hello_ok, so the app sessions can ask a
+	// box that just came back for one-second updates. Set before serving.
+	OnConnect func(home string)
 }
 
 // New builds the handler. key is the service key that signs hello_ok and
@@ -107,7 +111,7 @@ func (u *Uplink) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // Watch asks a home's box for one-second updates for a minute. The app
-// session (C3) calls it while a phone is looking.
+// sessions call it while a phone is looking.
 func (u *Uplink) Watch(home string) {
 	u.mu.Lock()
 	c := u.conns[home]
@@ -201,6 +205,9 @@ func (c *boxConn) run() error {
 
 	if err := c.send(helloOK{BoxNonce: hello.BoxNonce, EKM: c.ekm, Have: map[string]string{}, RosterSeq: c.rosterSeq()}); err != nil {
 		return err
+	}
+	if !c.purged && c.u.OnConnect != nil {
+		go c.u.OnConnect(c.home)
 	}
 
 	done := make(chan struct{})
@@ -385,7 +392,16 @@ func (c *boxConn) roster(env cloudwire.Envelope) error {
 	if err != nil {
 		return err
 	}
-	return c.u.registry.SetRoster(c.home, r.RosterSeq, r.Grant.ID, raw, c.u.now())
+	if err := c.u.registry.SetRoster(c.home, r.RosterSeq, r.Grant.ID, raw, c.u.now()); err != nil {
+		return err
+	}
+	// A device the roster dropped, or whose epoch moved, is no longer
+	// suspended: it is gone, or paired again.
+	epochs := make(map[string]uint64, len(r.Devices))
+	for _, d := range r.Devices {
+		epochs[d.ID] = d.Epoch
+	}
+	return c.u.registry.PruneSuspensions(c.home, epochs)
 }
 
 // purge deletes the home and sends the signed receipt. For a home already

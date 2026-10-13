@@ -10,7 +10,7 @@ and the wire format is the normative
 [FTW Cloud protocol](https://github.com/srcfl/ftw/blob/master/docs/protocol-cloud.md),
 both in `srcfl/ftw`. Both are proposed; nothing here is deployed.
 
-## What works today (C2)
+## What works today (C2, C3)
 
 - A box with FTW Cloud on keeps one WebSocket at `/v1/box`. The service
   checks that the box signed `hello` over this TLS session's exporter value,
@@ -22,12 +22,22 @@ both in `srcfl/ftw`. Both are proposed; nothing here is deployed.
 - The registry (SQLite) holds the home id, the box key and the signed roster.
   A box that turns FTW Cloud off gets its home deleted and a signed receipt.
 - `/source` serves the source of the running build, as AGPL-3.0 asks.
+- A phone reads its home at `/v1/app?home=<id>`: Noise IK to the service's
+  Noise key, with the home id in the prologue. The service admits only a
+  phone whose key the box listed in its signed roster, and no owner has
+  suspended. Handshake message 2 carries the snapshot from memory; after it
+  each new box envelope the phone may read follows on the same socket,
+  unchanged. A roster change, a suspension, an expired roster or a purge
+  closes the sessions it touches at once.
+- While a phone looks, the service asks the box for one-second updates and
+  asks again every 50 s; when nobody looks, it stops.
+- Limits per home: 16 sessions, one per device, 256 envelopes queued per
+  phone, and a small message rate from each phone.
 
 Not built yet, with a marked place in the code:
 
 | Step | What | Where |
 |---|---|---|
-| C3 | The app's Noise session, `/v1/app` | `internal/server`, `store.For` with a `Device` principal |
 | C4 | Alerts over APNs, `box.unreachable` | not started |
 | C5 | Widget token reads, `/v1/now`, tiles | `internal/server` |
 | C7–C8 | Statistics | not started |
@@ -35,8 +45,8 @@ Not built yet, with a marked place in the code:
 ## How it holds a home
 
 ```
-box ──wss, TLS 1.3, signed frames──▶ /v1/box ──▶ store (memory) ◀── store.For(principal)
-                                         └────▶ registry (SQLite: key, roster, tombstones)
+box ──wss, TLS 1.3, signed frames──▶ /v1/box ──▶ store (memory) ◀── store.For(principal) ◀── /v1/app ◀──Noise IK── phone
+                                         └────▶ registry (SQLite: key, roster, tombstones, suspensions)
 ```
 
 - **The home id is a hash of the box's key.** It comes from the key that
@@ -47,6 +57,9 @@ box ──wss, TLS 1.3, signed frames──▶ /v1/box ──▶ store (memory) 
   read the classes its role and the owner's grant both allow. There is no
   listing and no principal for staff; `TestNoRouteReadsAHome` checks every
   route.
+- **A phone can narrow and nothing else.** It can say whether it is looking,
+  and an owner can suspend a device in the roster. Commands go from the app
+  to the box over the relay, never through here.
 - **The service sends five things.** `challenge`, `hello_ok`, `watch`,
   `resync` and `purged` are the whole downlink, and none asks the box to act.
   The box closes the uplink on anything else.
@@ -58,9 +71,10 @@ box ──wss, TLS 1.3, signed frames──▶ /v1/box ──▶ store (memory) 
 
 ```bash
 go build -tags ftwclouddev -o ftwcloudd ./cmd/ftwcloudd
-./ftwcloudd keygen -out service.key        # prints the public key
+./ftwcloudd keygen -out service.key        # prints the public key, for Core
+./ftwcloudd keygen -noise -out noise.key   # prints the Noise public key, for the app
 ./ftwcloudd -listen 127.0.0.1:18443 -state ./state -service-key service.key \
-  -tls-cert leaf.pem -tls-key leaf.key
+  -noise-key noise.key -tls-cert leaf.pem -tls-key leaf.key
 ```
 
 Build Core from `srcfl/ftw` against it. A release build names no service, so
@@ -91,6 +105,9 @@ do not have it.
 ```bash
 go vet ./... && go test -race ./...
 go test -run XXX -fuzz FuzzBoxMessage -fuzztime 30s ./internal/uplink
+go test -run XXX -fuzz FuzzPhoneMessage -fuzztime 30s ./internal/appsession
+go test -run TestTheSnapshotArrivesFast -v ./internal/appsession   # loopback p50/p95
+go test -run XXX -bench BenchmarkSnapshot ./internal/appsession
 bash scripts/check-imports.sh
 ```
 

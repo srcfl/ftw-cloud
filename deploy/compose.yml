@@ -19,12 +19,14 @@ services:
       - -domain=cloud.ftw.energy
       - -state=/state
       - -service-key=/run/secrets/ftw-cloud-service.key
+      - -noise-key=/run/secrets/ftw-cloud-noise.key
       - -acme-email=${FTW_CLOUD_ACME_EMAIL:-}
     volumes:
       # The registry and certificates. No readings are ever written here.
       - ftw-cloud-state:/state
     secrets:
       - ftw-cloud-service.key
+      - ftw-cloud-noise.key
     read_only: true
     tmpfs:
       - /tmp
@@ -45,6 +47,10 @@ secrets:
   # into the image or the volume.
   ftw-cloud-service.key:
     file: /run/ftw-cloud/service.key
+  # The X25519 key phones run Noise against (C3). Its public half is in the
+  # app.
+  ftw-cloud-noise.key:
+    file: /run/ftw-cloud/noise.key
 
 volumes:
   ftw-cloud-state:

@@ -1,0 +1,468 @@
+// Package appsession serves /v1/app, where a phone reads its home.
+// docs/protocol-cloud.md in srcfl/ftw is the wire format ("App session");
+// go/protocol/cloudwire holds its bytes.
+//
+// The phone runs Noise IK as initiator with the service's Noise key as the
+// responder's static key and the home id in the prologue. The service admits
+// the phone only through store.For with the key the handshake authenticated,
+// so a phone reaches only a home whose box listed it in a signed roster.
+// Message 2 carries the snapshot; after it every envelope the box sends that
+// the device may read goes out unchanged, one frame per Noise message.
+//
+// A phone may ask for faster updates, and an owner may suspend a device. That
+// is all it can do here: commands go to the box over the relay, never
+// through FTW Cloud.
+package appsession
+
+import (
+	"crypto/tls"
+	"errors"
+	"log/slog"
+	"net/http"
+	"sync"
+	"time"
+
+	"github.com/gorilla/websocket"
+	"github.com/srcfl/ftw-cloud/internal/registry"
+	"github.com/srcfl/ftw-cloud/internal/store"
+	"github.com/srcfl/ftw/go/protocol/appwire"
+	"github.com/srcfl/ftw/go/protocol/cloudwire"
+)
+
+const (
+	// maxPhoneMessage bounds one message from a phone. Message 1 with now is
+	// about 120 bytes and nothing a phone sends later is larger.
+	maxPhoneMessage = 4 << 10
+	// handshakeTimeout bounds message 1.
+	handshakeTimeout = 10 * time.Second
+	// The same ping, read and write deadlines as the uplink.
+	pingEvery    = 15 * time.Second
+	readTimeout  = 45 * time.Second
+	writeTimeout = 10 * time.Second
+	// A phone sends a message when it looks away or back, or when an owner
+	// suspends a device. Past this burst at this rate the session closes.
+	rateBurst  = 20
+	ratePerSec = 2
+	// maxNoiseMessage is the largest Noise message, handshake or transport.
+	maxNoiseMessage = 0xffff
+	// WatchRenew is how often the service asks the box again for one-second
+	// updates while a phone looks. The box's watch lasts 60 s, so the ask
+	// comes before it lapses.
+	WatchRenew = 50 * time.Second
+	// roleOwner is the registry's owner role, as the roster names it.
+	// go/protocol does not generate role names yet.
+	roleOwner = "owner"
+)
+
+// Watcher asks a home's box for one-second updates. The uplink is one.
+type Watcher interface {
+	Watch(home string)
+}
+
+// Server is the /v1/app handler.
+type Server struct {
+	store    *store.Store
+	registry *registry.Registry
+	watcher  Watcher
+	key      appwire.KeyPair
+	log      *slog.Logger
+	now      func() time.Time
+	// renewEvery is WatchRenew; tests shorten it.
+	renewEvery time.Duration
+
+	mu      sync.Mutex
+	looking map[string]*look
+}
+
+// look is one home's phones that can see it, and the loop that keeps the
+// box's watch in force while there is at least one.
+type look struct {
+	n    int
+	stop chan struct{}
+}
+
+// New builds the handler. key is the service's Noise static key; the app
+// carries its public half.
+func New(st *store.Store, reg *registry.Registry, w Watcher, key appwire.KeyPair, log *slog.Logger) *Server {
+	if log == nil {
+		log = slog.Default()
+	}
+	return &Server{store: st, registry: reg, watcher: w, key: key, log: log, now: time.Now,
+		renewEvery: WatchRenew, looking: map[string]*look{}}
+}
+
+var upgrader = websocket.Upgrader{
+	EnableCompression: false,
+	// The app sends no Origin. A browser always does, and has no business
+	// here.
+	CheckOrigin: func(r *http.Request) bool { return r.Header.Get("Origin") == "" },
+}
+
+func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.TLS == nil || r.TLS.Version != tls.VersionTLS13 {
+		http.Error(w, "TLS 1.3 only", http.StatusUpgradeRequired)
+		return
+	}
+	home := r.URL.Query().Get(cloudwire.AppHomeParam)
+	if !cloudwire.ValidHome(home) {
+		http.Error(w, "name a home", http.StatusBadRequest)
+		return
+	}
+	conn, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		return
+	}
+	defer conn.Close()
+	conn.SetReadLimit(maxPhoneMessage)
+	code, err := s.serve(conn, home)
+	if err != nil {
+		s.log.Debug("app session closed", "err", err)
+	}
+	if code != 0 {
+		_ = conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(code, ""), time.Now().Add(time.Second))
+	}
+}
+
+var errProtocol = errors.New("appsession: the phone broke the protocol")
+
+// serve runs one session and returns the close code to end it with.
+func (s *Server) serve(conn *websocket.Conn, home string) (int, error) {
+	_ = conn.SetReadDeadline(time.Now().Add(handshakeTimeout))
+	kind, msg1, err := conn.ReadMessage()
+	if err != nil {
+		return 0, err
+	}
+	if kind != websocket.BinaryMessage {
+		return cloudwire.CloseProtocol, errProtocol
+	}
+	hs, err := appwire.NewResponder(appwire.HandshakeOptions{StaticKey: s.key, Prologue: cloudwire.AppPrologue(home)})
+	if err != nil {
+		return websocket.CloseInternalServerErr, err
+	}
+	payload, err := hs.ReadMessage(msg1)
+	if err != nil {
+		// Another service key, or another home in the prologue than in the
+		// query. Neither says anything about the home.
+		return cloudwire.CloseDenied, err
+	}
+	hz, err := parseNow(payload)
+	if err != nil {
+		return cloudwire.CloseProtocol, err
+	}
+
+	dev, err := s.store.For(store.Principal{Kind: store.Device, Home: home, DeviceKey: hs.RemoteStatic()})
+	if err != nil {
+		return cloudwire.CloseDenied, err
+	}
+	snap, sess, err := dev.Open()
+	switch {
+	case errors.Is(err, store.ErrBusy):
+		return cloudwire.CloseBusy, err
+	case err != nil:
+		return cloudwire.CloseDenied, err
+	}
+	defer sess.Close()
+
+	msg2Payload, rest, err := snapshotPayload(snap)
+	if err != nil {
+		return websocket.CloseInternalServerErr, err
+	}
+	msg2, err := hs.WriteMessage(msg2Payload)
+	if err != nil {
+		return websocket.CloseInternalServerErr, err
+	}
+	c := &phoneConn{s: s, conn: conn, dev: dev, home: home, tokens: rateBurst, refilled: s.now()}
+	if err := c.write(msg2); err != nil {
+		return 0, err
+	}
+	keys, err := hs.Split()
+	if err != nil {
+		return websocket.CloseInternalServerErr, err
+	}
+	c.tr = appwire.NewTransport(keys)
+	for _, env := range rest {
+		if err := c.forward(env); err != nil {
+			return 0, err
+		}
+	}
+
+	c.setLooking(hz >= cloudwire.HzLooking)
+	defer c.stopLooking()
+	return c.run(sess)
+}
+
+// parseNow reads message 1's payload.
+func parseNow(payload []byte) (int, error) {
+	env, err := cloudwire.DecodeEnvelope(payload)
+	if err != nil || env.T != cloudwire.MsgNow {
+		return 0, errProtocol
+	}
+	var now cloudwire.Now
+	if err := cloudwire.Unmarshal(env.B, &now); err != nil {
+		return 0, errProtocol
+	}
+	return now.Hz, nil
+}
+
+// snapshotPayload is message 2. Envelopes that do not fit in one Noise
+// message come back as rest, to follow as frames.
+func snapshotPayload(snap store.Snapshot) ([]byte, [][]byte, error) {
+	envs := snap.Envelopes
+	var rest [][]byte
+	for {
+		payload, err := cloudwire.SnapshotPayload(envs, snap.LastSeenMs, snap.Online, len(rest))
+		if err != nil {
+			return nil, nil, err
+		}
+		if len(payload)+appwire.Message2Overhead <= maxNoiseMessage || len(envs) == 0 {
+			return payload, rest, nil
+		}
+		rest = append([][]byte{envs[len(envs)-1]}, rest...)
+		envs = envs[:len(envs)-1]
+	}
+}
+
+// setLooking keeps the box's watch in force while at least one phone of the
+// home can see it.
+func (s *Server) setLooking(home string, delta int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	l := s.looking[home]
+	if l == nil {
+		l = &look{}
+		s.looking[home] = l
+	}
+	l.n += delta
+	switch {
+	case l.n > 0 && l.stop == nil:
+		l.stop = make(chan struct{})
+		go s.renew(home, l.stop)
+	case l.n <= 0:
+		if l.stop != nil {
+			close(l.stop)
+		}
+		delete(s.looking, home)
+	}
+}
+
+func (s *Server) renew(home string, stop <-chan struct{}) {
+	s.watcher.Watch(home)
+	t := time.NewTicker(s.renewEvery)
+	defer t.Stop()
+	for {
+		select {
+		case <-stop:
+			return
+		case <-t.C:
+			s.watcher.Watch(home)
+		}
+	}
+}
+
+// BoxConnected asks a box that just connected for one-second updates when a
+// phone is already looking. The uplink calls it after hello_ok.
+func (s *Server) BoxConnected(home string) {
+	s.mu.Lock()
+	looking := s.looking[home] != nil
+	s.mu.Unlock()
+	if looking {
+		s.watcher.Watch(home)
+	}
+}
+
+// phoneConn is one phone's session after the handshake.
+type phoneConn struct {
+	s    *Server
+	conn *websocket.Conn
+	tr   *appwire.Transport
+	dev  *store.Handle
+	home string
+
+	// looking is touched by the read loop and by the session's end.
+	lookMu  sync.Mutex
+	looking bool
+	ended   bool
+
+	tokens   float64
+	refilled time.Time
+}
+
+func (c *phoneConn) setLooking(on bool) {
+	c.lookMu.Lock()
+	defer c.lookMu.Unlock()
+	if c.ended || on == c.looking {
+		return
+	}
+	c.looking = on
+	delta := -1
+	if on {
+		delta = 1
+	}
+	c.s.setLooking(c.home, delta)
+}
+
+// stopLooking ends this phone's part in the watch for good, whatever the
+// read loop still delivers.
+func (c *phoneConn) stopLooking() {
+	c.setLooking(false)
+	c.lookMu.Lock()
+	c.ended = true
+	c.lookMu.Unlock()
+}
+
+// write sends one WebSocket message. Only the session's own goroutine
+// writes; pings go through WriteControl, which may run beside it.
+func (c *phoneConn) write(msg []byte) error {
+	if err := c.conn.SetWriteDeadline(time.Now().Add(writeTimeout)); err != nil {
+		return err
+	}
+	return c.conn.WriteMessage(websocket.BinaryMessage, msg)
+}
+
+// forward sends one box envelope as the box sent it. An envelope too large
+// for a Noise message cannot reach a phone; it is dropped, and the phone sees
+// the gap through the next hb.
+func (c *phoneConn) forward(env []byte) error {
+	frame, err := cloudwire.EncodeFrame(env)
+	if err != nil || len(frame)+appwire.TransportOverhead > maxNoiseMessage {
+		return nil
+	}
+	msg, err := c.tr.Encrypt(frame)
+	if err != nil {
+		return err
+	}
+	return c.write(msg)
+}
+
+// run forwards until the store ends the session, the phone leaves or breaks
+// the protocol.
+func (c *phoneConn) run(sess *store.Session) (int, error) {
+	type result struct {
+		code int
+		err  error
+	}
+	read := make(chan result, 1)
+	go func() {
+		code, err := c.readLoop()
+		read <- result{code, err}
+	}()
+	ping := time.NewTicker(pingEvery)
+	defer ping.Stop()
+	for {
+		select {
+		case env := <-sess.C():
+			if err := c.forward(env); err != nil {
+				return 0, err
+			}
+		case <-sess.Done():
+			return sess.Code(), nil
+		case r := <-read:
+			// The read loop's own work (a suspension) may have ended this
+			// session; the store's reason wins over a plain close.
+			select {
+			case <-sess.Done():
+				return sess.Code(), r.err
+			default:
+			}
+			return r.code, r.err
+		case <-ping.C:
+			if err := c.conn.WriteControl(websocket.PingMessage, nil, time.Now().Add(writeTimeout)); err != nil {
+				return 0, err
+			}
+		}
+	}
+}
+
+func (c *phoneConn) readLoop() (int, error) {
+	_ = c.conn.SetReadDeadline(time.Now().Add(readTimeout))
+	c.conn.SetPongHandler(func(string) error {
+		return c.conn.SetReadDeadline(time.Now().Add(readTimeout))
+	})
+	for {
+		kind, msg, err := c.conn.ReadMessage()
+		if err != nil {
+			return 0, err
+		}
+		_ = c.conn.SetReadDeadline(time.Now().Add(readTimeout))
+		if !c.allow() {
+			return cloudwire.CloseProtocol, errProtocol
+		}
+		if kind != websocket.BinaryMessage {
+			return cloudwire.CloseProtocol, errProtocol
+		}
+		frame, err := c.tr.Decrypt(msg)
+		if err != nil {
+			return cloudwire.CloseProtocol, err
+		}
+		if code, err := c.apply(frame); err != nil {
+			return code, err
+		}
+	}
+}
+
+// apply acts on one message from the phone. Types it does not know are
+// ignored, so a newer app works with an older service.
+func (c *phoneConn) apply(frame []byte) (int, error) {
+	payload, err := cloudwire.DecodeFrame(frame)
+	if err != nil {
+		return cloudwire.CloseProtocol, err
+	}
+	env, err := cloudwire.DecodeEnvelope(payload)
+	if err != nil {
+		return cloudwire.CloseProtocol, err
+	}
+	switch env.T {
+	case cloudwire.MsgWatch:
+		var w cloudwire.Watch
+		if err := cloudwire.Unmarshal(env.B, &w); err != nil {
+			return cloudwire.CloseProtocol, err
+		}
+		c.setLooking(w.Hz >= cloudwire.HzLooking)
+	case cloudwire.MsgSuspend, cloudwire.MsgUnsuspend:
+		var sus cloudwire.Suspend
+		if err := cloudwire.Unmarshal(env.B, &sus); err != nil {
+			return cloudwire.CloseProtocol, err
+		}
+		return 0, c.suspend(sus.DeviceID, env.T == cloudwire.MsgSuspend)
+	}
+	return 0, nil
+}
+
+// suspend applies an owner's suspension or lifts one. It only narrows what
+// the roster allows: the device must be in the roster, and lifting a
+// suspension gives back no more than the roster says.
+func (c *phoneConn) suspend(deviceID string, on bool) error {
+	if c.dev.Device().Role != roleOwner {
+		return nil
+	}
+	r, _ := c.dev.Roster()
+	if r == nil {
+		return nil
+	}
+	for _, d := range r.Devices {
+		if d.ID != deviceID {
+			continue
+		}
+		if !on {
+			return c.s.registry.Unsuspend(c.home, d.ID)
+		}
+		if err := c.s.registry.Suspend(c.home, d.ID, d.Epoch, c.s.now()); err != nil {
+			return err
+		}
+		c.dev.Recheck()
+		return nil
+	}
+	return nil
+}
+
+// allow is a token bucket over the phone's messages.
+func (c *phoneConn) allow() bool {
+	now := c.s.now()
+	c.tokens = min(rateBurst, c.tokens+now.Sub(c.refilled).Seconds()*ratePerSec)
+	c.refilled = now
+	if c.tokens < 1 {
+		return false
+	}
+	c.tokens--
+	return true
+}

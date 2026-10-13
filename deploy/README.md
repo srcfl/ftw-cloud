@@ -17,6 +17,9 @@ escrow. The account is not decided yet; nothing here creates anything.
   (tmpfs) at boot. Its public half is compiled into Core
   (`cloudlink.ServiceKeys`); Core carries up to two, so it can rotate across a
   release.
+- The Noise key phones dial (`ftwcloudd keygen -noise`) comes the same way into
+  `/run/ftw-cloud/noise.key`. Its public half is compiled into the app, which
+  also carries up to two.
 - The volume holds the SQLite registry (home ids, box keys, signed rosters,
   tombstones) and the ACME cache. No readings. Use an encrypted EBS volume.
 
@@ -33,7 +36,7 @@ escrow. The account is not decided yet; nothing here creates anything.
 
 ## Not here yet
 
-APNs (C4), the app session (C3), widget tokens (C5) and statistics (C7–C8)
-add secrets, egress and storage when they land. The erase test, canary homes
+APNs (C4), widget tokens (C5) and statistics (C7–C8) add secrets, egress and
+storage when they land. The erase test, canary homes
 and the external heartbeat that pages Sourceful belong with the first
 deployment.

@@ -5,7 +5,7 @@ go 1.26.0
 require (
 	github.com/fxamacker/cbor/v2 v2.9.4
 	github.com/gorilla/websocket v1.5.3
-	github.com/srcfl/ftw/go/protocol v0.0.0-20261012183740-8a030e2e4805
+	github.com/srcfl/ftw/go/protocol v0.0.0-20261013053318-7490c64c35e3
 	golang.org/x/crypto v0.57.0
 	golang.org/x/sys v0.48.0
 	modernc.org/sqlite v1.59.0
