@@ -8,7 +8,9 @@ This is `ftwcloudd`, the service. The decision is
 [ADR 0008](https://github.com/srcfl/ftw/blob/master/docs/adr/0008-ftw-cloud.md)
 and the wire format is the normative
 [FTW Cloud protocol](https://github.com/srcfl/ftw/blob/master/docs/protocol-cloud.md),
-both in `srcfl/ftw`. Both are proposed; nothing here is deployed.
+both in `srcfl/ftw`. Both are proposed. The service runs at
+`cloud.ftw.energy` ([deploy/README.md](deploy/README.md)), but no box sends
+to it yet.
 
 ## What works today (C2, C3)
 
