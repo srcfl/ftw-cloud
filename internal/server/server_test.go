@@ -88,3 +88,15 @@ func TestTheSocketsRefusePlainHTTP(t *testing.T) {
 		}
 	}
 }
+
+// A host without a Noise key serves boxes and says /v1/app is not there yet;
+// phones read through the relay meanwhile.
+func TestWithoutANoiseKeyTheAppEndpointIsOff(t *testing.T) {
+	s, home := newServer(t)
+	s.App = nil
+	w := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/v1/app?home="+home, nil))
+	if w.Code != http.StatusNotImplemented {
+		t.Fatalf("/v1/app without a Noise key: %d", w.Code)
+	}
+}

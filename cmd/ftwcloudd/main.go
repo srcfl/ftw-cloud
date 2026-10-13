@@ -60,7 +60,7 @@ func serve(args []string) error {
 	domain := fs.String("domain", "cloud.ftw.energy", "name to get a certificate for")
 	stateDir := fs.String("state", "/state", "directory for the registry and certificates")
 	keyPath := fs.String("service-key", "/run/secrets/ftw-cloud-service.key", "service key, PEM")
-	noisePath := fs.String("noise-key", "/run/secrets/ftw-cloud-noise.key", "Noise key phones dial, PEM")
+	noisePath := fs.String("noise-key", "/run/secrets/ftw-cloud-noise.key", "Noise key phones dial, PEM; without it /v1/app is off")
 	certFile := fs.String("tls-cert", "", "certificate file, instead of ACME (local tests)")
 	keyFile := fs.String("tls-key", "", "certificate key file, with -tls-cert")
 	email := fs.String("acme-email", "", "contact for the certificate authority")
@@ -72,8 +72,13 @@ func serve(args []string) error {
 	if err != nil {
 		return err
 	}
+	// Phones read through /v1/app only with a Noise key. A host without one
+	// still serves boxes, and the app reads through the relay meanwhile.
 	noise, err := loadNoiseKey(*noisePath)
-	if err != nil {
+	noiseOn := err == nil
+	if errors.Is(err, os.ErrNotExist) {
+		log.Warn("no Noise key: phones cannot read from FTW Cloud until one is installed", "path", *noisePath)
+	} else if err != nil {
 		return err
 	}
 	reg, err := registry.Open(filepath.Join(*stateDir, "registry.db"))
@@ -85,9 +90,11 @@ func serve(args []string) error {
 	st := store.New(nil)
 	st.UseSuspensions(reg.Suspended)
 	up := uplink.New(st, reg, key, log)
-	app := appsession.New(st, reg, up, noise, log)
-	up.OnConnect = app.BoxConnected
-	srv := &server.Server{Store: st, Registry: reg, Uplink: up, App: app, Log: log}
+	srv := &server.Server{Store: st, Registry: reg, Uplink: up, Log: log}
+	if noiseOn {
+		srv.App = appsession.New(st, reg, up, noise, log)
+		up.OnConnect = srv.App.BoxConnected
+	}
 
 	// TLS ends here and nowhere else: each box binds its handshake to this
 	// TLS session, so a terminating proxy in front would break it. A plain

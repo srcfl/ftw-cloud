@@ -96,6 +96,11 @@ curl -X POST http://127.0.0.1:8080/api/cloud/grant \
 curl http://127.0.0.1:8080/api/cloud/preview
 ```
 
+Without `-noise-key` (or with the file missing) the service still serves
+boxes, and `/v1/app` answers 501: phones read through the relay until a
+Noise key is installed. A host that should serve phones needs the key as a
+second secret beside the service key.
+
 `-tags ftwclouddev` adds `/dev/held?home=<id>` on loopback, which shows what
 the service holds so a test can compare it with the preview. Release builds
 do not have it.
