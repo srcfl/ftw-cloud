@@ -7,12 +7,17 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
+	"os"
+	"path/filepath"
 	"slices"
+	"sync"
 	"time"
 
+	"github.com/srcfl/ftw-cloud/internal/apns"
 	"github.com/srcfl/ftw-cloud/internal/push"
 	"github.com/srcfl/ftw-cloud/internal/registry"
 	"github.com/srcfl/ftw/go/protocol/cloudwire"
@@ -68,6 +73,38 @@ func serveDevPush(ctx context.Context, addr string, reg *registry.Registry, svc 
 	}()
 	log.Warn("development build: tokens can be registered by hand", "addr", addr)
 	return nil
+}
+
+// captureSender writes each alert to dir as <n>.json, {environment,
+// deviceToken, payload}, and tells the service Apple took it. A test hands
+// the payload to a simulator with xcrun simctl push.
+func captureSender(dir string) (push.Sender, error) {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return nil, err
+	}
+	return &capture{dir: dir}, nil
+}
+
+type capture struct {
+	mu  sync.Mutex
+	dir string
+	n   int
+}
+
+func (c *capture) Send(_ context.Context, n apns.Notification) (apns.Result, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.n++
+	raw, err := json.Marshal(map[string]any{"environment": n.Environment,
+		"deviceToken": hex.EncodeToString(n.DeviceToken), "payload": json.RawMessage(n.Payload)})
+	if err != nil {
+		return apns.Result{}, err
+	}
+	name := filepath.Join(c.dir, fmt.Sprintf("%04d.json", c.n))
+	if err := os.WriteFile(name+".tmp", raw, 0o600); err != nil {
+		return apns.Result{}, err
+	}
+	return apns.Result{Status: http.StatusOK}, os.Rename(name+".tmp", name)
 }
 
 // rosterDevice finds a device in the roster the box last signed, with its

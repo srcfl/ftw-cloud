@@ -65,6 +65,7 @@ func serve(args []string) error {
 	apnsDir := fs.String("apns-dir", "/run/secrets/apns", "directory with Apple's key.p8, key-id and team-id; without it no alert is sent")
 	apnsTopic := fs.String("apns-topic", "energy.ftw.app", "the app's bundle id")
 	devPush := fs.String("dev-push-listen", "", "loopback address for registering a token by hand (development builds only)")
+	devCapture := fs.String("dev-apns-capture", "", "write each alert to this directory instead of sending it to Apple (development builds only)")
 	_ = fs.Parse(args)
 
 	harden()
@@ -90,6 +91,10 @@ func serve(args []string) error {
 	switch client, err := loadAPNs(*apnsDir, *apnsTopic); {
 	case err != nil:
 		return err
+	case *devCapture != "":
+		if sender, err = captureSender(*devCapture); err != nil {
+			return err
+		}
 	case client == nil:
 		log.Warn("APNs off: no key in " + *apnsDir)
 	default:
