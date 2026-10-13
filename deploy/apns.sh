@@ -19,27 +19,37 @@ cat > /usr/local/sbin/ftw-cloud-apns <<'FETCH'
 # Without the parameters ftwcloudd runs and sends no alerts.
 set -euo pipefail
 export AWS_PAGER=""
-region=eu-north-1
-dir=/run/ftw-cloud/apns
 umask 077
+dir=/run/ftw-cloud/apns
 install -d -m 0700 /run/ftw-cloud
-rm -rf "$dir.new"
-install -d -m 0700 "$dir.new"
+new=$(mktemp -d /run/ftw-cloud/apns.XXXXXX)
+trap 'rm -rf "$new"' EXIT
+# get NAME FILE: 0 when read, 1 when the parameter does not exist. At boot
+# the network and the instance's credentials may lag a little.
 get() {
-  aws ssm get-parameter --region "$region" --name "$1" --with-decryption \
-    --query Parameter.Value --output text > "$dir.new/$2"
+  local err
+  for try in $(seq 30); do
+    if err=$(aws ssm get-parameter --region eu-north-1 --name "$1" --with-decryption \
+        --query Parameter.Value --output text 2>&1 >"$new/$2"); then
+      return 0
+    fi
+    case "$err" in *ParameterNotFound*) return 1 ;; esac
+    [ "$try" -lt 30 ] || { echo "$err" >&2; exit 1; }
+    sleep 2
+  done
 }
-if get /ftw-cloud/apns/key key.p8 && get /ftw-cloud/apns/key-id key-id && get /ftw-cloud/apns/team-id team-id; then
-  chown -R 65532:65532 "$dir.new"
-  chmod 0400 "$dir.new"/*
-  chmod 0500 "$dir.new"
-  rm -rf "$dir"
-  mv "$dir.new" "$dir"
-  echo "APNs key in place"
-else
-  rm -rf "$dir.new"
+if ! get /ftw-cloud/apns/key key.p8 || ! get /ftw-cloud/apns/key-id key-id || ! get /ftw-cloud/apns/team-id team-id; then
   echo "no APNs key in Parameter Store; ftwcloudd will send no alerts"
+  exit 0
 fi
+grep -q '^-----BEGIN PRIVATE KEY-----$' "$new/key.p8"
+chown -R 65532:65532 "$new"
+chmod 0400 "$new"/*
+chmod 0500 "$new"
+rm -rf "$dir"
+mv "$new" "$dir"
+trap - EXIT
+echo "APNs key in place"
 FETCH
 chmod 0755 /usr/local/sbin/ftw-cloud-apns
 

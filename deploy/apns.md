@@ -59,3 +59,8 @@ decrypting through SSM for every principal in the account. Checked on
 2026-10-13 with `iam simulate-principal-policy` (`ssm:GetParameter` allowed)
 and the key policy of `alias/aws/ssm` in eu-north-1. Secrets Manager would
 need a policy change; Parameter Store does not.
+
+srcfl/ftw-cloud#3 moves the service key to Secrets Manager with an inline
+policy for that one secret. The APNs key could follow it there: one more ARN
+in `deploy/host-policy.json`, applied by the owner, and `get-secret-value`
+in `apns.sh`. Nothing else changes.
