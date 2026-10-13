@@ -223,6 +223,7 @@ func (s *Service) BoxGone(home, why string) {
 	if why == cloudwire.ByeUpdate {
 		wait = time.Duration(cloudwire.UpdateGraceMs) * time.Millisecond
 	}
+	s.log.Info("a box went away", "bye", why, "out_of_reach_after", wait)
 	gen := st.gen
 	st.stop = s.after(wait, func() { s.unreachable(home, gen) })
 }
@@ -236,6 +237,7 @@ func (s *Service) unreachable(home string, gen uint64) {
 	}
 	st.told, st.stop = true, nil
 	s.mu.Unlock()
+	s.log.Info("a box is out of reach; telling its phones")
 	payload, err := cloudwire.AlertPayload(cloudwire.Alert{Home: home, Kind: protocol.PushBoxUnreachable})
 	if err != nil {
 		return
