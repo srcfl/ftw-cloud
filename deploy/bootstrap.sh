@@ -142,15 +142,14 @@ if ! [[ $rev =~ ^[0-9a-f]{40}$ ]] || ! git merge-base --is-ancestor "$rev" origi
 fi
 git checkout --quiet --detach "$rev"
 
-# Fetch the key again, so a new version in Secrets Manager takes effect.
-systemctl restart ftw-cloud-key.service
-
 printf 'FTW_CLOUD_IMAGE=%s\n' "$image" > "$env"
-cd deploy
-# Always a new container. A file mounted on its own, such as the key, keeps
-# the copy the container started with even after the file on the host
-# changes; only a new container reads it again.
-docker compose --env-file "$env" up -d --force-recreate
+# One transaction, in order: the key comes fresh from Secrets Manager, so a
+# new version takes effect, then ftw-cloud.service takes the container down
+# and starts a new one. Always a new container: a file mounted on its own,
+# such as the key, keeps the copy the container started with. Never run
+# compose beside this; ftw-cloud.service requires the key unit, so systemd
+# restarts it with the key anyway, and two composes at once collide.
+systemctl restart ftw-cloud-key.service ftw-cloud.service
 docker image prune --all --force >/dev/null
 echo "$image running, built from $rev"
 DEPLOY
