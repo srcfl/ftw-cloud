@@ -197,6 +197,7 @@ Cloud data; the images on `ghcr.io` hold only code.
 
 ## Not here yet
 
-APNs (C4), the app session (C3), widget tokens (C5) and statistics (C7–C8)
-add secrets, egress and storage when they land. The erase test, canary homes
+The APNs key ([apns.md](apns.md)) and the Noise key phones dial
+([noise.md](noise.md)) come from Parameter Store. Widget tokens (C5) and
+statistics (C7–C8) add secrets, egress and storage when they land. The erase test, canary homes
 and the external heartbeat that pages Sourceful belong with the first homes.
