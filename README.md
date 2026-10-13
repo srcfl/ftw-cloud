@@ -94,7 +94,10 @@ curl http://127.0.0.1:8080/api/cloud/preview
 the service holds so a test can compare it with the preview, and
 `-dev-push-listen 127.0.0.1:18444`, where `POST /dev/push/register` with
 `{home, deviceId, apnsToken (hex), environment}` registers a token for a
-device in the home's roster, as the app session will. `-apns-dir` names a
+device in the home's roster, as the app session will; `POST /dev/push/raw`
+with `{home, payload}` sends a payload as it is, so a test can put a forged
+one through Apple. `-dev-apns-capture <dir>` writes alerts to files instead
+of sending them. `-apns-dir` names a
 directory holding `key.p8`, `key-id` and `team-id`; without it nothing is
 sent. Release builds have neither dev route.
 

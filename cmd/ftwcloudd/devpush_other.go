@@ -17,6 +17,6 @@ func captureSender(string) (push.Sender, error) {
 }
 
 // serveDevPush exists only in development builds.
-func serveDevPush(context.Context, string, *registry.Registry, *push.Service, *slog.Logger) error {
+func serveDevPush(context.Context, string, *registry.Registry, *push.Service, push.Sender, *slog.Logger) error {
 	return errors.New("-dev-push-listen needs a build with -tags ftwclouddev")
 }

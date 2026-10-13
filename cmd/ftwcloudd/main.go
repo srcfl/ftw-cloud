@@ -143,7 +143,7 @@ func serve(args []string) error {
 	go srv.Upkeep(ctx, time.Minute)
 	go pushSvc.Run(ctx)
 	if *devPush != "" {
-		if err := serveDevPush(ctx, *devPush, reg, pushSvc, log); err != nil {
+		if err := serveDevPush(ctx, *devPush, reg, pushSvc, sender, log); err != nil {
 			return err
 		}
 	}

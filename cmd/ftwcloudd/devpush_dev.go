@@ -23,11 +23,16 @@ import (
 	"github.com/srcfl/ftw/go/protocol/cloudwire"
 )
 
-// serveDevPush listens on loopback for POST /dev/push/register, which
-// registers an APNs token for a device in a home's signed roster, as the
-// app's session will. It lets an end-to-end test run before the app session
-// can. Release builds do not have it.
-func serveDevPush(ctx context.Context, addr string, reg *registry.Registry, svc *push.Service, log *slog.Logger) error {
+// serveDevPush listens on loopback for two routes. Release builds have
+// neither.
+//
+//   - POST /dev/push/register registers an APNs token for a device in a
+//     home's signed roster, as the app's session will, so an end-to-end test
+//     can run before the app session can.
+//   - POST /dev/push/raw {home, payload} sends a payload as it is to the
+//     home's registered phones, so a test can put a forged one through Apple
+//     and see the phone refuse it.
+func serveDevPush(ctx context.Context, addr string, reg *registry.Registry, svc *push.Service, sender push.Sender, log *slog.Logger) error {
 	host, _, err := net.SplitHostPort(addr)
 	if err != nil || !net.ParseIP(host).IsLoopback() {
 		return errors.New("-dev-push-listen must be a loopback address")
@@ -60,6 +65,32 @@ func serveDevPush(ctx context.Context, addr string, reg *registry.Registry, svc 
 			return
 		}
 		w.WriteHeader(http.StatusNoContent)
+	})
+	mux.HandleFunc("POST /dev/push/raw", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Home    string          `json:"home"`
+			Payload json.RawMessage `json:"payload"`
+		}
+		if json.NewDecoder(r.Body).Decode(&req) != nil || len(req.Payload) == 0 {
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+		if sender == nil {
+			http.Error(w, "no APNs key", http.StatusServiceUnavailable)
+			return
+		}
+		regs, err := reg.PushRegs(req.Home, cloudwire.PushKindAlert)
+		if err != nil || len(regs) == 0 {
+			http.Error(w, "no phone registered for that home", http.StatusNotFound)
+			return
+		}
+		var out []string
+		for _, x := range regs {
+			res, err := sender.Send(r.Context(), apns.Notification{Environment: x.Environment, DeviceToken: x.Token,
+				Payload: req.Payload, Expiration: time.Now().Add(10 * time.Minute)})
+			out = append(out, fmt.Sprintf("%d %s %v", res.Status, res.Reason, err))
+		}
+		_ = json.NewEncoder(w).Encode(out)
 	})
 	srv := &http.Server{Addr: addr, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 	go func() {
