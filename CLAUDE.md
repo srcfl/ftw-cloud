@@ -35,7 +35,7 @@ maintains it.
 - Keep the service small. The budget is about 3,000 lines of Go; tiles go
   first if it is overrun.
 - Nothing is deployed from here without the owner. `deploy/` describes the
-  intended host; it does not run itself.
+  running host; it does not run itself.
 - Keep task breakdowns and agent notes out of the repository.
 
 ## Check
