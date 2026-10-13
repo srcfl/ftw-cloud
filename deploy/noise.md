@@ -44,12 +44,16 @@ aws ssm send-command --region eu-north-1 --instance-ids i-0ecac4cbc6b5f8adc \
 Then, from anywhere:
 
 ```bash
-curl -s -o /dev/null -w '%{http_code}\n' 'https://cloud.ftw.energy/v1/app?home=aaaaaaaaaaaaaaaaaaaaaaaaaa'
+curl -s --http1.1 -o /dev/null -w '%{http_code}\n' --max-time 4 \
+  -H 'Connection: Upgrade' -H 'Upgrade: websocket' -H 'Sec-WebSocket-Version: 13' \
+  -H 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==' \
+  'https://cloud.ftw.energy/v1/app?home=aaaaaaaaaaaaaaaaaaaaaaaaaa'
 ```
 
-It says 426 (the socket wants an upgrade) instead of 501. The start line in
-the log, `ftwcloudd listening … noise_key=…`, shows the public half from
-step 1.
+It prints 101 and then times out, because the service waits for Noise
+message 1. Without the key it prints 501. Without the WebSocket headers it
+prints 400 either way, so leave them in. The start line in the log,
+`ftwcloudd listening … noise_key=…`, shows the public half from step 1.
 
 ## 4. Put the public half in the app
 
