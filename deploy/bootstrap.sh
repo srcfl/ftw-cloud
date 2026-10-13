@@ -20,7 +20,8 @@ printf '[Coredump]\nStorage=none\nProcessSizeMax=0\n' > /etc/systemd/coredump.co
 printf '* hard core 0\n' > /etc/security/limits.d/ftw-cloud.conf
 
 # No SSH, not even behind the security group. Administration is through SSM.
-systemctl disable --now sshd.service
+# cloud-init wants sshd at every boot, so disabling it is not enough.
+systemctl mask --now sshd.service
 
 # Docker, Compose and buildx, as the relay host does it.
 dnf install -y docker git
