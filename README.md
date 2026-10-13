@@ -21,8 +21,9 @@ to it yet.
 - Each home's newest message of each class lives in memory, as the exact bytes
   the box sent. Readings are dropped an hour after the box goes quiet and are
   never written to disk.
-- The registry (SQLite) holds the home id, the box key and the signed roster.
-  A box that turns FTW Cloud off gets its home deleted and a signed receipt.
+- The registry (SQLite) holds the home id, the box key, the signed roster and
+  owners' suspensions. A box that turns FTW Cloud off gets its home deleted
+  and a signed receipt.
 - `/source` serves the source of the running build, as AGPL-3.0 asks.
 - A phone reads its home at `/v1/app?home=<id>`: Noise IK to the service's
   Noise key, with the home id in the prologue. The service admits only a
@@ -55,7 +56,7 @@ box ──wss, TLS 1.3, signed frames──▶ /v1/box ──▶ store (memory) 
   signed `hello`, never from a field anyone sends. A second box cannot claim
   a home that is not its own.
 - **One way in.** `store.For(principal)` is the only access to a home: a
-  `Box` principal may write its own home, and a `Device` principal (C3) may
+  `Box` principal may write its own home, and a `Device` principal may
   read the classes its role and the owner's grant both allow. There is no
   listing and no principal for staff; `TestNoRouteReadsAHome` checks every
   route.
