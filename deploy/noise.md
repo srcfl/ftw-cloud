@@ -2,12 +2,13 @@
 
 A phone reads its home at `/v1/app` over Noise IK to the service's static
 X25519 key, and the app carries the public half. Without the key the service
-serves boxes, and `/v1/app` answers 501. Only the owner handles the private
-key: he makes it and puts it in AWS Systems Manager Parameter Store himself.
+serves boxes, and `/v1/app` answers 501. Make the private key on a machine
+signed in to the account and put it straight into AWS Systems Manager
+Parameter Store; delete the file once it is there.
 The host reads it from there into tmpfs at every boot. It is never in the
 repository, the image, the volume or a log.
 
-## 1. Make the key (owner, once)
+## 1. Make the key (once)
 
 From a checkout of this repository:
 
@@ -18,7 +19,7 @@ go run ./cmd/ftwcloudd keygen -noise -out /tmp/ftw-cloud-noise.key
 It writes the private key and prints the public half (base64url, 43
 characters). Keep the public half: the app needs it in step 4.
 
-## 2. Put it in Parameter Store (owner, once)
+## 2. Put it in Parameter Store (once)
 
 In a terminal signed in to the FTW Cloud account (976075258475):
 

@@ -1,6 +1,6 @@
 #!/bin/bash
 # Give ftwcloudd the Noise key phones dial. Run as root on the FTW Cloud host
-# through SSM, after the owner has put the key in Parameter Store
+# through SSM, once the key is in Parameter Store
 # (deploy/noise.md). Safe to re-run.
 #
 # The key rests only in Parameter Store, as a SecureString under the
