@@ -20,6 +20,7 @@ services:
       - -state=/state
       - -service-key=/run/secrets/ftw-cloud-service.key
       - -acme-email=${FTW_CLOUD_ACME_EMAIL:-}
+      - -noise-key=/run/secrets/noise/noise.key
     environment:
       # /source publishes it, so anyone can compare it with what CI built.
       FTW_CLOUD_IMAGE: ${FTW_CLOUD_IMAGE}
@@ -29,6 +30,10 @@ services:
       # Apple's push key, read from Parameter Store into tmpfs at boot by
       # deploy/apns.sh. Empty means no alerts, and the service runs.
       - /run/ftw-cloud/apns:/run/secrets/apns:ro
+      # The Noise key phones dial, read from Parameter Store into tmpfs at
+      # boot by deploy/noise.sh. Empty means /v1/app is off, and the
+      # service runs.
+      - /run/ftw-cloud/noise:/run/secrets/noise:ro
     secrets:
       - ftw-cloud-service.key
     read_only: true
