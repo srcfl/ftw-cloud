@@ -12,7 +12,7 @@ both in `srcfl/ftw`. Both are proposed. The service runs at
 `cloud.ftw.energy` ([deploy/README.md](deploy/README.md)), but no box sends
 to it yet.
 
-## What works today (C2, C3)
+## What works today (C2, C3, C4)
 
 - A box with FTW Cloud on keeps one WebSocket at `/v1/box`. The service
   checks that the box signed `hello` over this TLS session's exporter value,
@@ -36,12 +36,20 @@ to it yet.
   asks again every 50 s; when nobody looks, it stops.
 - Limits per home: 16 sessions, one per device, 256 envelopes queued per
   phone, and a small message rate from each phone.
+- **Alerts (C4).** A box's signed `event` goes to its phones through APNs,
+  wrapped unchanged: the phone checks the signature, writes its own words and
+  picks the buttons from the verified kind. Every alert has the same aps,
+  priority and push type and no collapse id. Ten minutes without the box's
+  socket sends `box.unreachable`, unless the box said `bye` for an update,
+  which holds it back for an hour. Tokens are bound to roster entries that
+  may read `ftw.events.read` and go when the roster drops them or Apple says
+  they are gone. Apple's key comes from Parameter Store
+  ([deploy/apns.md](deploy/apns.md)).
 
 Not built yet, with a marked place in the code:
 
 | Step | What | Where |
 |---|---|---|
-| C4 | Alerts over APNs, `box.unreachable` | not started |
 | C5 | Widget token reads, `/v1/now`, tiles | `internal/server` |
 | C7–C8 | Statistics | not started |
 
@@ -105,8 +113,15 @@ Noise key is installed. A host that should serve phones needs the key as a
 second secret beside the service key.
 
 `-tags ftwclouddev` adds `/dev/held?home=<id>` on loopback, which shows what
-the service holds so a test can compare it with the preview. Release builds
-do not have it.
+the service holds so a test can compare it with the preview, and
+`-dev-push-listen 127.0.0.1:18444`, where `POST /dev/push/register` with
+`{home, deviceId, apnsToken (hex), environment}` registers a token for a
+device in the home's roster, as the app session will; `POST /dev/push/raw`
+with `{home, payload}` sends a payload as it is, so a test can put a forged
+one through Apple. `-dev-apns-capture <dir>` writes alerts to files instead
+of sending them. `-apns-dir` names a
+directory holding `key.p8`, `key-id` and `team-id`; without it nothing is
+sent. Release builds have neither dev route.
 
 ## Develop
 

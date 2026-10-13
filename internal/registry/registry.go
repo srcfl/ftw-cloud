@@ -44,7 +44,7 @@ type Home struct {
 
 // Open opens or creates the registry at path.
 func Open(path string) (*Registry, error) {
-	db, err := sql.Open("sqlite", "file:"+path+"?_pragma=journal_mode(WAL)&_pragma=secure_delete(ON)&_pragma=busy_timeout(5000)")
+	db, err := sql.Open("sqlite", "file:"+path+"?_pragma=journal_mode(WAL)&_pragma=secure_delete(ON)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)")
 	if err != nil {
 		return nil, err
 	}
@@ -72,6 +72,10 @@ CREATE TABLE IF NOT EXISTS suspensions (
 	PRIMARY KEY (home, device_id)
 );`)
 	if err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("registry: schema: %w", err)
+	}
+	if err := createPushTable(db); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("registry: schema: %w", err)
 	}

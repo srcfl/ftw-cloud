@@ -20,9 +20,13 @@ services:
       - -state=/state
       - -service-key=/run/secrets/ftw-cloud-service.key
       - -acme-email=${FTW_CLOUD_ACME_EMAIL:-}
+      - -apns-dir=/run/secrets/apns
     volumes:
       # The registry and certificates. No readings are ever written here.
       - ftw-cloud-state:/state
+      # Apple's push key, read from Parameter Store into tmpfs at boot by
+      # deploy/apns.sh. Empty means no alerts, and the service runs.
+      - /run/ftw-cloud/apns:/run/secrets/apns:ro
     secrets:
       - ftw-cloud-service.key
     read_only: true

@@ -27,10 +27,13 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
+	"github.com/srcfl/ftw-cloud/internal/apns"
 	"github.com/srcfl/ftw-cloud/internal/appsession"
+	"github.com/srcfl/ftw-cloud/internal/push"
 	"github.com/srcfl/ftw-cloud/internal/registry"
 	"github.com/srcfl/ftw-cloud/internal/server"
 	"github.com/srcfl/ftw-cloud/internal/store"
@@ -64,6 +67,10 @@ func serve(args []string) error {
 	certFile := fs.String("tls-cert", "", "certificate file, instead of ACME (local tests)")
 	keyFile := fs.String("tls-key", "", "certificate key file, with -tls-cert")
 	email := fs.String("acme-email", "", "contact for the certificate authority")
+	apnsDir := fs.String("apns-dir", "/run/secrets/apns", "directory with Apple's key.p8, key-id and team-id; without it no alert is sent")
+	apnsTopic := fs.String("apns-topic", "energy.ftw.app", "the app's bundle id")
+	devPush := fs.String("dev-push-listen", "", "loopback address for registering a token by hand (development builds only)")
+	devCapture := fs.String("dev-apns-capture", "", "write each alert to this directory instead of sending it to Apple (development builds only)")
 	_ = fs.Parse(args)
 
 	harden()
@@ -91,9 +98,37 @@ func serve(args []string) error {
 	st.UseSuspensions(reg.Suspended)
 	up := uplink.New(st, reg, key, log)
 	srv := &server.Server{Store: st, Registry: reg, Uplink: up, Log: log}
+
+	// Alerts: the box's signed events to its phones through Apple, and
+	// box.unreachable when a box is away. Without a key the service keeps
+	// registrations and sends nothing.
+	var sender push.Sender
+	switch client, err := loadAPNs(*apnsDir, *apnsTopic); {
+	case err != nil:
+		return err
+	case *devCapture != "":
+		if sender, err = captureSender(*devCapture); err != nil {
+			return err
+		}
+	case client == nil:
+		log.Warn("APNs off: no key in " + *apnsDir)
+	default:
+		sender = client
+	}
+	pushSvc := push.New(reg, sender, log)
+	up.OnEvent = pushSvc.Event
+	up.OnRoster = pushSvc.Roster
+	up.OnGone = pushSvc.BoxGone
+
 	if noiseOn {
 		srv.App = appsession.New(st, reg, up, noise, log)
-		up.OnConnect = srv.App.BoxConnected
+	}
+	app := srv.App
+	up.OnConnect = func(home string) {
+		if app != nil {
+			app.BoxConnected(home)
+		}
+		pushSvc.BoxConnected(home)
 	}
 
 	// TLS ends here and nowhere else: each box binds its handshake to this
@@ -131,6 +166,12 @@ func serve(args []string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	go srv.Upkeep(ctx, time.Minute)
+	go pushSvc.Run(ctx)
+	if *devPush != "" {
+		if err := serveDevPush(ctx, *devPush, reg, pushSvc, sender, log); err != nil {
+			return err
+		}
+	}
 	go func() {
 		<-ctx.Done()
 		shutdown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -148,6 +189,32 @@ func serve(args []string) error {
 }
 
 func log0() *log.Logger { return log.New(io.Discard, "", 0) }
+
+// loadAPNs reads Apple's key from dir: key.p8, key-id and team-id, as the
+// host writes them from SSM Parameter Store at boot. No directory or no key
+// is no sender; a key that is there and wrong is an error.
+func loadAPNs(dir, topic string) (*apns.Client, error) {
+	p8, err := os.ReadFile(filepath.Join(dir, "key.p8"))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("apns key: %w", err)
+	}
+	read := func(name string) (string, error) {
+		b, err := os.ReadFile(filepath.Join(dir, name))
+		return strings.TrimSpace(string(b)), err
+	}
+	keyID, err := read("key-id")
+	if err != nil {
+		return nil, fmt.Errorf("apns key id: %w", err)
+	}
+	teamID, err := read("team-id")
+	if err != nil {
+		return nil, fmt.Errorf("apns team id: %w", err)
+	}
+	return apns.New(apns.Config{Key: p8, KeyID: keyID, TeamID: teamID, Topic: topic})
+}
 
 func loadServiceKey(path string) (*ecdsa.PrivateKey, error) {
 	raw, err := os.ReadFile(path)
