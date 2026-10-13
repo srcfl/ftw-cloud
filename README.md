@@ -23,7 +23,8 @@ to it yet.
   never written to disk.
 - The registry (SQLite) holds the home id, the box key and the signed roster.
   A box that turns FTW Cloud off gets its home deleted and a signed receipt.
-- `/source` serves the source of the running build, as AGPL-3.0 asks.
+- `/source` serves the source of the running build, as AGPL-3.0 asks, and
+  names its commit and image digest.
 
 Not built yet, with a marked place in the code:
 
