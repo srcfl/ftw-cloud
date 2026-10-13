@@ -1,0 +1,29 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.26'
+      - run: go vet ./...
+      - run: go test -race -count=1 ./...
+      # The local inspection route exists only under this tag; the suite
+      # must pass with it too, and TestNoRouteReadsAHome must pass without.
+      - run: go test -count=1 -tags ftwclouddev ./...
+      - name: FTW Cloud imports only the wire format from srcfl/ftw
+        run: bash scripts/check-imports.sh
+      - name: What a box can send never panics the service
+        run: go test -run XXX -fuzz FuzzBoxMessage -fuzztime 30s ./internal/uplink
+      - name: Builds for the host
+        run: GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -o /dev/null ./cmd/ftwcloudd
