@@ -165,3 +165,98 @@ func TestDeleteForgetsTheHome(t *testing.T) {
 		t.Fatal("a deleted home still answers")
 	}
 }
+
+// A session's snapshot and stream join without a gap: what the box sends
+// after Open reaches the session, and nothing before it does twice.
+func TestASessionMissesNothingAfterItsSnapshot(t *testing.T) {
+	s, box, _ := filled(t)
+	dev, _ := s.For(Principal{Kind: Device, Home: "h1", DeviceKey: viewerKey})
+	snap, sess, err := dev.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sess.Close()
+	if len(snap.Envelopes) != 3 {
+		t.Fatalf("snapshot held %d", len(snap.Envelopes))
+	}
+	_ = box.Put(cloudwire.MsgPlan, []byte("plan-2"), 8, false) // outside the viewer's scope
+	_ = box.Put(cloudwire.MsgLive, []byte("live-3"), 9, false)
+	select {
+	case got := <-sess.C():
+		if string(got) != "live-3" {
+			t.Fatalf("the session got %q", got)
+		}
+	default:
+		t.Fatal("nothing reached the session")
+	}
+	select {
+	case got := <-sess.C():
+		t.Fatalf("the session also got %q", got)
+	default:
+	}
+}
+
+// A phone too far behind is ended, never allowed to stall the box.
+func TestASlowSessionIsEndedNotWaitedFor(t *testing.T) {
+	s, box, _ := filled(t)
+	dev, _ := s.For(Principal{Kind: Device, Home: "h1", DeviceKey: ownerKey})
+	_, sess, _ := dev.Open()
+	for i := range SessionQueue + 1 {
+		_ = box.Put(cloudwire.MsgHB, []byte("hb"), uint64(100+i), false)
+	}
+	select {
+	case <-sess.Done():
+	default:
+		t.Fatal("a full queue left the session open")
+	}
+	if sess.Code() != closeSlow {
+		t.Fatalf("ended with %d", sess.Code())
+	}
+}
+
+func TestARosterThatRunsOutEndsSessions(t *testing.T) {
+	s, _, c := filled(t)
+	dev, _ := s.For(Principal{Kind: Device, Home: "h1", DeviceKey: ownerKey})
+	_, sess, _ := dev.Open()
+	c.t = c.t.Add(24*time.Hour + time.Second)
+	s.Sweep()
+	select {
+	case <-sess.Done():
+	default:
+		t.Fatal("an expired roster left a session open")
+	}
+	if sess.Code() != cloudwire.CloseDenied {
+		t.Fatalf("ended with %d", sess.Code())
+	}
+}
+
+func TestForgettingAHomeEndsItsSessions(t *testing.T) {
+	s, _, _ := filled(t)
+	dev, _ := s.For(Principal{Kind: Device, Home: "h1", DeviceKey: ownerKey})
+	_, sess, _ := dev.Open()
+	s.Forget("h1")
+	select {
+	case <-sess.Done():
+	default:
+		t.Fatal("a forgotten home kept a session")
+	}
+}
+
+// A suspended device is refused, and only at the epoch it was suspended at.
+func TestSuspensionsAreConsultedOnEveryAdmission(t *testing.T) {
+	s, _, _ := filled(t)
+	s.UseSuspensions(func(home, id string, epoch uint64) bool { return home == "h1" && id == "viewer" && epoch == 0 })
+	if _, err := s.For(Principal{Kind: Device, Home: "h1", DeviceKey: viewerKey}); !errors.Is(err, ErrDenied) {
+		t.Fatal("a suspended device was admitted")
+	}
+	if _, err := s.For(Principal{Kind: Device, Home: "h1", DeviceKey: ownerKey}); err != nil {
+		t.Fatal("the owner was refused with the viewer")
+	}
+}
+
+func TestABoxHandleCannotOpenASession(t *testing.T) {
+	_, box, _ := filled(t)
+	if _, _, err := box.Open(); !errors.Is(err, ErrDenied) {
+		t.Fatal("the box's handle opened a session")
+	}
+}

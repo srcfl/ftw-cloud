@@ -62,6 +62,19 @@ type Uplink struct {
 	// Dropped counts box messages of a type this service does not know. A
 	// newer box works with an older service by this rule.
 	Dropped atomic.Int64
+
+	// OnConnect runs after a box's hello_ok, so the app sessions can ask a
+	// box that just came back for one-second updates and push can stop
+	// waiting to say it is out of reach. Set before serving.
+	OnConnect func(home string)
+	// OnEvent gets each event the box signed, as the envelope it arrived
+	// in; OnRoster each roster the service keeps; OnGone the end of the
+	// home's current uplink, with the reason the box gave in its bye, or
+	// "" when the socket just dropped. Push uses them. Each runs on the
+	// box's goroutine and must not block. Set before serving.
+	OnEvent  func(home string, envelope []byte)
+	OnRoster func(home string, r *cloudwire.Roster)
+	OnGone   func(home, why string)
 }
 
 // New builds the handler. key is the service key that signs hello_ok and
@@ -107,7 +120,7 @@ func (u *Uplink) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // Watch asks a home's box for one-second updates for a minute. The app
-// session (C3) calls it while a phone is looking.
+// sessions call it while a phone is looking.
 func (u *Uplink) Watch(home string) {
 	u.mu.Lock()
 	c := u.conns[home]
@@ -130,6 +143,8 @@ type boxConn struct {
 	pub    *ecdsa.PublicKey
 	handle *store.Handle
 	purged bool
+	// bye is the reason the box gave for leaving, if it gave one.
+	bye string
 
 	tokens   float64
 	refilled time.Time
@@ -192,15 +207,22 @@ func (c *boxConn) run() error {
 		c.u.mu.Unlock()
 		defer func() {
 			c.u.mu.Lock()
-			if c.u.conns[c.home] == c {
+			current := c.u.conns[c.home] == c
+			if current {
 				delete(c.u.conns, c.home)
 			}
 			c.u.mu.Unlock()
+			if current && c.u.OnGone != nil {
+				c.u.OnGone(c.home, c.bye)
+			}
 		}()
 	}
 
 	if err := c.send(helloOK{BoxNonce: hello.BoxNonce, EKM: c.ekm, Have: map[string]string{}, RosterSeq: c.rosterSeq()}); err != nil {
 		return err
+	}
+	if !c.purged && c.u.OnConnect != nil {
+		go c.u.OnConnect(c.home)
 	}
 
 	done := make(chan struct{})
@@ -327,6 +349,7 @@ func (c *boxConn) apply(env cloudwire.Envelope) (stop bool, err error) {
 		if err := cloudwire.Unmarshal(env.B, &b); err != nil {
 			return true, err
 		}
+		c.bye = b.Why
 		if b.Purge {
 			return true, c.purge()
 		}
@@ -343,7 +366,13 @@ func (c *boxConn) apply(env cloudwire.Envelope) (stop bool, err error) {
 	if err != nil {
 		return true, err
 	}
-	return false, c.handle.Put(env.T, raw, h.Seq, env.T == cloudwire.MsgLive && carriesTable(env.B))
+	if err := c.handle.Put(env.T, raw, h.Seq, env.T == cloudwire.MsgLive && carriesTable(env.B)); err != nil {
+		return true, err
+	}
+	if env.T == cloudwire.MsgEvent && c.u.OnEvent != nil {
+		c.u.OnEvent(c.home, raw)
+	}
+	return false, nil
 }
 
 // carriesTable reports whether a live body holds its source table.
@@ -381,11 +410,23 @@ func (c *boxConn) roster(env cloudwire.Envelope) error {
 	if !c.handle.SetRoster(&r) {
 		return nil // older than what is held: ignored
 	}
+	if c.u.OnRoster != nil {
+		c.u.OnRoster(c.home, &r)
+	}
 	raw, err := env.Encode()
 	if err != nil {
 		return err
 	}
-	return c.u.registry.SetRoster(c.home, r.RosterSeq, r.Grant.ID, raw, c.u.now())
+	if err := c.u.registry.SetRoster(c.home, r.RosterSeq, r.Grant.ID, raw, c.u.now()); err != nil {
+		return err
+	}
+	// A device the roster dropped, or whose epoch moved, is no longer
+	// suspended: it is gone, or paired again.
+	epochs := make(map[string]uint64, len(r.Devices))
+	for _, d := range r.Devices {
+		epochs[d.ID] = d.Epoch
+	}
+	return c.u.registry.PruneSuspensions(c.home, epochs)
 }
 
 // purge deletes the home and sends the signed receipt. For a home already

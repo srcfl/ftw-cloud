@@ -70,3 +70,31 @@ func TestHomesWithoutARosterExpire(t *testing.T) {
 		t.Fatalf("after 90 days: %v", gone)
 	}
 }
+
+// A suspension holds at the epoch it was made at, ends when the roster drops
+// the device or pairs it again, and goes with the home.
+func TestASuspensionHoldsUntilTheRosterMovesPastIt(t *testing.T) {
+	r := open(t)
+	now := time.Unix(1_791_820_800, 0)
+	_ = r.Claim("h1", []byte("pk"), now)
+	if err := r.Suspend("h1", "phone", 2, now); err != nil {
+		t.Fatal(err)
+	}
+	if !r.Suspended("h1", "phone", 2) || r.Suspended("h1", "phone", 3) || r.Suspended("h2", "phone", 2) {
+		t.Fatal("a suspension reached past its device and epoch")
+	}
+	if err := r.PruneSuspensions("h1", map[string]uint64{"phone": 2}); err != nil || !r.Suspended("h1", "phone", 2) {
+		t.Fatal("an unchanged roster lifted a suspension")
+	}
+	if err := r.PruneSuspensions("h1", map[string]uint64{"phone": 3}); err != nil || r.Suspended("h1", "phone", 3) {
+		t.Fatal("a new epoch kept the suspension")
+	}
+	_ = r.Suspend("h1", "phone", 3, now)
+	if err := r.PruneSuspensions("h1", map[string]uint64{}); err != nil || r.Suspended("h1", "phone", 3) {
+		t.Fatal("a device the roster dropped stayed suspended")
+	}
+	_ = r.Suspend("h1", "phone", 3, now)
+	if err := r.Purge("h1", nil, now); err != nil || r.Suspended("h1", "phone", 3) {
+		t.Fatal("a purge left the suspension")
+	}
+}

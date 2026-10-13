@@ -2,7 +2,7 @@
 // route is listed in Routes, and TestNoRouteReadsAHome holds the list.
 //
 //	/v1/box   a box's uplink (package uplink)
-//	/v1/app   the app's Noise session to the service: C3, not built yet
+//	/v1/app   a phone's Noise session to the service (package appsession)
 //	/v1/now   an extension's token read: C5, not built yet
 //	/source   the source of the running service, as AGPL-3.0 asks
 //	/healthz  liveness, and nothing about any home
@@ -19,6 +19,7 @@ import (
 	"runtime/debug"
 	"time"
 
+	"github.com/srcfl/ftw-cloud/internal/appsession"
 	"github.com/srcfl/ftw-cloud/internal/registry"
 	"github.com/srcfl/ftw-cloud/internal/store"
 	"github.com/srcfl/ftw-cloud/internal/uplink"
@@ -39,18 +40,20 @@ type Server struct {
 	Store    *store.Store
 	Registry *registry.Registry
 	Uplink   *uplink.Uplink
-	Log      *slog.Logger
+	// App is nil on a host without a Noise key; /v1/app then says so.
+	App *appsession.Server
+	Log *slog.Logger
 }
 
 // Handler is the whole HTTP surface.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle("/v1/box", s.Uplink)
-	// C3: the app opens a WebSocket here and runs Noise IK to the service's
-	// static key, with prologue "ftw.cloud.v1:" and the home id. The
-	// service admits a phone only through store.For with a Device
-	// principal, and forwards the box's envelopes unchanged.
-	mux.HandleFunc("/v1/app", notYet)
+	if s.App != nil {
+		mux.Handle("/v1/app", s.App)
+	} else {
+		mux.HandleFunc("/v1/app", notYet)
+	}
 	// C5: widgets read the newest live, prices and hb here with a 7-day
 	// token bound to one roster entry.
 	mux.HandleFunc("/v1/now", notYet)

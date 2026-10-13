@@ -19,7 +19,11 @@ maintains it.
 - **The home id comes from the key that signed hello** on this connection,
   never from a body field. Every later box message must verify with that key.
 - **No readings on disk.** Memory holds readings; SQLite holds only the home
-  id, the box key, the signed roster and tombstones. Nothing logs addresses.
+  id, the box key, the signed roster, owners' suspensions and tombstones.
+  Nothing logs addresses.
+- **A phone can only narrow.** On `/v1/app` it can say whether it is looking,
+  and an owner can suspend a roster device. The service admits a phone by the
+  key its Noise handshake proved, and only if the box's roster lists it.
 - **TLS ends in `ftwcloudd`.** The handshake is bound to the TLS session; a
   terminating proxy breaks it on purpose. A TCP load balancer is fine.
 - **Forward the box's bytes unchanged.** The service cannot sign for a box,

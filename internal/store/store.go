@@ -44,11 +44,17 @@ type Principal struct {
 // ErrDenied is every refusal. It does not say whether the home exists.
 var ErrDenied = errors.New("store: denied")
 
+// ErrBusy is a home with as many phone sessions open as it may have.
+var ErrBusy = errors.New("store: busy")
+
 // Store is every home the service holds.
 type Store struct {
 	mu    sync.Mutex
 	homes map[string]*home
 	now   func() time.Time
+	// suspended reports an owner's suspension of a roster device. Nil
+	// suspends nobody.
+	suspended func(home, deviceID string, epoch uint64) bool
 }
 
 // New starts an empty store. now is for tests; nil uses the clock.
@@ -57,6 +63,12 @@ func New(now func() time.Time) *Store {
 		now = time.Now
 	}
 	return &Store{homes: map[string]*home{}, now: now}
+}
+
+// UseSuspensions sets where owners' suspensions are kept. Call it before
+// serving.
+func (s *Store) UseSuspensions(suspended func(home, deviceID string, epoch uint64) bool) {
+	s.suspended = suspended
 }
 
 type home struct {
@@ -70,6 +82,8 @@ type home struct {
 	online   bool
 	conn     uint64
 	lastSeen time.Time
+	// sessions are the phones reading this home now.
+	sessions map[*Session]struct{}
 }
 
 // Held is one envelope as received.
@@ -85,19 +99,20 @@ type Handle struct {
 	id   string
 	h    *home
 	kind Kind
-	// scopes is a device's effective scope: its roster scopes intersected
-	// with the grant's.
+	// device is the roster entry a device principal matched, and scopes its
+	// effective scope: its roster scopes intersected with the grant's.
+	device cloudwire.Device
 	scopes []string
 }
 
 // For returns the principal's access to its home, or ErrDenied. A box may
 // create its home; a device reaches only a home whose current roster lists
-// its key.
+// its key, and only while no owner has suspended it.
 func (s *Store) For(p Principal) (*Handle, error) {
 	s.mu.Lock()
 	h := s.homes[p.Home]
 	if h == nil && p.Kind == Box && p.Home != "" {
-		h = &home{latest: map[string]Held{}}
+		h = &home{latest: map[string]Held{}, sessions: map[*Session]struct{}{}}
 		s.homes[p.Home] = h
 	}
 	s.mu.Unlock()
@@ -110,23 +125,38 @@ func (s *Store) For(p Principal) (*Handle, error) {
 	case Device:
 		h.mu.Lock()
 		defer h.mu.Unlock()
-		r := h.roster
-		if r == nil || s.now().After(h.rosterAt.Add(time.Duration(r.TTLS)*time.Second)) {
+		dev, scopes, ok := s.access(p.Home, h, p.DeviceKey)
+		if !ok {
 			return nil, ErrDenied
 		}
-		for _, d := range r.Devices {
-			if bytes.Equal(d.Key, p.DeviceKey) && len(p.DeviceKey) == 32 {
-				var scopes []string
-				for _, sc := range d.Scopes {
-					if slices.Contains(r.Grant.Scopes, sc) {
-						scopes = append(scopes, sc)
-					}
-				}
-				return &Handle{s: s, id: p.Home, h: h, kind: Device, scopes: scopes}, nil
-			}
-		}
+		return &Handle{s: s, id: p.Home, h: h, kind: Device, device: dev, scopes: scopes}, nil
 	}
 	return nil, ErrDenied
+}
+
+// access is the one admission rule for a device: a roster in force that
+// lists its key, and no suspension. The caller holds h.mu.
+func (s *Store) access(id string, h *home, key []byte) (cloudwire.Device, []string, bool) {
+	r := h.roster
+	if r == nil || len(key) != 32 || s.now().After(h.rosterAt.Add(time.Duration(r.TTLS)*time.Second)) {
+		return cloudwire.Device{}, nil, false
+	}
+	for _, d := range r.Devices {
+		if !bytes.Equal(d.Key, key) {
+			continue
+		}
+		if s.suspended != nil && s.suspended(id, d.ID, d.Epoch) {
+			return cloudwire.Device{}, nil, false
+		}
+		var scopes []string
+		for _, sc := range d.Scopes {
+			if slices.Contains(r.Grant.Scopes, sc) {
+				scopes = append(scopes, sc)
+			}
+		}
+		return d, scopes, true
+	}
+	return cloudwire.Device{}, nil, false
 }
 
 // --------------------------------------------------------------------------
@@ -167,6 +197,11 @@ func (x *Handle) Put(t string, env []byte, seq uint64, carriesTable bool) error 
 		x.h.full = &held
 	}
 	x.h.lastSeen = x.s.now()
+	for sess := range x.h.sessions {
+		if sess.x.mayRead(t) {
+			sess.deliver(env)
+		}
+	}
 	return nil
 }
 
@@ -192,7 +227,30 @@ func (x *Handle) SetRoster(r *cloudwire.Roster) bool {
 		return false
 	}
 	x.h.roster, x.h.rosterAt = r, x.s.now()
+	x.recheckLocked()
 	return true
+}
+
+// Recheck ends every session whose access is no longer what it was opened
+// with, as after an owner suspends a device. The phone reconnects and learns
+// its new access, or is refused.
+func (x *Handle) Recheck() {
+	x.h.mu.Lock()
+	defer x.h.mu.Unlock()
+	x.recheckLocked()
+}
+
+func (x *Handle) recheckLocked() {
+	for sess := range x.h.sessions {
+		dev, scopes, ok := x.s.access(x.id, x.h, sess.x.device.Key)
+		switch {
+		case !ok:
+			sess.endLocked(cloudwire.CloseDenied)
+		case dev.ID != sess.x.device.ID || dev.Epoch != sess.x.device.Epoch || dev.Role != sess.x.device.Role ||
+			!slices.Equal(scopes, sess.x.scopes):
+			sess.endLocked(cloudwire.CloseChanged)
+		}
+	}
 }
 
 // Delete forgets the home. Only its box may.
@@ -205,6 +263,9 @@ func (x *Handle) Delete() {
 	x.s.mu.Unlock()
 	x.h.mu.Lock()
 	x.h.latest, x.h.full, x.h.roster = map[string]Held{}, nil, nil
+	for sess := range x.h.sessions {
+		sess.endLocked(cloudwire.CloseDenied)
+	}
 	x.h.mu.Unlock()
 }
 
@@ -228,9 +289,13 @@ func (x *Handle) Snapshot() (Snapshot, error) {
 	}
 	x.h.mu.Lock()
 	defer x.h.mu.Unlock()
+	return x.snapshotLocked(), nil
+}
+
+func (x *Handle) snapshotLocked() Snapshot {
 	out := Snapshot{LastSeenMs: x.h.lastSeen.UnixMilli(), Online: x.h.online}
 	if !x.h.online && x.s.now().Sub(x.h.lastSeen) > ReadingsKeptFor {
-		return out, nil
+		return out
 	}
 	var held []Held
 	for t, e := range x.h.latest {
@@ -245,7 +310,7 @@ func (x *Handle) Snapshot() (Snapshot, error) {
 	for _, e := range held {
 		out.Envelopes = append(out.Envelopes, e.Envelope)
 	}
-	return out, nil
+	return out
 }
 
 func (x *Handle) mayRead(class string) bool {
@@ -272,6 +337,13 @@ func (s *Store) Sweep() {
 		if !h.online && now.Sub(h.lastSeen) > ReadingsKeptFor {
 			h.latest, h.full = map[string]Held{}, nil
 		}
+		// A roster that ran out closes the home's sessions: the box has not
+		// confirmed who may read for a day.
+		if r := h.roster; r != nil && now.After(h.rosterAt.Add(time.Duration(r.TTLS)*time.Second)) {
+			for sess := range h.sessions {
+				sess.endLocked(cloudwire.CloseDenied)
+			}
+		}
 		h.mu.Unlock()
 	}
 }
@@ -280,6 +352,14 @@ func (s *Store) Sweep() {
 // roster. It is called by upkeep, never by a request.
 func (s *Store) Forget(id string) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	h := s.homes[id]
 	delete(s.homes, id)
+	s.mu.Unlock()
+	if h != nil {
+		h.mu.Lock()
+		for sess := range h.sessions {
+			sess.endLocked(cloudwire.CloseDenied)
+		}
+		h.mu.Unlock()
+	}
 }

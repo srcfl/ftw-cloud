@@ -2,12 +2,14 @@
 // home that turned it on, in memory, and serves it to that home's phones. It
 // reads and never controls. See README.md.
 //
-//	ftwcloudd keygen -out service.key   make the service key; prints its public half
-//	ftwcloudd [flags]                   serve
+//	ftwcloudd keygen -out service.key          make the service key; prints its public half
+//	ftwcloudd keygen -noise -out noise.key     make the Noise key phones dial; prints its public half
+//	ftwcloudd [flags]                          serve
 package main
 
 import (
 	"context"
+	"crypto/ecdh"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -25,13 +27,18 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
+	"github.com/srcfl/ftw-cloud/internal/apns"
+	"github.com/srcfl/ftw-cloud/internal/appsession"
+	"github.com/srcfl/ftw-cloud/internal/push"
 	"github.com/srcfl/ftw-cloud/internal/registry"
 	"github.com/srcfl/ftw-cloud/internal/server"
 	"github.com/srcfl/ftw-cloud/internal/store"
 	"github.com/srcfl/ftw-cloud/internal/uplink"
+	"github.com/srcfl/ftw/go/protocol/appwire"
 	"github.com/srcfl/ftw/go/protocol/cloudwire"
 	"golang.org/x/crypto/acme/autocert"
 )
@@ -56,15 +63,29 @@ func serve(args []string) error {
 	domain := fs.String("domain", "cloud.ftw.energy", "name to get a certificate for")
 	stateDir := fs.String("state", "/state", "directory for the registry and certificates")
 	keyPath := fs.String("service-key", "/run/secrets/ftw-cloud-service.key", "service key, PEM")
+	noisePath := fs.String("noise-key", "/run/secrets/ftw-cloud-noise.key", "Noise key phones dial, PEM; without it /v1/app is off")
 	certFile := fs.String("tls-cert", "", "certificate file, instead of ACME (local tests)")
 	keyFile := fs.String("tls-key", "", "certificate key file, with -tls-cert")
 	email := fs.String("acme-email", "", "contact for the certificate authority")
+	apnsDir := fs.String("apns-dir", "/run/secrets/apns", "directory with Apple's key.p8, key-id and team-id; without it no alert is sent")
+	apnsTopic := fs.String("apns-topic", "energy.ftw.app", "the app's bundle id")
+	devPush := fs.String("dev-push-listen", "", "loopback address for registering a token by hand (development builds only)")
+	devCapture := fs.String("dev-apns-capture", "", "write each alert to this directory instead of sending it to Apple (development builds only)")
 	_ = fs.Parse(args)
 
 	harden()
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	key, err := loadServiceKey(*keyPath)
 	if err != nil {
+		return err
+	}
+	// Phones read through /v1/app only with a Noise key. A host without one
+	// still serves boxes, and the app reads through the relay meanwhile.
+	noise, err := loadNoiseKey(*noisePath)
+	noiseOn := err == nil
+	if errors.Is(err, os.ErrNotExist) {
+		log.Warn("no Noise key: phones cannot read from FTW Cloud until one is installed", "path", *noisePath)
+	} else if err != nil {
 		return err
 	}
 	reg, err := registry.Open(filepath.Join(*stateDir, "registry.db"))
@@ -74,7 +95,44 @@ func serve(args []string) error {
 	defer reg.Close()
 
 	st := store.New(nil)
-	srv := &server.Server{Store: st, Registry: reg, Uplink: uplink.New(st, reg, key, log), Log: log}
+	st.UseSuspensions(reg.Suspended)
+	up := uplink.New(st, reg, key, log)
+	srv := &server.Server{Store: st, Registry: reg, Uplink: up, Log: log}
+
+	// Alerts: the box's signed events to its phones through Apple, and
+	// box.unreachable when a box is away. Without a key the service keeps
+	// registrations and sends nothing.
+	var sender push.Sender
+	switch client, err := loadAPNs(*apnsDir, *apnsTopic); {
+	case err != nil:
+		return err
+	case *devCapture != "":
+		if sender, err = captureSender(*devCapture); err != nil {
+			return err
+		}
+	case client == nil:
+		log.Warn("APNs off: no key in " + *apnsDir)
+	default:
+		sender = client
+	}
+	pushSvc := push.New(reg, sender, log)
+	up.OnEvent = pushSvc.Event
+	up.OnRoster = pushSvc.Roster
+	up.OnGone = pushSvc.BoxGone
+
+	// Phones register their tokens over their app session, so without a
+	// Noise key only the development route registers one.
+	if noiseOn {
+		srv.App = appsession.New(st, reg, up, noise, log)
+		srv.App.Push = pushSvc
+	}
+	app := srv.App
+	up.OnConnect = func(home string) {
+		if app != nil {
+			app.BoxConnected(home)
+		}
+		pushSvc.BoxConnected(home)
+	}
 
 	// TLS ends here and nowhere else: each box binds its handshake to this
 	// TLS session, so a terminating proxy in front would break it. A plain
@@ -111,6 +169,12 @@ func serve(args []string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	go srv.Upkeep(ctx, time.Minute)
+	go pushSvc.Run(ctx)
+	if *devPush != "" {
+		if err := serveDevPush(ctx, *devPush, reg, pushSvc, sender, log); err != nil {
+			return err
+		}
+	}
 	go func() {
 		<-ctx.Done()
 		shutdown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -119,7 +183,8 @@ func serve(args []string) error {
 	}()
 
 	pub, _ := cloudwire.PublicKeyBytesOf(&key.PublicKey)
-	log.Info("ftwcloudd listening", "addr", *listen, "service_key", base64.RawURLEncoding.EncodeToString(pub))
+	log.Info("ftwcloudd listening", "addr", *listen, "service_key", base64.RawURLEncoding.EncodeToString(pub),
+		"noise_key", base64.RawURLEncoding.EncodeToString(noise.Public()))
 	if err := httpSrv.ListenAndServeTLS("", ""); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return err
 	}
@@ -127,6 +192,32 @@ func serve(args []string) error {
 }
 
 func log0() *log.Logger { return log.New(io.Discard, "", 0) }
+
+// loadAPNs reads Apple's key from dir: key.p8, key-id and team-id, as the
+// host writes them from SSM Parameter Store at boot. No directory or no key
+// is no sender; a key that is there and wrong is an error.
+func loadAPNs(dir, topic string) (*apns.Client, error) {
+	p8, err := os.ReadFile(filepath.Join(dir, "key.p8"))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("apns key: %w", err)
+	}
+	read := func(name string) (string, error) {
+		b, err := os.ReadFile(filepath.Join(dir, name))
+		return strings.TrimSpace(string(b)), err
+	}
+	keyID, err := read("key-id")
+	if err != nil {
+		return nil, fmt.Errorf("apns key id: %w", err)
+	}
+	teamID, err := read("team-id")
+	if err != nil {
+		return nil, fmt.Errorf("apns team id: %w", err)
+	}
+	return apns.New(apns.Config{Key: p8, KeyID: keyID, TeamID: teamID, Topic: topic})
+}
 
 func loadServiceKey(path string) (*ecdsa.PrivateKey, error) {
 	raw, err := os.ReadFile(path)
@@ -147,14 +238,52 @@ func loadServiceKey(path string) (*ecdsa.PrivateKey, error) {
 	return key, nil
 }
 
-// keygen writes a new service key and prints its public half, which Core
-// carries in cloudlink.ServiceKeys.
+// loadNoiseKey reads the X25519 key phones run Noise IK against, PKCS #8 PEM.
+func loadNoiseKey(path string) (appwire.KeyPair, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return appwire.KeyPair{}, fmt.Errorf("noise key: %w", err)
+	}
+	block, _ := pem.Decode(raw)
+	if block == nil || block.Type != "PRIVATE KEY" {
+		return appwire.KeyPair{}, fmt.Errorf("noise key: %s is not a PKCS #8 private key", path)
+	}
+	parsed, err := x509.ParsePKCS8PrivateKey(block.Bytes)
+	if err != nil {
+		return appwire.KeyPair{}, fmt.Errorf("noise key: %w", err)
+	}
+	x, ok := parsed.(*ecdh.PrivateKey)
+	if !ok || x.Curve() != ecdh.X25519() {
+		return appwire.KeyPair{}, fmt.Errorf("noise key: %s is not an X25519 key", path)
+	}
+	return appwire.KeyPairFromSecret(x.Bytes())
+}
+
+// keygen writes a new key and prints its public half. The service key's goes
+// into Core's cloudlink.ServiceKeys; with -noise, the Noise key's goes into
+// the app.
 func keygen(args []string) error {
 	fs := flag.NewFlagSet("keygen", flag.ExitOnError)
 	out := fs.String("out", "", "file to write the key to")
+	noise := fs.Bool("noise", false, "make the X25519 key phones dial instead of the P-256 service key")
 	_ = fs.Parse(args)
 	if *out == "" {
 		return errors.New("keygen: -out is required")
+	}
+	if *noise {
+		x, err := ecdh.X25519().GenerateKey(rand.Reader)
+		if err != nil {
+			return err
+		}
+		der, err := x509.MarshalPKCS8PrivateKey(x)
+		if err != nil {
+			return err
+		}
+		if err := writePEM(*out, "PRIVATE KEY", der); err != nil {
+			return err
+		}
+		fmt.Println(base64.RawURLEncoding.EncodeToString(x.PublicKey().Bytes()))
+		return nil
 	}
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -164,15 +293,7 @@ func keygen(args []string) error {
 	if err != nil {
 		return err
 	}
-	f, err := os.OpenFile(*out, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-	if err != nil {
-		return err
-	}
-	if err := pem.Encode(f, &pem.Block{Type: "EC PRIVATE KEY", Bytes: der}); err != nil {
-		_ = f.Close()
-		return err
-	}
-	if err := f.Close(); err != nil {
+	if err := writePEM(*out, "EC PRIVATE KEY", der); err != nil {
 		return err
 	}
 	pub, err := cloudwire.PublicKeyBytesOf(&key.PublicKey)
@@ -181,4 +302,18 @@ func keygen(args []string) error {
 	}
 	fmt.Println(base64.RawURLEncoding.EncodeToString(pub))
 	return nil
+}
+
+// writePEM writes a new key file that only its owner can read, and never over
+// an existing one.
+func writePEM(path, kind string, der []byte) error {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return err
+	}
+	if err := pem.Encode(f, &pem.Block{Type: kind, Bytes: der}); err != nil {
+		_ = f.Close()
+		return err
+	}
+	return f.Close()
 }
