@@ -78,6 +78,26 @@ func TestSourceSaysWhereTheSourceIs(t *testing.T) {
 	}
 }
 
+// /source names the commit and the image digest, so anyone can check the
+// running service against what CI built.
+func TestSourceNamesRevisionAndImage(t *testing.T) {
+	s, _ := newServer(t)
+	const rev = "0123456789abcdef0123456789abcdef01234567"
+	const img = "ghcr.io/srcfl/ftw-cloud@sha256:0000000000000000000000000000000000000000000000000000000000000000"
+	old := Revision
+	Revision = rev
+	t.Cleanup(func() { Revision = old })
+	t.Setenv("FTW_CLOUD_IMAGE", img)
+	w := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/source", nil))
+	if got := w.Header().Get("X-Source-Revision"); got != rev {
+		t.Fatalf("X-Source-Revision = %q", got)
+	}
+	if got := w.Header().Get("X-Source-Image"); got != img {
+		t.Fatalf("X-Source-Image = %q", got)
+	}
+}
+
 func TestTheSocketsRefusePlainHTTP(t *testing.T) {
 	s, home := newServer(t)
 	for _, p := range []string{"/v1/box", "/v1/app?home=" + home} {

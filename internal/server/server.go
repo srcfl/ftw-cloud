@@ -81,6 +81,11 @@ func source(w http.ResponseWriter, r *http.Request) {
 	if rev := revision(); rev != "" {
 		w.Header().Set("X-Source-Revision", rev)
 	}
+	// The image the host runs, by digest, as ftw-cloud-deploy named it.
+	// Anyone can compare it with the digest CI built from that revision.
+	if img := os.Getenv("FTW_CLOUD_IMAGE"); img != "" {
+		w.Header().Set("X-Source-Image", img)
+	}
 	f, err := os.Open(SourceArchive)
 	if err != nil {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
@@ -94,9 +99,16 @@ func source(w http.ResponseWriter, r *http.Request) {
 	http.ServeContent(w, r, "ftw-cloud-source.tar.gz", time.Time{}, f)
 }
 
+// Revision is the commit the image was built from. The Dockerfile sets it
+// with -ldflags -X, because .git stays out of the build context.
+var Revision string
+
 // revision is the commit this binary was built from, when the build recorded
 // one.
 func revision() string {
+	if Revision != "" {
+		return Revision
+	}
 	info, ok := debug.ReadBuildInfo()
 	if !ok {
 		return ""

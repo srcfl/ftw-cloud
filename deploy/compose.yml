@@ -20,7 +20,9 @@ services:
       - -state=/state
       - -service-key=/run/secrets/ftw-cloud-service.key
       - -acme-email=${FTW_CLOUD_ACME_EMAIL:-}
-      - -apns-dir=/run/secrets/apns
+    environment:
+      # /source publishes it, so anyone can compare it with what CI built.
+      FTW_CLOUD_IMAGE: ${FTW_CLOUD_IMAGE}
     volumes:
       # The registry and certificates. No readings are ever written here.
       - ftw-cloud-state:/state
@@ -45,8 +47,8 @@ services:
         max-file: '3'
 
 secrets:
-  # Fetched from Secrets Manager at boot into a tmpfs path; never baked
-  # into the image or the volume.
+  # ftw-cloud-key.service fetches it from Secrets Manager into tmpfs at
+  # boot; it is never in the image, the volume or on disk.
   ftw-cloud-service.key:
     file: /run/ftw-cloud/service.key
 

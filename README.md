@@ -24,7 +24,8 @@ to it yet.
 - The registry (SQLite) holds the home id, the box key, the signed roster and
   owners' suspensions. A box that turns FTW Cloud off gets its home deleted
   and a signed receipt.
-- `/source` serves the source of the running build, as AGPL-3.0 asks.
+- `/source` serves the source of the running build, as AGPL-3.0 asks, and
+  names its commit and image digest.
 - A phone reads its home at `/v1/app?home=<id>`: Noise IK to the service's
   Noise key, with the home id in the prologue. The service admits only a
   phone whose key the box listed in its signed roster, and no owner has
