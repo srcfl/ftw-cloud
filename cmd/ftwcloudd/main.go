@@ -120,8 +120,11 @@ func serve(args []string) error {
 	up.OnRoster = pushSvc.Roster
 	up.OnGone = pushSvc.BoxGone
 
+	// Phones register their tokens over their app session, so without a
+	// Noise key only the development route registers one.
 	if noiseOn {
 		srv.App = appsession.New(st, reg, up, noise, log)
+		srv.App.Push = pushSvc
 	}
 	app := srv.App
 	up.OnConnect = func(home string) {

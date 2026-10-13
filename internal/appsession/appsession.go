@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/srcfl/ftw-cloud/internal/push"
 	"github.com/srcfl/ftw-cloud/internal/registry"
 	"github.com/srcfl/ftw-cloud/internal/store"
 	"github.com/srcfl/ftw/go/protocol/appwire"
@@ -70,8 +71,19 @@ type Server struct {
 	// renewEvery is WatchRenew; tests shorten it.
 	renewEvery time.Duration
 
+	// Push keeps the phones' APNs tokens. Nil ignores push.register and
+	// push.unregister. Set before serving.
+	Push Pusher
+
 	mu      sync.Mutex
 	looking map[string]*look
+}
+
+// Pusher keeps a device's APNs tokens. push.Service is one. dev and scopes
+// come from store.For, never from the phone's message.
+type Pusher interface {
+	Register(home string, dev cloudwire.Device, scopes []string, r cloudwire.PushRegister) error
+	Unregister(home string, dev cloudwire.Device, r cloudwire.PushUnregister) error
 }
 
 // look is one home's phones that can see it, and the loop that keeps the
@@ -424,8 +436,33 @@ func (c *phoneConn) apply(frame []byte) (int, error) {
 			return cloudwire.CloseProtocol, err
 		}
 		return 0, c.suspend(sus.DeviceID, env.T == cloudwire.MsgSuspend)
+	case cloudwire.MsgPushRegister:
+		var r cloudwire.PushRegister
+		if err := cloudwire.Unmarshal(env.B, &r); err != nil {
+			return cloudwire.CloseProtocol, err
+		}
+		if c.s.Push != nil {
+			return 0, pushed(c.s.Push.Register(c.home, c.dev.Device(), c.dev.Scopes(), r))
+		}
+	case cloudwire.MsgPushUnregister:
+		var r cloudwire.PushUnregister
+		if err := cloudwire.Unmarshal(env.B, &r); err != nil {
+			return cloudwire.CloseProtocol, err
+		}
+		if c.s.Push != nil {
+			return 0, pushed(c.s.Push.Unregister(c.home, c.dev.Device(), r))
+		}
 	}
 	return 0, nil
+}
+
+// pushed lets the session go on after a registration the device may not
+// make, such as a viewer's: it gets no alerts, and nothing else changes.
+func pushed(err error) error {
+	if errors.Is(err, push.ErrNotForThisDevice) {
+		return nil
+	}
+	return err
 }
 
 // suspend applies an owner's suspension or lifts one. It only narrows what

@@ -41,9 +41,11 @@ to it yet.
   picks the buttons from the verified kind. Every alert has the same aps,
   priority and push type and no collapse id. Ten minutes without the box's
   socket sends `box.unreachable`, unless the box said `bye` for an update,
-  which holds it back for an hour. Tokens are bound to roster entries that
-  may read `ftw.events.read` and go when the roster drops them or Apple says
-  they are gone. Apple's key comes from Parameter Store
+  which holds it back for an hour. A phone registers its token over its app
+  session with `push.register`. Tokens are bound to roster entries that may
+  read `ftw.events.read`, get nothing while an owner has suspended the
+  device, and go when the roster drops them or Apple says they are gone.
+  Apple's key comes from Parameter Store
   ([deploy/apns.md](deploy/apns.md)).
 
 Not built yet, with a marked place in the code:
@@ -116,7 +118,7 @@ second secret beside the service key.
 the service holds so a test can compare it with the preview, and
 `-dev-push-listen 127.0.0.1:18444`, where `POST /dev/push/register` with
 `{home, deviceId, apnsToken (hex), environment}` registers a token for a
-device in the home's roster, as the app session will; `POST /dev/push/raw`
+device in the home's roster, as the app session does; `POST /dev/push/raw`
 with `{home, payload}` sends a payload as it is, so a test can put a forged
 one through Apple. `-dev-apns-capture <dir>` writes alerts to files instead
 of sending them. `-apns-dir` names a

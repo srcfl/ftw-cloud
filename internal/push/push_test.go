@@ -192,6 +192,51 @@ func TestOnlyADeviceThatMayReadEventsRegisters(t *testing.T) {
 	}
 }
 
+func TestASuspendedDeviceGetsNothingUntilTheSuspensionEnds(t *testing.T) {
+	r := newRig(t)
+	other := r.owner
+	other.ID, other.Key = "other-owner", bytes.Repeat([]byte{7}, 32)
+	if err := r.register(t, r.owner, r.all, "owner-token"); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.register(t, other, r.all, "other-token"); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.reg.Suspend(r.home, other.ID, other.Epoch, r.clock.time()); err != nil {
+		t.Fatal(err)
+	}
+	tokens := func() []string {
+		r.drain()
+		var out []string
+		for _, n := range r.apple.notifications() {
+			out = append(out, string(n.DeviceToken))
+		}
+		r.apple.mu.Lock()
+		r.apple.sent = nil
+		r.apple.mu.Unlock()
+		return out
+	}
+
+	r.svc.Event(r.home, []byte{0xa0})
+	if got := tokens(); len(got) != 1 || got[0] != "owner-token" {
+		t.Fatalf("while suspended, sent to %v", got)
+	}
+	// box.unreachable takes the same road.
+	r.svc.BoxGone(r.home, "")
+	r.clock.advance(10 * time.Minute)
+	if got := tokens(); len(got) != 1 || got[0] != "owner-token" {
+		t.Fatalf("unreachable went to %v", got)
+	}
+
+	if err := r.reg.Unsuspend(r.home, other.ID); err != nil {
+		t.Fatal(err)
+	}
+	r.svc.Event(r.home, []byte{0xa0})
+	if got := tokens(); len(got) != 2 {
+		t.Fatalf("after the suspension ended, sent to %v", got)
+	}
+}
+
 func TestARosterThatDropsOrNarrowsADeviceDropsItsTokens(t *testing.T) {
 	r := newRig(t)
 	other := r.owner

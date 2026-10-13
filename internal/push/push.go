@@ -14,6 +14,7 @@
 // Tokens are bound to roster entries. Only a device whose role and the
 // owner's grant both allow ftw.events.read may register, and a roster that
 // drops the device, moves its epoch or narrows its scope drops its tokens.
+// A device an owner has suspended gets no alerts until the suspension ends.
 // Nothing here logs a token or a home id.
 package push
 
@@ -285,6 +286,11 @@ func (s *Service) send(ctx context.Context, home string, payload []byte, expiry 
 		s.log.Warn("could not read push registrations", "err", err)
 		return
 	}
+	// A device an owner has suspended keeps its tokens, so lifting the
+	// suspension brings its alerts back, but gets nothing meanwhile.
+	regs = slices.DeleteFunc(regs, func(r registry.PushReg) bool {
+		return s.reg.Suspended(home, r.DeviceID, r.Epoch)
+	})
 	if len(regs) == 0 {
 		return
 	}
