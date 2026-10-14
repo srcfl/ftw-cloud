@@ -13,7 +13,9 @@ or a log.
 2. Name it `FTW Cloud APNs`, tick **Apple Push Notifications service (APNs)**,
    and choose **Configure**: environment **Sandbox & Production**; key
    restriction **Team Scoped**, or **Topic Specific** with `energy.ftw.app`
-   and `energy.ftw.app.push-type.widgets`, the topic widget pushes go to.
+   and `energy.ftw.app.push-type.widgets`, the topic widget pushes go to,
+   and for the watch `energy.ftw.app.watchkitapp` and
+   `energy.ftw.app.watchkitapp.push-type.widgets`.
    Save, then **Continue** → **Register**.
 3. **Download** `AuthKey_<KEYID>.p8`. Apple lets you download it once. Note the
    10-character **Key ID**. The Team ID is `L66M368PZ6`.
