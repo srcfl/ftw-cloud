@@ -43,6 +43,11 @@ const (
 	// raises a few notifications a day; past this, something is wrong and
 	// the rest are dropped.
 	MaxAlertsPerHour = 20
+	// MaxTokensPerDevice bounds a device's registrations of one kind. A
+	// phone holds one token per kind; a few more cover a reinstall before
+	// Apple says the old token is gone. Past it the oldest goes, so one
+	// device cannot fill the table or make a push call Apple without end.
+	MaxTokensPerDevice = 4
 	// MaxWidgetPushesPerHour bounds a home's widget pushes. Prices arrive
 	// once a day and a car is plugged in a few times; Apple budgets widget
 	// reloads, so a car that flaps between plugged and not must not spend
@@ -182,8 +187,11 @@ func (s *Service) Register(home string, dev cloudwire.Device, scopes []string, r
 		(r.Environment != cloudwire.PushSandbox && r.Environment != cloudwire.PushProduction) {
 		return ErrNotForThisDevice
 	}
-	return s.reg.PushRegister(registry.PushReg{Home: home, DeviceID: dev.ID, Epoch: dev.Epoch,
-		Token: r.APNsToken, Environment: r.Environment, Kind: r.Kind, At: s.now()})
+	if err := s.reg.PushRegister(registry.PushReg{Home: home, DeviceID: dev.ID, Epoch: dev.Epoch,
+		Token: r.APNsToken, Environment: r.Environment, Kind: r.Kind, At: s.now()}); err != nil {
+		return err
+	}
+	return s.reg.PushTrim(home, dev.ID, r.Kind, MaxTokensPerDevice)
 }
 
 // Unregister forgets one of the device's tokens.
@@ -416,7 +424,7 @@ func (s *Service) send(ctx context.Context, home, kindName string, payload []byt
 			sent++
 		case res.Gone:
 			gone++
-			if err := s.reg.PushGone(home, r.Token, res.GoneSince); err != nil {
+			if err := s.reg.PushGone(home, r.Token, kindName, res.GoneSince); err != nil {
 				s.log.Warn("could not forget a gone token", "err", err)
 			}
 		default:

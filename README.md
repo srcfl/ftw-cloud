@@ -54,7 +54,8 @@ to it yet.
   further than before, as when tomorrow's arrive, or a car is plugged in,
   the service sends Apple's widgets push: no data, only "content changed".
   The widgets then read `/v1/now`. At most 4 an hour per home, since Apple
-  budgets widget reloads.
+  budgets widget reloads. A device holds at most 4 tokens of each kind; a
+  new one pushes out its oldest.
 - **Widget token.** A device asks for its extension token over its app
   session with `token.get`. A widget reads `GET /v1/now` with it: the newest
   `live`, `prices` and `hb` as the box signed them, and nothing else. The
