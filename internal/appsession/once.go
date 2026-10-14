@@ -2,6 +2,7 @@ package appsession
 
 import (
 	"crypto/tls"
+	"errors"
 	"io"
 	"mime"
 	"net/http"
@@ -263,7 +264,11 @@ func (s *Server) onceReply(home string, dev *store.Handle, env cloudwire.Envelop
 			return nil, nil, http.StatusNotImplemented
 		}
 		tok, err := s.Tokens.Issue(home, dev.Device())
-		if err != nil {
+		switch {
+		case errors.Is(err, store.ErrDenied):
+			// Shut out between admission and the stored token.
+			return nil, nil, http.StatusForbidden
+		case err != nil:
 			return nil, nil, http.StatusInternalServerError
 		}
 		payload, err := cloudwire.Unsigned(cloudwire.MsgToken, tok)

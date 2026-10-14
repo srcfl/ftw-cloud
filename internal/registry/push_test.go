@@ -64,13 +64,13 @@ func TestAGoneTokenGoesUnlessRegisteredSince(t *testing.T) {
 	now := time.Unix(1_791_820_800, 0)
 	_ = r.Claim("h1", []byte("pk"), now)
 	_ = r.PushRegister(reg("h1", "phone-a", 1, "tok", now))
-	if err := r.PushGone("h1", []byte("tok"), now.Add(-time.Hour)); err != nil {
+	if err := r.PushGone("h1", []byte("tok"), "alert", now.Add(-time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 	if got, _ := r.PushRegs("h1", "alert"); len(got) != 1 {
 		t.Fatal("a token registered after Apple last knew it was dropped")
 	}
-	_ = r.PushGone("h1", []byte("tok"), now.Add(time.Hour))
+	_ = r.PushGone("h1", []byte("tok"), "alert", now.Add(time.Hour))
 	if got, _ := r.PushRegs("h1", "alert"); len(got) != 0 {
 		t.Fatal("a gone token was kept")
 	}

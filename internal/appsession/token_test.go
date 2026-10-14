@@ -3,6 +3,7 @@ package appsession
 import (
 	"bytes"
 	"crypto/tls"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -125,3 +126,24 @@ func TestWithoutTokensTokenGetIsIgnored(t *testing.T) {
 		t.Fatalf("the session did not go on: code %d", code)
 	}
 }
+
+// The suspended device's session ends even when its token cannot be dropped.
+func TestASuspensionEndsTheSessionWhateverTheToken(t *testing.T) {
+	h := newHarness(t)
+	h.app.Tokens = failingTokens{}
+	h.live(true)
+	owner := h.mustDial(dialOpts{key: h.owner})
+	viewer := h.mustDial(dialOpts{key: h.viewer})
+	owner.send(cloudwire.MsgSuspend, cloudwire.Suspend{DeviceID: "viewer"})
+	if code := viewer.closed(2 * time.Second); code != cloudwire.CloseDenied {
+		t.Fatalf("the suspended viewer closed with %d", code)
+	}
+}
+
+type failingTokens struct{}
+
+func (failingTokens) Issue(string, cloudwire.Device) (cloudwire.Token, error) {
+	return cloudwire.Token{}, errors.New("no tokens")
+}
+
+func (failingTokens) Drop(string, string) error { return errors.New("the registry is down") }

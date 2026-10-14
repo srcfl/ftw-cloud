@@ -101,15 +101,25 @@ func (r *Registry) PushRegs(home, kind string) ([]PushReg, error) {
 	return out, rows.Err()
 }
 
-// PushGone forgets a token Apple says is gone, unless the phone registered
-// it again after Apple last knew it valid.
-func (r *Registry) PushGone(home string, token []byte, since time.Time) error {
+// PushGone forgets one kind's registration of a token Apple says is gone,
+// unless the phone registered it again after Apple last knew it valid. The
+// token's registrations for other kinds go to other topics and stay.
+func (r *Registry) PushGone(home string, token []byte, kind string, since time.Time) error {
 	if since.IsZero() {
-		_, err := r.db.Exec(`DELETE FROM push WHERE home = ? AND token = ?`, home, token)
+		_, err := r.db.Exec(`DELETE FROM push WHERE home = ? AND token = ? AND kind = ?`, home, token, kind)
 		return err
 	}
-	_, err := r.db.Exec(`DELETE FROM push WHERE home = ? AND token = ? AND registered_ms <= ?`,
-		home, token, since.UnixMilli())
+	_, err := r.db.Exec(`DELETE FROM push WHERE home = ? AND token = ? AND kind = ? AND registered_ms <= ?`,
+		home, token, kind, since.UnixMilli())
+	return err
+}
+
+// PushTrim keeps a device's newest keep registrations of one kind and
+// forgets the rest.
+func (r *Registry) PushTrim(home, deviceID, kind string, keep int) error {
+	_, err := r.db.Exec(`DELETE FROM push WHERE home = ? AND device_id = ? AND kind = ? AND rowid NOT IN (
+		SELECT rowid FROM push WHERE home = ? AND device_id = ? AND kind = ? ORDER BY registered_ms DESC, rowid DESC LIMIT ?)`,
+		home, deviceID, kind, home, deviceID, kind, keep)
 	return err
 }
 

@@ -563,14 +563,13 @@ func (c *phoneConn) suspend(deviceID string, on bool) error {
 		if err := c.s.registry.Suspend(c.home, d.ID, d.Epoch, c.s.now()); err != nil {
 			return err
 		}
-		// A suspended device's token dies; lifting the suspension does not
-		// bring it back, the app asks for a new one.
-		if c.s.Tokens != nil {
-			if err := c.s.Tokens.Drop(c.home, d.ID); err != nil {
-				return err
-			}
-		}
+		// The suspended device's sessions end first, whatever happens to
+		// its token. Its token dies; lifting the suspension does not bring
+		// it back, the app asks for a new one.
 		c.dev.Recheck()
+		if c.s.Tokens != nil {
+			return c.s.Tokens.Drop(c.home, d.ID)
+		}
 		return nil
 	}
 	return nil

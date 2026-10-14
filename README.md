@@ -41,8 +41,9 @@ to it yet.
   Noise IK message 1 with the prologue `ftw.cloud.once.v1:` and the home id,
   and it carries one of `read {have, hz}`, `token.get`, `push.register` or
   `push.unregister`. The service admits the watch exactly as `/v1/app`
-  admits a phone: its key in the box's roster, where the box lists it with
-  role `watch`, a roster that has not run out, no suspension. A refusal is
+  admits a phone: its key in the box's roster, a roster that has not run
+  out, no suspension. The box lists a watch with role `watch` and the
+  scopes it derives; the service checks no role. A refusal is
   403 with an empty body. The answer is message 2 with the snapshot, less
   the envelopes `have` says the watch holds, and the envelopes that did not
   fit after it, each after its length. The box's bytes go unchanged, so the
@@ -71,7 +72,8 @@ to it yet.
   further than before, as when tomorrow's arrive, or a car is plugged in,
   the service sends Apple's widgets push: no data, only "content changed".
   The widgets then read `/v1/now`. At most 4 an hour per home, since Apple
-  budgets widget reloads.
+  budgets widget reloads. A device holds at most 4 tokens of each kind; a
+  new one pushes out its oldest.
 - **Widget token.** A device asks for its extension token over its app
   session with `token.get`. A widget reads `GET /v1/now` with it: the newest
   `live`, `prices` and `hb` as the box signed them, and nothing else. The

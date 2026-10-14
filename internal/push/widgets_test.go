@@ -297,3 +297,54 @@ func TestPushRegisterTakesOnlyKnownApps(t *testing.T) {
 		t.Fatalf("stored apps %v", apps)
 	}
 }
+
+// A device holds a few tokens of each kind; past that the oldest goes, so a
+// device that registers without end cannot fill the table or make one push
+// call Apple without end.
+func TestADeviceHoldsAFewTokensPerKind(t *testing.T) {
+	r := newRig(t)
+	box := newBoxSigner(t)
+	for i := range 50 {
+		r.clock.advance(time.Millisecond)
+		if err := r.registerWidgets(t, r.viewer, r.viewer.Scopes, "viewer-"+string(rune('A'+i))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_ = r.register(t, r.owner, r.all, "owner-alerts")
+	regs, _ := r.reg.PushRegs(r.home, KindWidgets)
+	if len(regs) != MaxTokensPerDevice {
+		t.Fatalf("the viewer holds %d widget tokens", len(regs))
+	}
+	for _, reg := range regs {
+		if reg.Token[len(reg.Token)-1] < byte('A'+50-MaxTokensPerDevice) {
+			t.Fatalf("an old token stayed: %s", reg.Token)
+		}
+	}
+	if alerts, _ := r.reg.PushRegs(r.home, cloudwire.PushKindAlert); len(alerts) != 1 {
+		t.Fatal("one device's widget tokens pushed out another kind")
+	}
+	r.svc.Held(r.home, cloudwire.MsgLP, box.lp(r.home, false))
+	r.svc.Held(r.home, cloudwire.MsgLP, box.lp(r.home, true))
+	if got := r.taken(); len(got) != MaxTokensPerDevice {
+		t.Fatalf("one plug-in called Apple %d times", len(got))
+	}
+}
+
+// Apple refusing one kind of push forgets that kind's registration of the
+// token, and the token's other kinds stay.
+func TestAGoneTokenGoesOnlyForItsKind(t *testing.T) {
+	r := newRig(t)
+	box := newBoxSigner(t)
+	_ = r.register(t, r.owner, r.all, "same-token")
+	_ = r.registerWidgets(t, r.owner, r.all, "same-token")
+	r.apple.gone["same-token"] = true
+	r.svc.Held(r.home, cloudwire.MsgLP, box.lp(r.home, false))
+	r.svc.Held(r.home, cloudwire.MsgLP, box.lp(r.home, true))
+	r.taken()
+	if widgets, _ := r.reg.PushRegs(r.home, KindWidgets); len(widgets) != 0 {
+		t.Fatal("a widget token Apple refused stayed")
+	}
+	if alerts, _ := r.reg.PushRegs(r.home, cloudwire.PushKindAlert); len(alerts) != 1 {
+		t.Fatal("a widgets refusal took the alert registration with it")
+	}
+}
