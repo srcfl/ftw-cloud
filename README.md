@@ -49,6 +49,12 @@ to it yet.
   device, and go when the roster drops them or Apple says they are gone.
   Apple's key comes from Parameter Store
   ([deploy/apns.md](deploy/apns.md)).
+- **Widget push.** A widget registers its push token with `push.register
+  {kind: widgets}`, which needs `ftw.live.read`. When a box's prices reach
+  further than before, as when tomorrow's arrive, or a car is plugged in,
+  the service sends Apple's widgets push: no data, only "content changed".
+  The widgets then read `/v1/now`. At most 4 an hour per home, since Apple
+  budgets widget reloads.
 - **Widget token.** A device asks for its extension token over its app
   session with `token.get`. A widget reads `GET /v1/now` with it: the newest
   `live`, `prices` and `hb` as the box signed them, and nothing else. The
@@ -61,7 +67,7 @@ Not built yet:
 
 | Step | What | Where |
 |---|---|---|
-| C6 | Tiles, widget push | `internal/server`, `internal/push` |
+| C6 | Tiles | `internal/server` |
 | C7–C8 | Statistics | not started |
 
 ## How it holds a home

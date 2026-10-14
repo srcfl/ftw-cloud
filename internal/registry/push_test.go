@@ -27,7 +27,7 @@ func TestARegistrationBelongsToARosterEntryAndGoesWithIt(t *testing.T) {
 	}
 
 	// The roster drops phone-b and moves phone-a's epoch: both go.
-	if err := r.PushPrune("h1", func(id string, epoch uint64) bool { return id == "phone-a" && epoch == 2 }); err != nil {
+	if err := r.PushPrune("h1", func(id string, epoch uint64, _ string) bool { return id == "phone-a" && epoch == 2 }); err != nil {
 		t.Fatal(err)
 	}
 	if got, _ := r.PushRegs("h1", "alert"); len(got) != 0 {

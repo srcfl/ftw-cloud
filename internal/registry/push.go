@@ -91,31 +91,33 @@ func (r *Registry) PushGone(home string, token []byte, since time.Time) error {
 	return err
 }
 
-// PushPrune keeps only the registrations whose device keep allows at its
-// epoch, as a new roster says.
-func (r *Registry) PushPrune(home string, keep func(deviceID string, epoch uint64) bool) error {
-	rows, err := r.db.Query(`SELECT DISTINCT device_id, epoch FROM push WHERE home = ?`, home)
+// PushPrune keeps only the registrations keep allows: a device at its epoch,
+// for one kind, as a new roster says.
+func (r *Registry) PushPrune(home string, keep func(deviceID string, epoch uint64, kind string) bool) error {
+	rows, err := r.db.Query(`SELECT DISTINCT device_id, epoch, kind FROM push WHERE home = ?`, home)
 	if err != nil {
 		return err
 	}
 	type entry struct {
 		id    string
 		epoch int64
+		kind  string
 	}
 	var gone []entry
 	for rows.Next() {
 		var e entry
-		if err := rows.Scan(&e.id, &e.epoch); err != nil {
+		if err := rows.Scan(&e.id, &e.epoch, &e.kind); err != nil {
 			_ = rows.Close()
 			return err
 		}
-		if !keep(e.id, uint64(e.epoch)) {
+		if !keep(e.id, uint64(e.epoch), e.kind) {
 			gone = append(gone, e)
 		}
 	}
 	_ = rows.Close()
 	for _, e := range gone {
-		if _, err := r.db.Exec(`DELETE FROM push WHERE home = ? AND device_id = ? AND epoch = ?`, home, e.id, e.epoch); err != nil {
+		if _, err := r.db.Exec(`DELETE FROM push WHERE home = ? AND device_id = ? AND epoch = ? AND kind = ?`,
+			home, e.id, e.epoch, e.kind); err != nil {
 			return err
 		}
 	}

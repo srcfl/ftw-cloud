@@ -102,8 +102,9 @@ func serve(args []string) error {
 	srv := &server.Server{Store: st, Registry: reg, Uplink: up, Tokens: tokens, Log: log}
 
 	// Alerts: the box's signed events to its phones through Apple, and
-	// box.unreachable when a box is away. Without a key the service keeps
-	// registrations and sends nothing.
+	// box.unreachable when a box is away. Widgets: a push with no data when
+	// prices or a car change. Without a key the service keeps registrations
+	// and sends nothing.
 	var sender push.Sender
 	switch client, err := loadAPNs(*apnsDir, *apnsTopic); {
 	case err != nil:
@@ -118,7 +119,7 @@ func serve(args []string) error {
 		sender = client
 	}
 	pushSvc := push.New(reg, sender, log)
-	up.OnEvent = pushSvc.Event
+	up.OnHeld = pushSvc.Held
 	up.OnRoster = func(home string, r *cloudwire.Roster) {
 		pushSvc.Roster(home, r)
 		tokens.Roster(home, r)

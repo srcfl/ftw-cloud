@@ -14,6 +14,7 @@ import (
 type heard struct {
 	mu      sync.Mutex
 	events  [][]byte
+	classes []string
 	rosters []uint64
 	gone    []string
 	conns   int
@@ -22,10 +23,13 @@ type heard struct {
 func listen(s *service) *heard {
 	h := &heard{}
 	s.up.OnConnect = func(string) { h.mu.Lock(); h.conns++; h.mu.Unlock() }
-	s.up.OnEvent = func(home string, env []byte) {
+	s.up.OnHeld = func(home, class string, env []byte) {
 		h.mu.Lock()
-		h.events = append(h.events, env)
-		h.mu.Unlock()
+		defer h.mu.Unlock()
+		h.classes = append(h.classes, class)
+		if class == cloudwire.MsgEvent {
+			h.events = append(h.events, env)
+		}
 	}
 	s.up.OnRoster = func(home string, r *cloudwire.Roster) {
 		h.mu.Lock()
@@ -65,6 +69,25 @@ func TestAnEventReachesPushUnchanged(t *testing.T) {
 	}
 	if rosters := h.count(func(h *heard) int { return len(h.rosters) }); rosters() != 1 {
 		t.Fatal("push did not hear the roster")
+	}
+}
+
+// Every envelope the service holds reaches push with its class, so prices
+// and a car plugged in can reload widgets. A roster is not held this way.
+func TestEveryHeldEnvelopeReachesPushWithItsClass(t *testing.T) {
+	s := newService(t)
+	h := listen(s)
+	b := newBox(t)
+	_, _ = b.connect(s, nil)
+	b.send(cloudwire.MsgRoster, b.roster(protocol.ScopeLiveRead))
+	b.send(cloudwire.MsgPrices, cloudwire.Prices{Header: b.header(), SpotMinor: []*int64{}, TotalMinor: []*int64{}})
+	b.send(cloudwire.MsgLP, cloudwire.LP{Header: b.header(), Loadpoints: []cloudwire.Loadpoint{}, Feedback: []cloudwire.Feedback{}})
+	classes := h.count(func(h *heard) int { return len(h.classes) })
+	wait(t, "two held envelopes", func() bool { return classes() == 2 })
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.classes[0] != cloudwire.MsgPrices || h.classes[1] != cloudwire.MsgLP {
+		t.Fatalf("push heard %v", h.classes)
 	}
 }
 

@@ -1,7 +1,7 @@
 # Apple's push key
 
-`ftwcloudd` sends alerts through APNs with a token key (`.p8`) from Sourceful's
-Apple team. Only the owner handles the key: he makes it at Apple and puts it
+`ftwcloudd` sends alerts and widget pushes through APNs with a token key
+(`.p8`) from Sourceful's Apple team. Only the owner handles the key: he makes it at Apple and puts it
 in AWS Systems Manager Parameter Store himself. The host reads it from there
 into tmpfs at every boot. It is never in the repository, the image, the volume
 or a log.
@@ -12,13 +12,15 @@ or a log.
    Certificates, Identifiers & Profiles → **Keys** → **+**.
 2. Name it `FTW Cloud APNs`, tick **Apple Push Notifications service (APNs)**,
    and choose **Configure**: environment **Sandbox & Production**; key
-   restriction **Topic Specific** with `energy.ftw.app`, or **Team Scoped**.
+   restriction **Team Scoped**, or **Topic Specific** with `energy.ftw.app`
+   and `energy.ftw.app.push-type.widgets`, the topic widget pushes go to.
    Save, then **Continue** → **Register**.
 3. **Download** `AuthKey_<KEYID>.p8`. Apple lets you download it once. Note the
    10-character **Key ID**. The Team ID is `L66M368PZ6`.
 4. Under **Identifiers** → `energy.ftw.app`, check that **Push Notifications**
    and **Time Sensitive Notifications** are on. Xcode turns them on the first
-   time it signs the app with the new entitlements.
+   time it signs the app with the new entitlements. The widget extension,
+   `energy.ftw.app.widgets`, needs **Push Notifications** too.
 
 ## 2. Put it in Parameter Store (owner, once)
 
