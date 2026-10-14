@@ -494,12 +494,22 @@ func TestOnceHzAsksTheBoxToHurry(t *testing.T) {
 		t.Fatal("hz 0 asked the box")
 	}
 	h.once(onceOpts{key: h.owner, body: cloudwire.Read{Hz: cloudwire.HzLooking}})
-	if h.watch.count() != 1 {
-		t.Fatalf("hz 1 asked the box %d times", h.watch.count())
-	}
+	waitFor(t, "hz 1 to ask the box", func() bool { return h.watch.count() == 1 })
 	h.once(onceOpts{key: h.owner, home: "aaaaaaaaaaaaaaaaaaaaaaaaaa", body: cloudwire.Read{Hz: cloudwire.HzLooking}})
+	time.Sleep(50 * time.Millisecond)
 	if h.watch.count() != 1 {
 		t.Fatal("a refused read asked a box")
+	}
+	// A box that comes back within the minute is asked again; after it,
+	// not.
+	h.app.BoxConnected(h.home)
+	if h.watch.count() != 2 {
+		t.Fatalf("a box back within the minute was asked %d times in all", h.watch.count())
+	}
+	h.app.now = func() time.Time { return time.Now().Add(61 * time.Second) }
+	h.app.BoxConnected(h.home)
+	if h.watch.count() != 2 {
+		t.Fatal("a box back after the minute was asked")
 	}
 }
 

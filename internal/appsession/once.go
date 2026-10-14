@@ -255,7 +255,7 @@ func (s *Server) onceReply(home string, dev *store.Handle, env cloudwire.Envelop
 			return nil, nil, http.StatusInternalServerError
 		}
 		if rd.Hz >= cloudwire.HzLooking {
-			s.watcher.Watch(home)
+			s.watchOnce(home)
 		}
 		return payload, rest, http.StatusOK
 	case cloudwire.MsgTokenGet:

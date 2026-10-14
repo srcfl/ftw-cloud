@@ -148,9 +148,7 @@ func TestOnceAnswersTheGoldenVectors(t *testing.T) {
 	if !bytes.Equal(body, unhex(t, once.Answer)) {
 		t.Fatalf("the answer is not the vectors' bytes:\n got %x\nwant %s", body, once.Answer)
 	}
-	if w.count() != 1 {
-		t.Fatalf("hz 1 asked the box %d times", w.count())
-	}
+	waitFor(t, "hz 1 to ask the box", func() bool { return w.count() == 1 })
 	if len(once.Held) != 2 || once.Held[0] != "live full" || once.Held[1] != "lp" {
 		t.Fatalf("the vectors' have covers %v; this test assumes the full live and the lp", once.Held)
 	}

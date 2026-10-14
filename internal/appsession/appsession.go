@@ -50,6 +50,8 @@ const (
 	// updates while a phone looks. The box's watch lasts 60 s, so the ask
 	// comes before it lapses.
 	WatchRenew = 50 * time.Second
+	// boxWatchLasts is how long the box keeps one watch in force.
+	boxWatchLasts = 60 * time.Second
 	// roleOwner is the registry's owner role, as the roster names it.
 	// go/protocol does not generate role names yet.
 	roleOwner = "owner"
@@ -86,6 +88,9 @@ type Server struct {
 
 	mu      sync.Mutex
 	looking map[string]*look
+	// watchedUntil is, per home, when the box's watch a one-shot read asked
+	// for lapses, so a box that comes back before then is asked again.
+	watchedUntil map[string]time.Time
 }
 
 // Pusher keeps a device's APNs tokens. push.Service is one. dev and scopes
@@ -116,7 +121,7 @@ func New(st *store.Store, reg *registry.Registry, w Watcher, key appwire.KeyPair
 		log = slog.Default()
 	}
 	return &Server{store: st, registry: reg, watcher: w, key: key, log: log, now: time.Now,
-		renewEvery: WatchRenew, looking: map[string]*look{}, onceMessage2: maxNoiseMessage,
+		renewEvery: WatchRenew, looking: map[string]*look{}, watchedUntil: map[string]time.Time{}, onceMessage2: maxNoiseMessage,
 		once: onceLimits{homes: map[string]int{}, devices: map[string]*onceDevice{}}}
 }
 
@@ -290,14 +295,32 @@ func (s *Server) renew(home string, stop <-chan struct{}) {
 }
 
 // BoxConnected asks a box that just connected for one-second updates when a
-// phone is already looking. The uplink calls it after hello_ok.
+// phone is already looking, or a one-shot read asked for them less than a
+// minute ago. The uplink calls it after hello_ok.
 func (s *Server) BoxConnected(home string) {
 	s.mu.Lock()
-	looking := s.looking[home] != nil
+	looking := s.looking[home] != nil || s.now().Before(s.watchedUntil[home])
 	s.mu.Unlock()
 	if looking {
 		s.watcher.Watch(home)
 	}
+}
+
+// watchOnce asks the box for one-second updates for a one-shot read with
+// hz 1, as a looking phone does, without making the read wait on the box's
+// socket. The box's watch lasts a minute; a box that comes back within it
+// is asked again.
+func (s *Server) watchOnce(home string) {
+	now := s.now()
+	s.mu.Lock()
+	for h, until := range s.watchedUntil {
+		if !now.Before(until) {
+			delete(s.watchedUntil, h)
+		}
+	}
+	s.watchedUntil[home] = now.Add(boxWatchLasts)
+	s.mu.Unlock()
+	go s.watcher.Watch(home)
 }
 
 // phoneConn is one phone's session after the handshake.
