@@ -22,6 +22,10 @@
 // its epoch or narrows its scope drops its tokens. A device an owner has
 // suspended gets nothing until the suspension ends. Nothing here logs a
 // token or a home id.
+//
+// A watch registers its own tokens with app watch (ADR 0009). Its pushes go
+// to the watch app's topic, and an alert carries the same payload, byte for
+// byte, as its phone's, so Apple shows one when both are near.
 package push
 
 import (
@@ -97,6 +101,11 @@ type Service struct {
 	sender Sender
 	log    *slog.Logger
 	now    func() time.Time
+
+	// WatchApp is the watch app's bundle id, the APNs topic for tokens
+	// registered with app watch. Empty sends them nothing. The iPhone app's
+	// is the sender's own. Set before serving.
+	WatchApp string
 	// after runs f after d and returns a function that stops it. Tests
 	// replace it.
 	after func(d time.Duration, f func()) (stop func() bool)
@@ -177,13 +186,18 @@ func (s *Service) enqueue(job func(context.Context)) {
 // Noise key matched and scopes its effective scope, both from store.For.
 func (s *Service) Register(home string, dev cloudwire.Device, scopes []string, r cloudwire.PushRegister) error {
 	k, known := kinds[r.Kind]
+	app := r.App
+	if app == "" {
+		app = cloudwire.PushAppIPhone
+	}
 	if !known || !slices.Contains(scopes, k.scope) ||
+		(app != cloudwire.PushAppIPhone && app != cloudwire.PushAppWatch) ||
 		len(r.APNsToken) == 0 || len(r.APNsToken) > cloudwire.APNsTokenMaxBytes ||
 		(r.Environment != cloudwire.PushSandbox && r.Environment != cloudwire.PushProduction) {
 		return ErrNotForThisDevice
 	}
 	return s.reg.PushRegister(registry.PushReg{Home: home, DeviceID: dev.ID, Epoch: dev.Epoch,
-		Token: r.APNsToken, Environment: r.Environment, Kind: r.Kind, At: s.now()})
+		Token: r.APNsToken, Environment: r.Environment, Kind: r.Kind, App: app, At: s.now()})
 }
 
 // Unregister forgets one of the device's tokens.
@@ -392,9 +406,10 @@ func (s *Service) send(ctx context.Context, home, kindName string, payload []byt
 		return
 	}
 	// A device an owner has suspended keeps its tokens, so lifting the
-	// suspension brings its alerts back, but gets nothing meanwhile.
+	// suspension brings its alerts back, but gets nothing meanwhile. A
+	// watch's token waits for the watch app's topic.
 	regs = slices.DeleteFunc(regs, func(r registry.PushReg) bool {
-		return s.reg.Suspended(home, r.DeviceID, r.Epoch)
+		return s.reg.Suspended(home, r.DeviceID, r.Epoch) || (r.App == cloudwire.PushAppWatch && s.WatchApp == "")
 	})
 	if len(regs) == 0 {
 		return
@@ -407,8 +422,14 @@ func (s *Service) send(ctx context.Context, home, kindName string, payload []byt
 	var sent, gone, failed int
 	exp := s.now().Add(expiry)
 	for _, r := range regs {
+		// A watch and its phone get the same payload, so Apple shows one
+		// alert when both are near; only the topic differs.
+		app := ""
+		if r.App == cloudwire.PushAppWatch {
+			app = s.WatchApp
+		}
 		res, err := s.sender.Send(ctx, apns.Notification{Environment: r.Environment, DeviceToken: r.Token,
-			Type: k.pushType, Payload: payload, Expiration: exp})
+			App: app, Type: k.pushType, Payload: payload, Expiration: exp})
 		switch {
 		case err != nil:
 			failed++

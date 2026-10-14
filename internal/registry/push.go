@@ -3,6 +3,8 @@ package registry
 import (
 	"database/sql"
 	"time"
+
+	"github.com/srcfl/ftw/go/protocol/cloudwire"
 )
 
 // APNs registrations. Each row binds one device token to one roster entry
@@ -23,11 +25,14 @@ type PushReg struct {
 	Token       []byte
 	Environment string
 	Kind        string
-	At          time.Time
+	// App is the app the token belongs to, cloudwire.PushAppIPhone or
+	// cloudwire.PushAppWatch; it picks the APNs topic.
+	App string
+	At  time.Time
 }
 
 func createPushTable(db *sql.DB) error {
-	_, err := db.Exec(`
+	if _, err := db.Exec(`
 CREATE TABLE IF NOT EXISTS push (
 	home TEXT NOT NULL REFERENCES homes(home) ON DELETE CASCADE,
 	device_id TEXT NOT NULL,
@@ -37,18 +42,35 @@ CREATE TABLE IF NOT EXISTS push (
 	kind TEXT NOT NULL,
 	registered_ms INTEGER NOT NULL,
 	PRIMARY KEY (home, token, kind)
-);`)
-	return err
+);`); err != nil {
+		return err
+	}
+	// A registry from before watches has no app column: its tokens are the
+	// iPhone app's.
+	var has int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('push') WHERE name = 'app'`).Scan(&has); err != nil {
+		return err
+	}
+	if has == 0 {
+		if _, err := db.Exec(`ALTER TABLE push ADD COLUMN app TEXT NOT NULL DEFAULT 'iphone'`); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // PushRegister keeps a device's token. A token already registered for the
 // home moves to this device: a phone that paired again keeps its token.
 func (r *Registry) PushRegister(reg PushReg) error {
-	_, err := r.db.Exec(`INSERT INTO push (home, device_id, epoch, token, environment, kind, registered_ms)
-		VALUES (?, ?, ?, ?, ?, ?, ?)
+	app := reg.App
+	if app == "" {
+		app = cloudwire.PushAppIPhone
+	}
+	_, err := r.db.Exec(`INSERT INTO push (home, device_id, epoch, token, environment, kind, app, registered_ms)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT (home, token, kind) DO UPDATE SET device_id = excluded.device_id, epoch = excluded.epoch,
-			environment = excluded.environment, registered_ms = excluded.registered_ms`,
-		reg.Home, reg.DeviceID, int64(reg.Epoch), reg.Token, reg.Environment, reg.Kind, reg.At.UnixMilli())
+			environment = excluded.environment, app = excluded.app, registered_ms = excluded.registered_ms`,
+		reg.Home, reg.DeviceID, int64(reg.Epoch), reg.Token, reg.Environment, reg.Kind, app, reg.At.UnixMilli())
 	return err
 }
 
@@ -60,7 +82,7 @@ func (r *Registry) PushUnregister(home, deviceID string, token []byte) error {
 
 // PushRegs returns a home's registrations of one kind.
 func (r *Registry) PushRegs(home, kind string) ([]PushReg, error) {
-	rows, err := r.db.Query(`SELECT device_id, epoch, token, environment, registered_ms FROM push
+	rows, err := r.db.Query(`SELECT device_id, epoch, token, environment, app, registered_ms FROM push
 		WHERE home = ? AND kind = ? ORDER BY registered_ms`, home, kind)
 	if err != nil {
 		return nil, err
@@ -70,7 +92,7 @@ func (r *Registry) PushRegs(home, kind string) ([]PushReg, error) {
 	for rows.Next() {
 		reg := PushReg{Home: home, Kind: kind}
 		var epoch, ms int64
-		if err := rows.Scan(&reg.DeviceID, &epoch, &reg.Token, &reg.Environment, &ms); err != nil {
+		if err := rows.Scan(&reg.DeviceID, &epoch, &reg.Token, &reg.Environment, &reg.App, &ms); err != nil {
 			return nil, err
 		}
 		reg.Epoch, reg.At = uint64(epoch), time.UnixMilli(ms)

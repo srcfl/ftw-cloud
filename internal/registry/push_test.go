@@ -1,6 +1,8 @@
 package registry
 
 import (
+	"database/sql"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -108,4 +110,42 @@ func TestARegistrationNeedsAHome(t *testing.T) {
 	if err := r.PushRegister(reg("nowhere", "phone", 1, "tok", time.Now())); err == nil {
 		t.Fatal("registered a token for a home that does not exist")
 	}
+}
+
+// A registry from before watches gains the app column, and its tokens stay
+// the iPhone app's.
+func TestARegistryFromBeforeWatchesKeepsItsTokens(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "registry.db")
+	db, err := sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, q := range []string{
+		`CREATE TABLE homes (home TEXT PRIMARY KEY, pk BLOB NOT NULL, created_ms INTEGER NOT NULL, roster BLOB,
+			roster_seq INTEGER NOT NULL DEFAULT 0, roster_ms INTEGER NOT NULL DEFAULT 0, grant_id BLOB)`,
+		`CREATE TABLE push (home TEXT NOT NULL REFERENCES homes(home) ON DELETE CASCADE, device_id TEXT NOT NULL,
+			epoch INTEGER NOT NULL, token BLOB NOT NULL, environment TEXT NOT NULL, kind TEXT NOT NULL,
+			registered_ms INTEGER NOT NULL, PRIMARY KEY (home, token, kind))`,
+		`INSERT INTO homes (home, pk, created_ms) VALUES ('h1', x'00', 1)`,
+		`INSERT INTO push VALUES ('h1', 'phone', 1, x'aa', 'sandbox', 'alert', 1)`,
+	} {
+		if _, err := db.Exec(q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_ = db.Close()
+	r, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	regs, err := r.PushRegs("h1", "alert")
+	if err != nil || len(regs) != 1 || regs[0].App != "iphone" {
+		t.Fatalf("after the upgrade: %+v %v", regs, err)
+	}
+	_ = r.Close()
+	again, err := Open(path)
+	if err != nil {
+		t.Fatalf("a second open: %v", err)
+	}
+	_ = again.Close()
 }

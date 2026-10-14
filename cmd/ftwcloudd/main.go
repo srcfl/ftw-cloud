@@ -69,7 +69,8 @@ func serve(args []string) error {
 	keyFile := fs.String("tls-key", "", "certificate key file, with -tls-cert")
 	email := fs.String("acme-email", "", "contact for the certificate authority")
 	apnsDir := fs.String("apns-dir", "/run/secrets/apns", "directory with Apple's key.p8, key-id and team-id; without it no alert is sent")
-	apnsTopic := fs.String("apns-topic", "energy.ftw.app", "the app's bundle id")
+	apnsTopic := fs.String("apns-topic", "energy.ftw.app", "the iPhone app's bundle id")
+	apnsWatch := fs.String("apns-watch-topic", "energy.ftw.app.watchkitapp", "the watch app's bundle id")
 	devPush := fs.String("dev-push-listen", "", "loopback address for registering a token by hand (development builds only)")
 	devCapture := fs.String("dev-apns-capture", "", "write each alert to this directory instead of sending it to Apple (development builds only)")
 	_ = fs.Parse(args)
@@ -119,6 +120,7 @@ func serve(args []string) error {
 		sender = client
 	}
 	pushSvc := push.New(reg, sender, log)
+	pushSvc.WatchApp = *apnsWatch
 	up.OnHeld = pushSvc.Held
 	up.OnRoster = func(home string, r *cloudwire.Roster) {
 		pushSvc.Roster(home, r)

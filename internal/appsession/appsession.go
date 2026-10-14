@@ -70,6 +70,12 @@ type Server struct {
 	now      func() time.Time
 	// renewEvery is WatchRenew; tests shorten it.
 	renewEvery time.Duration
+	// once counts the one-shot reads under way; onceMessage2 bounds their
+	// message 2, and onceEphemeral, when set, fixes their ephemeral key.
+	// Tests set the last two to replay golden vectors.
+	once          onceLimits
+	onceMessage2  int
+	onceEphemeral *appwire.KeyPair
 
 	// Push keeps the phones' APNs tokens. Nil ignores push.register and
 	// push.unregister. Set before serving.
@@ -110,7 +116,8 @@ func New(st *store.Store, reg *registry.Registry, w Watcher, key appwire.KeyPair
 		log = slog.Default()
 	}
 	return &Server{store: st, registry: reg, watcher: w, key: key, log: log, now: time.Now,
-		renewEvery: WatchRenew, looking: map[string]*look{}}
+		renewEvery: WatchRenew, looking: map[string]*look{}, onceMessage2: maxNoiseMessage,
+		once: onceLimits{homes: map[string]int{}, devices: map[string]*onceDevice{}}}
 }
 
 var upgrader = websocket.Upgrader{
@@ -185,7 +192,7 @@ func (s *Server) serve(conn *websocket.Conn, home string) (int, error) {
 	}
 	defer sess.Close()
 
-	msg2Payload, rest, err := snapshotPayload(snap)
+	msg2Payload, rest, err := snapshotPayload(snap, maxNoiseMessage)
 	if err != nil {
 		return websocket.CloseInternalServerErr, err
 	}
@@ -227,9 +234,9 @@ func parseNow(payload []byte) (int, error) {
 	return now.Hz, nil
 }
 
-// snapshotPayload is message 2. Envelopes that do not fit in one Noise
-// message come back as rest, to follow as frames.
-func snapshotPayload(snap store.Snapshot) ([]byte, [][]byte, error) {
+// snapshotPayload is message 2. Envelopes that do not fit in a message 2 of
+// at most limit bytes come back as rest, to follow as frames.
+func snapshotPayload(snap store.Snapshot, limit int) ([]byte, [][]byte, error) {
 	envs := snap.Envelopes
 	var rest [][]byte
 	for {
@@ -237,7 +244,7 @@ func snapshotPayload(snap store.Snapshot) ([]byte, [][]byte, error) {
 		if err != nil {
 			return nil, nil, err
 		}
-		if len(payload)+appwire.Message2Overhead <= maxNoiseMessage || len(envs) == 0 {
+		if len(payload)+appwire.Message2Overhead <= limit || len(envs) == 0 {
 			return payload, rest, nil
 		}
 		rest = append([][]byte{envs[len(envs)-1]}, rest...)

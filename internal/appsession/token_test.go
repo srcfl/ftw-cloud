@@ -14,8 +14,8 @@ import (
 )
 
 // tokens gives the harness a token service and /v1/now behind TLS, and
-// returns a reader that answers with the status a token gets there.
-func (h *harness) tokens(t *testing.T) func(tok string) int {
+// returns a reader that answers with what a token gets there.
+func (h *harness) tokens(t *testing.T) func(tok string) (int, []byte) {
 	t.Helper()
 	svc := token.New(h.store, h.reg, nil)
 	h.app.Tokens = svc
@@ -23,16 +23,16 @@ func (h *harness) tokens(t *testing.T) func(tok string) int {
 	srv.TLS = &tls.Config{MinVersion: tls.VersionTLS13}
 	srv.StartTLS()
 	t.Cleanup(srv.Close)
-	return func(tok string) int {
+	return func(tok string) (int, []byte) {
 		req, _ := http.NewRequest(http.MethodGet, srv.URL+"/v1/now", nil)
 		req.Header.Set("Authorization", "Bearer "+tok)
 		resp, err := srv.Client().Do(req)
 		if err != nil {
 			t.Fatal(err)
 		}
-		_, _ = io.Copy(io.Discard, resp.Body)
-		resp.Body.Close()
-		return resp.StatusCode
+		defer resp.Body.Close()
+		body, _ := io.ReadAll(resp.Body)
+		return resp.StatusCode, body
 	}
 }
 
@@ -75,14 +75,14 @@ func TestADeviceGetsItsTokenOverItsSession(t *testing.T) {
 	if first.ExpiresInS != int64(token.Life/time.Second) {
 		t.Fatalf("expires in %d s", first.ExpiresInS)
 	}
-	if code := read(first.Token); code != http.StatusOK {
+	if code, _ := read(first.Token); code != http.StatusOK {
 		t.Fatalf("the token read %d", code)
 	}
 	second := viewer.getToken()
-	if code := read(first.Token); code != http.StatusUnauthorized {
+	if code, _ := read(first.Token); code != http.StatusUnauthorized {
 		t.Fatalf("the replaced token read %d", code)
 	}
-	if code := read(second.Token); code != http.StatusOK {
+	if code, _ := read(second.Token); code != http.StatusOK {
 		t.Fatalf("the new token read %d", code)
 	}
 	next := h.live(false)
@@ -104,12 +104,12 @@ func TestASuspensionKillsTheToken(t *testing.T) {
 	if code := viewer.closed(2 * time.Second); code != cloudwire.CloseDenied {
 		t.Fatalf("the suspended viewer closed with %d", code)
 	}
-	if code := read(tok.Token); code != http.StatusUnauthorized {
+	if code, _ := read(tok.Token); code != http.StatusUnauthorized {
 		t.Fatalf("a suspended device's token read %d", code)
 	}
 	owner.send(cloudwire.MsgUnsuspend, cloudwire.Suspend{DeviceID: "viewer"})
 	waitFor(t, "the suspension to lift", func() bool { return !h.reg.Suspended(h.home, "viewer", 1) })
-	if code := read(tok.Token); code != http.StatusUnauthorized {
+	if code, _ := read(tok.Token); code != http.StatusUnauthorized {
 		t.Fatalf("lifting the suspension brought the token back: %d", code)
 	}
 }

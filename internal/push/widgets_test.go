@@ -226,3 +226,74 @@ func TestASuspendedDevicesWidgetsGetNothing(t *testing.T) {
 		t.Fatalf("sent to %+v", got)
 	}
 }
+
+// ADR 0009: a watch and its phone get byte-identical alert payloads, so
+// Apple shows one alert when both are near; only the topic differs. A
+// watch's widgets go to the watch app's widgets topic.
+func TestAWatchAndItsPhoneGetTheSameAlert(t *testing.T) {
+	r := newRig(t)
+	r.svc.WatchApp = "energy.ftw.app.watchkitapp"
+	watch := cloudwire.Device{ID: "watch", Key: bytes.Repeat([]byte{8}, 32), Role: "watch", Scopes: r.all, Epoch: 1}
+	_ = r.register(t, r.owner, r.all, "phone-alerts")
+	if err := r.svc.Register(r.home, watch, r.all, cloudwire.PushRegister{APNsToken: []byte("watch-alerts"),
+		Environment: cloudwire.PushSandbox, Kind: cloudwire.PushKindAlert, App: cloudwire.PushAppWatch}); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.svc.Register(r.home, watch, r.all, cloudwire.PushRegister{APNsToken: []byte("watch-widgets"),
+		Environment: cloudwire.PushSandbox, Kind: KindWidgets, App: cloudwire.PushAppWatch}); err != nil {
+		t.Fatal(err)
+	}
+	r.svc.Event(r.home, []byte{0xa1, 0x61, 0x74, 0x65, 'e', 'v', 'e', 'n', 't'})
+	got := r.taken()
+	if len(got) != 2 {
+		t.Fatalf("the alert went to %d devices", len(got))
+	}
+	byToken := map[string]apns.Notification{}
+	for _, n := range got {
+		byToken[string(n.DeviceToken)] = n
+	}
+	phone, watchN := byToken["phone-alerts"], byToken["watch-alerts"]
+	if !bytes.Equal(phone.Payload, watchN.Payload) || len(phone.Payload) == 0 {
+		t.Fatal("the watch and its phone got different payloads")
+	}
+	if phone.App != "" || watchN.App != "energy.ftw.app.watchkitapp" || phone.Type != watchN.Type {
+		t.Fatalf("phone to %q, watch to %q", phone.App, watchN.App)
+	}
+
+	box := newBoxSigner(t)
+	r.svc.Held(r.home, cloudwire.MsgLP, box.lp(r.home, false))
+	r.svc.Held(r.home, cloudwire.MsgLP, box.lp(r.home, true))
+	got = r.taken()
+	if len(got) != 1 || got[0].App != "energy.ftw.app.watchkitapp" || got[0].Type != apns.PushWidgets {
+		t.Fatalf("the watch's widgets push %+v", got)
+	}
+
+	// A service that names no watch app sends a watch nothing, and its
+	// phone everything.
+	r.svc.WatchApp = ""
+	r.svc.Event(r.home, []byte{0xa0})
+	if got := r.taken(); len(got) != 1 || string(got[0].DeviceToken) != "phone-alerts" {
+		t.Fatalf("without a watch app, sent %+v", got)
+	}
+}
+
+// app names the app a token belongs to; anything but iphone or watch is
+// refused, and none is the iPhone app.
+func TestPushRegisterTakesOnlyKnownApps(t *testing.T) {
+	r := newRig(t)
+	for app, ok := range map[string]bool{"": true, cloudwire.PushAppIPhone: true, cloudwire.PushAppWatch: true, "ipad": false} {
+		err := r.svc.Register(r.home, r.owner, r.all, cloudwire.PushRegister{APNsToken: []byte("t-" + app),
+			Environment: cloudwire.PushSandbox, Kind: cloudwire.PushKindAlert, App: app})
+		if (err == nil) != ok {
+			t.Errorf("app %q: %v", app, err)
+		}
+	}
+	regs, _ := r.reg.PushRegs(r.home, cloudwire.PushKindAlert)
+	apps := map[string]string{}
+	for _, reg := range regs {
+		apps[string(reg.Token)] = reg.App
+	}
+	if apps["t-"] != cloudwire.PushAppIPhone || apps["t-iphone"] != cloudwire.PushAppIPhone || apps["t-watch"] != cloudwire.PushAppWatch {
+		t.Fatalf("stored apps %v", apps)
+	}
+}

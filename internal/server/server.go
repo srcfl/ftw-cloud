@@ -3,6 +3,7 @@
 //
 //	/v1/box   a box's uplink (package uplink)
 //	/v1/app   a phone's Noise session to the service (package appsession)
+//	/v1/app/once  a watch's one-shot read, Noise inside one POST (package appsession)
 //	/v1/now   a widget's token read (package token)
 //	/source   the source of the running service, as AGPL-3.0 asks
 //	/healthz  liveness, and nothing about any home
@@ -30,7 +31,7 @@ import (
 const SourceArchive = "/usr/share/ftw-cloud/source.tar.gz"
 
 // Routes are every path the service answers.
-var Routes = []string{"/v1/box", "/v1/app", "/v1/now", "/source", "/healthz"}
+var Routes = []string{"/v1/box", "/v1/app", "/v1/app/once", "/v1/now", "/source", "/healthz"}
 
 // devRoutes adds a local inspection route in binaries built with
 // -tags ftwclouddev. It is nil in every other build.
@@ -41,7 +42,8 @@ type Server struct {
 	Store    *store.Store
 	Registry *registry.Registry
 	Uplink   *uplink.Uplink
-	// App is nil on a host without a Noise key; /v1/app then says so.
+	// App is nil on a host without a Noise key; /v1/app and /v1/app/once
+	// then say so.
 	App *appsession.Server
 	// Tokens answers /v1/now. Tokens come only over the app session, so
 	// without a Noise key every token read is refused.
@@ -55,8 +57,10 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("/v1/box", s.Uplink)
 	if s.App != nil {
 		mux.Handle("/v1/app", s.App)
+		mux.HandleFunc("/v1/app/once", s.App.ServeOnce)
 	} else {
 		mux.HandleFunc("/v1/app", notYet)
+		mux.HandleFunc("/v1/app/once", notYet)
 	}
 	if s.Tokens != nil {
 		mux.Handle("/v1/now", s.Tokens)

@@ -36,6 +36,20 @@ to it yet.
   closes the sessions it touches at once.
 - While a phone looks, the service asks the box for one-second updates and
   asks again every 50 s; when nobody looks, it stops.
+- **One-shot read (ADR 0009).** watchOS gives an app HTTPS and nothing
+  lower, so a watch reads at `POST /v1/app/once?home=<id>`: the body is
+  Noise IK message 1 with the prologue `ftw.cloud.once.v1:` and the home id,
+  and it carries one of `read {have, hz}`, `token.get`, `push.register` or
+  `push.unregister`. The service admits the watch exactly as `/v1/app`
+  admits a phone: its key in the box's roster, where the box lists it with
+  role `watch`, a roster that has not run out, no suspension. A refusal is
+  403 with an empty body. The answer is message 2 with the snapshot, less
+  the envelopes `have` says the watch holds, and the envelopes that did not
+  fit after it, each after its length. The box's bytes go unchanged, so the
+  watch grades their freshness itself. The service keeps no session and no
+  Noise state after the answer. Limits: one read at a time per device and 30
+  a minute, 16 at once per home, 64 at once in the process, message 1 at
+  most 4 KiB, the answer within 10 s.
 - Limits per home: 16 sessions, one per device, 256 envelopes queued per
   phone, and a small message rate from each phone.
 - **Alerts (C4).** A box's signed `event` goes to its phones through APNs,
@@ -50,7 +64,10 @@ to it yet.
   Apple's key comes from Parameter Store
   ([deploy/apns.md](deploy/apns.md)).
 - **Widget push.** A widget registers its push token with `push.register
-  {kind: widgets}`, which needs `ftw.live.read`. When a box's prices reach
+  {kind: widgets}`, which needs `ftw.live.read`. A watch registers its
+  alert and widget tokens with `app: watch`; its pushes go to the watch
+  app's topic (`-apns-watch-topic`), and an alert to a watch is the same
+  payload, byte for byte, as to its phone. When a box's prices reach
   further than before, as when tomorrow's arrive, or a car is plugged in,
   the service sends Apple's widgets push: no data, only "content changed".
   The widgets then read `/v1/now`. At most 4 an hour per home, since Apple
@@ -74,6 +91,7 @@ Not built yet:
 
 ```
 box ──wss, TLS 1.3, signed frames──▶ /v1/box ──▶ store (memory) ◀── store.For(principal) ◀── /v1/app ◀──Noise IK── phone
+                                         │                                  ◀── /v1/app/once ◀──Noise IK in one POST── watch
                                          │                                  ◀── /v1/now ◀──token──── widget
                                          └────▶ registry (SQLite: key, roster, tombstones, suspensions, APNs, token hashes)
 ```
@@ -87,9 +105,10 @@ box ──wss, TLS 1.3, signed frames──▶ /v1/box ──▶ store (memory) 
   principal reads only `live`, `prices` and `hb` within that same scope. There is no
   listing and no principal for staff; `TestNoRouteReadsAHome` checks every
   route.
-- **A phone can narrow and nothing else.** It can say whether it is looking,
-  and an owner can suspend a device in the roster. Commands go from the app
-  to the box over the relay, never through here.
+- **A phone or a watch can narrow and nothing else.** A phone can say
+  whether it is looking, and an owner can suspend a device in the roster. A
+  watch can read, ask for its token and register for push. Commands go to
+  the box over the relay, never through here.
 - **The service sends five things.** `challenge`, `hello_ok`, `watch`,
   `resync` and `purged` are the whole downlink, and none asks the box to act.
   The box closes the uplink on anything else.

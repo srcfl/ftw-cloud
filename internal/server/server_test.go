@@ -54,7 +54,7 @@ func TestNoRouteReadsAHome(t *testing.T) {
 	s, home := newServer(t)
 	h := s.Handler()
 	paths := append(slices.Clone(Routes), "/", "/v1", "/v1/home", "/admin", "/debug/pprof/", "/metrics",
-		"/dev/held", "/dev/held?home="+home, "/v1/now?home="+home, "/v1/app?home="+home)
+		"/dev/held", "/dev/held?home="+home, "/v1/now?home="+home, "/v1/app?home="+home, "/v1/app/once?home="+home)
 	for _, p := range paths {
 		for _, m := range []string{http.MethodGet, http.MethodPost} {
 			w := httptest.NewRecorder()
@@ -111,14 +111,20 @@ func TestTheSocketsRefusePlainHTTP(t *testing.T) {
 	}
 }
 
-// A host without a Noise key serves boxes and says /v1/app is not there yet;
-// phones read through the relay meanwhile.
+// A host without a Noise key serves boxes and says /v1/app and the one-shot
+// read are not there yet; phones read through the relay meanwhile, and a
+// watch reads now on the box's exchange.
 func TestWithoutANoiseKeyTheAppEndpointIsOff(t *testing.T) {
 	s, home := newServer(t)
 	s.App = nil
-	w := httptest.NewRecorder()
-	s.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/v1/app?home="+home, nil))
-	if w.Code != http.StatusNotImplemented {
-		t.Fatalf("/v1/app without a Noise key: %d", w.Code)
+	for _, r := range []*http.Request{
+		httptest.NewRequest(http.MethodGet, "/v1/app?home="+home, nil),
+		httptest.NewRequest(http.MethodPost, "/v1/app/once?home="+home, bytes.NewReader([]byte{1})),
+	} {
+		w := httptest.NewRecorder()
+		s.Handler().ServeHTTP(w, r)
+		if w.Code != http.StatusNotImplemented {
+			t.Fatalf("%s without a Noise key: %d", r.URL.Path, w.Code)
+		}
 	}
 }

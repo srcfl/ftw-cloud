@@ -22,8 +22,10 @@ maintains it.
   id, the box key, the signed roster, owners' suspensions, tombstones, APNs
   registrations and the hashes of extension tokens. Nothing logs addresses.
 - **A phone can only narrow.** On `/v1/app` it can say whether it is looking,
-  and an owner can suspend a roster device. The service admits a phone by the
-  key its Noise handshake proved, and only if the box's roster lists it.
+  and an owner can suspend a roster device. On `/v1/app/once` a watch can
+  read, ask for its token and register for push, and nothing else. The
+  service admits a phone or a watch by the key its Noise handshake proved,
+  and only if the box's roster lists it.
 - **TLS ends in `ftwcloudd`.** The handshake is bound to the TLS session; a
   terminating proxy breaks it on purpose. A TCP load balancer is fine.
 - **Forward the box's bytes unchanged.** The service cannot sign for a box,
