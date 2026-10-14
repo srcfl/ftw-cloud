@@ -3,6 +3,7 @@ package store
 import (
 	"bytes"
 	"errors"
+	"slices"
 	"testing"
 	"time"
 
@@ -258,5 +259,89 @@ func TestABoxHandleCannotOpenASession(t *testing.T) {
 	_, box, _ := filled(t)
 	if _, _, err := box.Open(); !errors.Is(err, ErrDenied) {
 		t.Fatal("the box's handle opened a session")
+	}
+}
+
+// A token reaches its home through the roster entry it is bound to, at that
+// epoch, and reads only Now: the newest live, prices and hb, and the newest
+// live that carried sources.
+func TestATokenReadsOnlyNow(t *testing.T) {
+	s, box, _ := filled(t)
+	_ = box.Put(cloudwire.MsgPrices, []byte("prices"), 8, false)
+	_ = box.Put(cloudwire.MsgLP, []byte("lp"), 9, false)
+	_ = box.Put(cloudwire.MsgHealth, []byte("health"), 10, false)
+	_ = box.Put(cloudwire.MsgTiles, []byte("tiles"), 11, false)
+	box.SetRoster(roster(2, protocol.CloudScopes...))
+	x, err := s.For(Principal{Kind: Token, Home: "h1", DeviceID: "owner"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snap, err := x.Now()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, e := range snap.Envelopes {
+		got = append(got, string(e))
+	}
+	if want := []string{"live-full", "live-delta", "hb", "prices"}; !slices.Equal(got, want) {
+		t.Fatalf("a token read %v, want %v", got, want)
+	}
+	if _, err := x.Snapshot(); !errors.Is(err, ErrDenied) {
+		t.Fatal("a token read the whole snapshot")
+	}
+	if _, _, err := x.Open(); !errors.Is(err, ErrDenied) {
+		t.Fatal("a token opened a session")
+	}
+	dev, _ := s.For(Principal{Kind: Device, Home: "h1", DeviceKey: ownerKey})
+	if _, err := dev.Now(); !errors.Is(err, ErrDenied) {
+		t.Fatal("a device key read Now as a token")
+	}
+}
+
+// A token is held to the same rule as a device: a roster in force that lists
+// its entry at its epoch, and no suspension.
+func TestATokenIsAdmittedAsItsDeviceIs(t *testing.T) {
+	s, box, c := filled(t)
+	for name, p := range map[string]Principal{
+		"no device":      {Kind: Token, Home: "h1"},
+		"another device": {Kind: Token, Home: "h1", DeviceID: "stranger"},
+		"another epoch":  {Kind: Token, Home: "h1", DeviceID: "owner", Epoch: 1},
+		"another home":   {Kind: Token, Home: "h2", DeviceID: "owner"},
+	} {
+		if _, err := s.For(p); !errors.Is(err, ErrDenied) {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+	s.UseSuspensions(func(home, id string, epoch uint64) bool { return id == "viewer" })
+	if _, err := s.For(Principal{Kind: Token, Home: "h1", DeviceID: "viewer"}); !errors.Is(err, ErrDenied) {
+		t.Fatal("a suspended device's token was admitted")
+	}
+	c.t = c.t.Add(24*time.Hour + time.Second)
+	if _, err := s.For(Principal{Kind: Token, Home: "h1", DeviceID: "owner"}); !errors.Is(err, ErrDenied) {
+		t.Fatal("a token read past an expired roster")
+	}
+	box.SetRoster(roster(2, protocol.ScopeLiveRead))
+	if _, err := s.For(Principal{Kind: Token, Home: "h1", DeviceID: "owner"}); err != nil {
+		t.Fatal("a renewed roster still refused the token")
+	}
+	box.Delete()
+	if _, err := s.For(Principal{Kind: Token, Home: "h1", DeviceID: "owner"}); !errors.Is(err, ErrDenied) {
+		t.Fatal("a token reached a deleted home")
+	}
+}
+
+// A token whose device may not read live gets the hb alone.
+func TestATokenReadsWithinItsDevicesScope(t *testing.T) {
+	s, box, _ := filled(t)
+	_ = box.Put(cloudwire.MsgPrices, []byte("prices"), 8, false)
+	box.SetRoster(roster(2, protocol.ScopePlanRead))
+	x, err := s.For(Principal{Kind: Token, Home: "h1", DeviceID: "viewer"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snap, _ := x.Now()
+	if len(snap.Envelopes) != 1 || string(snap.Envelopes[0]) != "hb" {
+		t.Fatalf("a token without live read %q", snap.Envelopes)
 	}
 }

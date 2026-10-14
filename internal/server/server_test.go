@@ -16,6 +16,7 @@ import (
 	"github.com/srcfl/ftw-cloud/internal/appsession"
 	"github.com/srcfl/ftw-cloud/internal/registry"
 	"github.com/srcfl/ftw-cloud/internal/store"
+	"github.com/srcfl/ftw-cloud/internal/token"
 	"github.com/srcfl/ftw-cloud/internal/uplink"
 	"github.com/srcfl/ftw/go/protocol/appwire"
 	"github.com/srcfl/ftw/go/protocol/cloudwire"
@@ -33,7 +34,8 @@ func newServer(t *testing.T) (*Server, string) {
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	up := uplink.New(st, reg, key, log)
 	noise, _ := appwire.GenerateKeyPair()
-	s := &Server{Store: st, Registry: reg, Uplink: up, App: appsession.New(st, reg, up, noise, log), Log: log}
+	s := &Server{Store: st, Registry: reg, Uplink: up, App: appsession.New(st, reg, up, noise, log),
+		Tokens: token.New(st, reg, log), Log: log}
 
 	// A home with readings in it, held the way a box's uplink holds them.
 	const home = "canaryhomecanaryhomecanary"

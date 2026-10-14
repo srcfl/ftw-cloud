@@ -2,9 +2,10 @@
 // disk: a restart empties it, and boxes fill it again when they reconnect.
 //
 // The only way to a home is For, with a principal that proves whose home it
-// is: the box, by the signed hello on its own connection, or a phone in the
-// home's roster, by its Noise handshake. There is no listing, no lookup by
-// anything else, and no principal for staff. One bug in a second access path
+// is: the box, by the signed hello on its own connection; a phone in the
+// home's roster, by its Noise handshake; or an extension token the registry
+// bound to a roster entry. There is no listing, no lookup by anything else,
+// and no principal for staff. One bug in a second access path
 // would expose every home at once, so there is no second access path.
 package store
 
@@ -31,6 +32,9 @@ const (
 	Box Kind = iota + 1
 	// Device is a phone in the home's roster, proven by its Noise static key.
 	Device
+	// Token is a widget or an extension, proven by a token the registry
+	// bound to one roster entry. It reads only Now.
+	Token
 )
 
 // Principal is who is asking for a home.
@@ -39,6 +43,10 @@ type Principal struct {
 	Home string
 	// DeviceKey is the phone's X25519 static key, for Device.
 	DeviceKey []byte
+	// DeviceID and Epoch are the roster entry a token is bound to, for
+	// Token.
+	DeviceID string
+	Epoch    uint64
 }
 
 // ErrDenied is every refusal. It does not say whether the home exists.
@@ -107,7 +115,8 @@ type Handle struct {
 
 // For returns the principal's access to its home, or ErrDenied. A box may
 // create its home; a device reaches only a home whose current roster lists
-// its key, and only while no owner has suspended it.
+// its key, and only while no owner has suspended it. A token reaches it by
+// the same rule, through the roster entry it is bound to at that epoch.
 func (s *Store) For(p Principal) (*Handle, error) {
 	s.mu.Lock()
 	h := s.homes[p.Home]
@@ -125,24 +134,39 @@ func (s *Store) For(p Principal) (*Handle, error) {
 	case Device:
 		h.mu.Lock()
 		defer h.mu.Unlock()
-		dev, scopes, ok := s.access(p.Home, h, p.DeviceKey)
+		dev, scopes, ok := s.access(p.Home, h, byKey(p.DeviceKey))
 		if !ok {
 			return nil, ErrDenied
 		}
 		return &Handle{s: s, id: p.Home, h: h, kind: Device, device: dev, scopes: scopes}, nil
+	case Token:
+		h.mu.Lock()
+		defer h.mu.Unlock()
+		dev, scopes, ok := s.access(p.Home, h, func(d cloudwire.Device) bool {
+			return p.DeviceID != "" && d.ID == p.DeviceID && d.Epoch == p.Epoch
+		})
+		if !ok {
+			return nil, ErrDenied
+		}
+		return &Handle{s: s, id: p.Home, h: h, kind: Token, device: dev, scopes: scopes}, nil
 	}
 	return nil, ErrDenied
 }
 
+// byKey matches the roster entry with a device's Noise static key.
+func byKey(key []byte) func(cloudwire.Device) bool {
+	return func(d cloudwire.Device) bool { return len(key) == 32 && bytes.Equal(d.Key, key) }
+}
+
 // access is the one admission rule for a device: a roster in force that
-// lists its key, and no suspension. The caller holds h.mu.
-func (s *Store) access(id string, h *home, key []byte) (cloudwire.Device, []string, bool) {
+// lists it, and no suspension. The caller holds h.mu.
+func (s *Store) access(id string, h *home, match func(cloudwire.Device) bool) (cloudwire.Device, []string, bool) {
 	r := h.roster
-	if r == nil || len(key) != 32 || s.now().After(h.rosterAt.Add(time.Duration(r.TTLS)*time.Second)) {
+	if r == nil || s.now().After(h.rosterAt.Add(time.Duration(r.TTLS)*time.Second)) {
 		return cloudwire.Device{}, nil, false
 	}
 	for _, d := range r.Devices {
-		if !bytes.Equal(d.Key, key) {
+		if !match(d) {
 			continue
 		}
 		if s.suspended != nil && s.suspended(id, d.ID, d.Epoch) {
@@ -242,7 +266,7 @@ func (x *Handle) Recheck() {
 
 func (x *Handle) recheckLocked() {
 	for sess := range x.h.sessions {
-		dev, scopes, ok := x.s.access(x.id, x.h, sess.x.device.Key)
+		dev, scopes, ok := x.s.access(x.id, x.h, byKey(sess.x.device.Key))
 		switch {
 		case !ok:
 			sess.endLocked(cloudwire.CloseDenied)
@@ -292,14 +316,19 @@ func (x *Handle) Snapshot() (Snapshot, error) {
 	return x.snapshotLocked(), nil
 }
 
-func (x *Handle) snapshotLocked() Snapshot {
+func (x *Handle) snapshotLocked() Snapshot { return x.viewLocked(nil) }
+
+// viewLocked is the newest envelope of each class the device may read, of
+// only those classes when only is not nil, and the newest live that carried
+// sources, in rising seq. The caller holds the home's lock.
+func (x *Handle) viewLocked(only []string) Snapshot {
 	out := Snapshot{LastSeenMs: x.h.lastSeen.UnixMilli(), Online: x.h.online}
 	if !x.h.online && x.s.now().Sub(x.h.lastSeen) > ReadingsKeptFor {
 		return out
 	}
 	var held []Held
 	for t, e := range x.h.latest {
-		if x.mayRead(t) {
+		if x.mayRead(t) && (only == nil || slices.Contains(only, t)) {
 			held = append(held, e)
 		}
 	}
@@ -311,6 +340,22 @@ func (x *Handle) snapshotLocked() Snapshot {
 		out.Envelopes = append(out.Envelopes, e.Envelope)
 	}
 	return out
+}
+
+// NowClasses are what a token reads: the newest live, prices and hb, and the
+// newest live that carried sources. Never lp, plan, event, tiles or health.
+var NowClasses = []string{cloudwire.MsgLive, cloudwire.MsgPrices, cloudwire.MsgHB}
+
+// Now is what a widget reads with its token: the newest envelope of each of
+// NowClasses the device may read, and the newest live that carried sources,
+// in rising seq. After an hour without the box, no readings at all.
+func (x *Handle) Now() (Snapshot, error) {
+	if x.kind != Token {
+		return Snapshot{}, ErrDenied
+	}
+	x.h.mu.Lock()
+	defer x.h.mu.Unlock()
+	return x.viewLocked(NowClasses), nil
 }
 
 func (x *Handle) mayRead(class string) bool {

@@ -9,9 +9,9 @@
 // Message 2 carries the snapshot; after it every envelope the box sends that
 // the device may read goes out unchanged, one frame per Noise message.
 //
-// A phone may ask for faster updates, and an owner may suspend a device. That
-// is all it can do here: commands go to the box over the relay, never
-// through FTW Cloud.
+// A phone may ask for faster updates, ask for its extension token, register
+// for alerts, and an owner may suspend a device. That is all it can do here:
+// commands go to the box over the relay, never through FTW Cloud.
 package appsession
 
 import (
@@ -74,6 +74,9 @@ type Server struct {
 	// Push keeps the phones' APNs tokens. Nil ignores push.register and
 	// push.unregister. Set before serving.
 	Push Pusher
+	// Tokens issues extension tokens. Nil ignores token.get. Set before
+	// serving.
+	Tokens Tokens
 
 	mu      sync.Mutex
 	looking map[string]*look
@@ -84,6 +87,13 @@ type Server struct {
 type Pusher interface {
 	Register(home string, dev cloudwire.Device, scopes []string, r cloudwire.PushRegister) error
 	Unregister(home string, dev cloudwire.Device, r cloudwire.PushUnregister) error
+}
+
+// Tokens gives a device its extension token. token.Service is one. dev
+// comes from store.For, never from the phone's message.
+type Tokens interface {
+	Issue(home string, dev cloudwire.Device) (cloudwire.Token, error)
+	Drop(home, deviceID string) error
 }
 
 // look is one home's phones that can see it, and the loop that keeps the
@@ -183,7 +193,8 @@ func (s *Server) serve(conn *websocket.Conn, home string) (int, error) {
 	if err != nil {
 		return websocket.CloseInternalServerErr, err
 	}
-	c := &phoneConn{s: s, conn: conn, dev: dev, home: home, tokens: rateBurst, refilled: s.now()}
+	c := &phoneConn{s: s, conn: conn, dev: dev, home: home, tokens: rateBurst, refilled: s.now(),
+		replies: make(chan []byte, 1), quit: make(chan struct{})}
 	if err := c.write(msg2); err != nil {
 		return 0, err
 	}
@@ -297,6 +308,12 @@ type phoneConn struct {
 
 	tokens   float64
 	refilled time.Time
+
+	// replies carries the service's answers from the read loop to the
+	// session's goroutine, the only one that writes; quit closes when that
+	// goroutine is done.
+	replies chan []byte
+	quit    chan struct{}
 }
 
 func (c *phoneConn) setLooking(on bool) {
@@ -349,6 +366,7 @@ func (c *phoneConn) forward(env []byte) error {
 // run forwards until the store ends the session, the phone leaves or breaks
 // the protocol.
 func (c *phoneConn) run(sess *store.Session) (int, error) {
+	defer close(c.quit)
 	type result struct {
 		code int
 		err  error
@@ -363,6 +381,10 @@ func (c *phoneConn) run(sess *store.Session) (int, error) {
 	for {
 		select {
 		case env := <-sess.C():
+			if err := c.forward(env); err != nil {
+				return 0, err
+			}
+		case env := <-c.replies:
 			if err := c.forward(env); err != nil {
 				return 0, err
 			}
@@ -452,9 +474,34 @@ func (c *phoneConn) apply(frame []byte) (int, error) {
 		if c.s.Push != nil {
 			return 0, pushed(c.s.Push.Unregister(c.home, c.dev.Device(), r))
 		}
+	case cloudwire.MsgTokenGet:
+		if c.s.Tokens == nil {
+			return 0, nil
+		}
+		tok, err := c.s.Tokens.Issue(c.home, c.dev.Device())
+		if err != nil {
+			return 0, err
+		}
+		return 0, c.say(cloudwire.MsgToken, tok)
 	}
 	return 0, nil
 }
+
+// say hands an answer to the session's goroutine to send.
+func (c *phoneConn) say(t string, body any) error {
+	env, err := cloudwire.Unsigned(t, body)
+	if err != nil {
+		return err
+	}
+	select {
+	case c.replies <- env:
+		return nil
+	case <-c.quit:
+		return errClosed
+	}
+}
+
+var errClosed = errors.New("appsession: the session ended")
 
 // pushed lets the session go on after a registration the device may not
 // make, such as a viewer's: it gets no alerts, and nothing else changes.
@@ -485,6 +532,13 @@ func (c *phoneConn) suspend(deviceID string, on bool) error {
 		}
 		if err := c.s.registry.Suspend(c.home, d.ID, d.Epoch, c.s.now()); err != nil {
 			return err
+		}
+		// A suspended device's token dies; lifting the suspension does not
+		// bring it back, the app asks for a new one.
+		if c.s.Tokens != nil {
+			if err := c.s.Tokens.Drop(c.home, d.ID); err != nil {
+				return err
+			}
 		}
 		c.dev.Recheck()
 		return nil

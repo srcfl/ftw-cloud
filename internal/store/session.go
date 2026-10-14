@@ -49,7 +49,7 @@ func (x *Handle) Open() (Snapshot, *Session, error) {
 	defer x.h.mu.Unlock()
 	// The access checked in For may have changed since: check it again
 	// under the lock that roster changes take.
-	if _, _, ok := x.s.access(x.id, x.h, x.device.Key); !ok {
+	if _, _, ok := x.s.access(x.id, x.h, byKey(x.device.Key)); !ok {
 		return Snapshot{}, nil, ErrDenied
 	}
 	for sess := range x.h.sessions {

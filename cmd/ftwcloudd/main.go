@@ -37,6 +37,7 @@ import (
 	"github.com/srcfl/ftw-cloud/internal/registry"
 	"github.com/srcfl/ftw-cloud/internal/server"
 	"github.com/srcfl/ftw-cloud/internal/store"
+	"github.com/srcfl/ftw-cloud/internal/token"
 	"github.com/srcfl/ftw-cloud/internal/uplink"
 	"github.com/srcfl/ftw/go/protocol/appwire"
 	"github.com/srcfl/ftw/go/protocol/cloudwire"
@@ -97,7 +98,8 @@ func serve(args []string) error {
 	st := store.New(nil)
 	st.UseSuspensions(reg.Suspended)
 	up := uplink.New(st, reg, key, log)
-	srv := &server.Server{Store: st, Registry: reg, Uplink: up, Log: log}
+	tokens := token.New(st, reg, log)
+	srv := &server.Server{Store: st, Registry: reg, Uplink: up, Tokens: tokens, Log: log}
 
 	// Alerts: the box's signed events to its phones through Apple, and
 	// box.unreachable when a box is away. Without a key the service keeps
@@ -117,7 +119,10 @@ func serve(args []string) error {
 	}
 	pushSvc := push.New(reg, sender, log)
 	up.OnEvent = pushSvc.Event
-	up.OnRoster = pushSvc.Roster
+	up.OnRoster = func(home string, r *cloudwire.Roster) {
+		pushSvc.Roster(home, r)
+		tokens.Roster(home, r)
+	}
 	up.OnGone = pushSvc.BoxGone
 
 	// Phones register their tokens over their app session, so without a
@@ -125,6 +130,7 @@ func serve(args []string) error {
 	if noiseOn {
 		srv.App = appsession.New(st, reg, up, noise, log)
 		srv.App.Push = pushSvc
+		srv.App.Tokens = tokens
 	}
 	app := srv.App
 	up.OnConnect = func(home string) {

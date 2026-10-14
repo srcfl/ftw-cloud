@@ -12,7 +12,7 @@ both in `srcfl/ftw`. Both are proposed. The service runs at
 `cloud.ftw.energy` ([deploy/README.md](deploy/README.md)), but no box sends
 to it yet.
 
-## What works today (C2, C3, C4)
+## What works today
 
 - A box with FTW Cloud on keeps one WebSocket at `/v1/box`. The service
   checks that the box signed `hello` over this TLS session's exporter value,
@@ -21,8 +21,9 @@ to it yet.
 - Each home's newest message of each class lives in memory, as the exact bytes
   the box sent. Readings are dropped an hour after the box goes quiet and are
   never written to disk.
-- The registry (SQLite) holds the home id, the box key, the signed roster and
-  owners' suspensions. A box that turns FTW Cloud off gets its home deleted
+- The registry (SQLite) holds the home id, the box key, the signed roster,
+  owners' suspensions, APNs registrations and the hashes of extension
+  tokens. A box that turns FTW Cloud off gets its home deleted
   and a signed receipt.
 - `/source` serves the source of the running build, as AGPL-3.0 asks, and
   names its commit and image digest.
@@ -48,27 +49,36 @@ to it yet.
   device, and go when the roster drops them or Apple says they are gone.
   Apple's key comes from Parameter Store
   ([deploy/apns.md](deploy/apns.md)).
+- **Widget token.** A device asks for its extension token over its app
+  session with `token.get`. A widget reads `GET /v1/now` with it: the newest
+  `live`, `prices` and `hb` as the box signed them, and nothing else. The
+  service keeps the token's SHA-256, never the token. A device holds one
+  token, valid for 7 days; a new one replaces the old. It stops reading when
+  the roster drops the device, moves its epoch or runs out, an owner
+  suspends the device, or the home is purged.
 
-Not built yet, with a marked place in the code:
+Not built yet:
 
 | Step | What | Where |
 |---|---|---|
-| C5 | Widget token reads, `/v1/now`, tiles | `internal/server` |
+| C6 | Tiles, widget push | `internal/server`, `internal/push` |
 | C7–C8 | Statistics | not started |
 
 ## How it holds a home
 
 ```
 box ──wss, TLS 1.3, signed frames──▶ /v1/box ──▶ store (memory) ◀── store.For(principal) ◀── /v1/app ◀──Noise IK── phone
-                                         └────▶ registry (SQLite: key, roster, tombstones, suspensions)
+                                         │                                  ◀── /v1/now ◀──token──── widget
+                                         └────▶ registry (SQLite: key, roster, tombstones, suspensions, APNs, token hashes)
 ```
 
 - **The home id is a hash of the box's key.** It comes from the key that
   signed `hello`, never from a field anyone sends. A second box cannot claim
   a home that is not its own.
 - **One way in.** `store.For(principal)` is the only access to a home: a
-  `Box` principal may write its own home, and a `Device` principal may
-  read the classes its role and the owner's grant both allow. There is no
+  `Box` principal may write its own home, a `Device` principal may
+  read the classes its role and the owner's grant both allow, and a `Token`
+  principal reads only `live`, `prices` and `hb` within that same scope. There is no
   listing and no principal for staff; `TestNoRouteReadsAHome` checks every
   route.
 - **A phone can narrow and nothing else.** It can say whether it is looking,

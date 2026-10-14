@@ -3,12 +3,12 @@
 //
 //	/v1/box   a box's uplink (package uplink)
 //	/v1/app   a phone's Noise session to the service (package appsession)
-//	/v1/now   an extension's token read: C5, not built yet
+//	/v1/now   a widget's token read (package token)
 //	/source   the source of the running service, as AGPL-3.0 asks
 //	/healthz  liveness, and nothing about any home
 //
-// There is no route for staff. Reading a home needs its box's key or a
-// phone in its roster.
+// There is no route for staff. Reading a home needs its box's key, a phone in
+// its roster, or a token bound to one.
 package server
 
 import (
@@ -22,6 +22,7 @@ import (
 	"github.com/srcfl/ftw-cloud/internal/appsession"
 	"github.com/srcfl/ftw-cloud/internal/registry"
 	"github.com/srcfl/ftw-cloud/internal/store"
+	"github.com/srcfl/ftw-cloud/internal/token"
 	"github.com/srcfl/ftw-cloud/internal/uplink"
 )
 
@@ -42,7 +43,10 @@ type Server struct {
 	Uplink   *uplink.Uplink
 	// App is nil on a host without a Noise key; /v1/app then says so.
 	App *appsession.Server
-	Log *slog.Logger
+	// Tokens answers /v1/now. Tokens come only over the app session, so
+	// without a Noise key every token read is refused.
+	Tokens *token.Service
+	Log    *slog.Logger
 }
 
 // Handler is the whole HTTP surface.
@@ -54,9 +58,11 @@ func (s *Server) Handler() http.Handler {
 	} else {
 		mux.HandleFunc("/v1/app", notYet)
 	}
-	// C5: widgets read the newest live, prices and hb here with a 7-day
-	// token bound to one roster entry.
-	mux.HandleFunc("/v1/now", notYet)
+	if s.Tokens != nil {
+		mux.Handle("/v1/now", s.Tokens)
+	} else {
+		mux.HandleFunc("/v1/now", notYet)
+	}
 	mux.HandleFunc("/source", source)
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
@@ -130,7 +136,7 @@ func revision() string {
 
 // Upkeep applies the retention rules until ctx ends: readings go an hour
 // after the box does, homes without a roster go after 24 hours or 90 days,
-// and old tombstones go.
+// expired tokens go, and old tombstones go.
 func (s *Server) Upkeep(ctx context.Context, every time.Duration) {
 	t := time.NewTicker(every)
 	defer t.Stop()
@@ -140,6 +146,9 @@ func (s *Server) Upkeep(ctx context.Context, every time.Duration) {
 			return
 		case <-t.C:
 			s.Store.Sweep()
+			if err := s.Registry.TokenExpire(time.Now()); err != nil {
+				s.Log.Warn("token upkeep failed", "err", err)
+			}
 			gone, err := s.Registry.Expire(time.Now())
 			if err != nil {
 				s.Log.Warn("registry upkeep failed", "err", err)
