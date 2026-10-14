@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -43,6 +44,8 @@ type harness struct {
 	seq     uint64
 	rosterN uint64
 	boot    []byte
+	// shift moves the store's clock, in nanoseconds.
+	shift *atomic.Int64
 }
 
 type watchCount struct {
@@ -69,12 +72,16 @@ func newHarness(t testing.TB) *harness {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = reg.Close() })
-	st := store.New(nil)
+	shift := &atomic.Int64{}
+	st := store.New(func() time.Time { return time.Now().Add(time.Duration(shift.Load())) })
 	st.UseSuspensions(reg.Suspended)
 	noise, _ := appwire.GenerateKeyPair()
 	w := &watchCount{}
 	app := New(st, reg, w, noise, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	srv := httptest.NewUnstartedServer(app)
+	mux := http.NewServeMux()
+	mux.Handle("/v1/app", app)
+	mux.HandleFunc("/v1/app/once", app.ServeOnce)
+	srv := httptest.NewUnstartedServer(mux)
 	srv.TLS = &tls.Config{MinVersion: tls.VersionTLS13}
 	srv.StartTLS()
 	t.Cleanup(srv.Close)
@@ -93,7 +100,7 @@ func newHarness(t testing.TB) *harness {
 	owner, _ := appwire.GenerateKeyPair()
 	viewer, _ := appwire.GenerateKeyPair()
 	h := &harness{t: t, store: st, reg: reg, app: app, srv: srv, watch: w, noise: noise, boxKey: boxKey,
-		home: home, box: box, owner: owner, viewer: viewer, boot: bytes.Repeat([]byte{0xb0}, cloudwire.BootBytes)}
+		home: home, box: box, owner: owner, viewer: viewer, boot: bytes.Repeat([]byte{0xb0}, cloudwire.BootBytes), shift: shift}
 	h.setRoster(h.devices(1, 1), protocol.ScopeLiveRead, protocol.ScopePlanRead)
 	return h
 }

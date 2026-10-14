@@ -37,6 +37,7 @@ import (
 	"github.com/srcfl/ftw-cloud/internal/registry"
 	"github.com/srcfl/ftw-cloud/internal/server"
 	"github.com/srcfl/ftw-cloud/internal/store"
+	"github.com/srcfl/ftw-cloud/internal/token"
 	"github.com/srcfl/ftw-cloud/internal/uplink"
 	"github.com/srcfl/ftw/go/protocol/appwire"
 	"github.com/srcfl/ftw/go/protocol/cloudwire"
@@ -68,7 +69,8 @@ func serve(args []string) error {
 	keyFile := fs.String("tls-key", "", "certificate key file, with -tls-cert")
 	email := fs.String("acme-email", "", "contact for the certificate authority")
 	apnsDir := fs.String("apns-dir", "/run/secrets/apns", "directory with Apple's key.p8, key-id and team-id; without it no alert is sent")
-	apnsTopic := fs.String("apns-topic", "energy.ftw.app", "the app's bundle id")
+	apnsTopic := fs.String("apns-topic", "energy.ftw.app", "the iPhone app's bundle id")
+	apnsWatch := fs.String("apns-watch-topic", "energy.ftw.app.watchkitapp", "the watch app's bundle id")
 	devPush := fs.String("dev-push-listen", "", "loopback address for registering a token by hand (development builds only)")
 	devCapture := fs.String("dev-apns-capture", "", "write each alert to this directory instead of sending it to Apple (development builds only)")
 	_ = fs.Parse(args)
@@ -97,11 +99,13 @@ func serve(args []string) error {
 	st := store.New(nil)
 	st.UseSuspensions(reg.Suspended)
 	up := uplink.New(st, reg, key, log)
-	srv := &server.Server{Store: st, Registry: reg, Uplink: up, Log: log}
+	tokens := token.New(st, reg, log)
+	srv := &server.Server{Store: st, Registry: reg, Uplink: up, Tokens: tokens, Log: log}
 
 	// Alerts: the box's signed events to its phones through Apple, and
-	// box.unreachable when a box is away. Without a key the service keeps
-	// registrations and sends nothing.
+	// box.unreachable when a box is away. Widgets: a push with no data when
+	// prices or a car change. Without a key the service keeps registrations
+	// and sends nothing.
 	var sender push.Sender
 	switch client, err := loadAPNs(*apnsDir, *apnsTopic); {
 	case err != nil:
@@ -116,8 +120,12 @@ func serve(args []string) error {
 		sender = client
 	}
 	pushSvc := push.New(reg, sender, log)
-	up.OnEvent = pushSvc.Event
-	up.OnRoster = pushSvc.Roster
+	pushSvc.WatchApp = *apnsWatch
+	up.OnHeld = pushSvc.Held
+	up.OnRoster = func(home string, r *cloudwire.Roster) {
+		pushSvc.Roster(home, r)
+		tokens.Roster(home, r)
+	}
 	up.OnGone = pushSvc.BoxGone
 
 	// Phones register their tokens over their app session, so without a
@@ -125,6 +133,7 @@ func serve(args []string) error {
 	if noiseOn {
 		srv.App = appsession.New(st, reg, up, noise, log)
 		srv.App.Push = pushSvc
+		srv.App.Tokens = tokens
 	}
 	app := srv.App
 	up.OnConnect = func(home string) {

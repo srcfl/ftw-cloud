@@ -9,9 +9,9 @@
 // Message 2 carries the snapshot; after it every envelope the box sends that
 // the device may read goes out unchanged, one frame per Noise message.
 //
-// A phone may ask for faster updates, and an owner may suspend a device. That
-// is all it can do here: commands go to the box over the relay, never
-// through FTW Cloud.
+// A phone may ask for faster updates, ask for its extension token, register
+// for alerts, and an owner may suspend a device. That is all it can do here:
+// commands go to the box over the relay, never through FTW Cloud.
 package appsession
 
 import (
@@ -50,6 +50,8 @@ const (
 	// updates while a phone looks. The box's watch lasts 60 s, so the ask
 	// comes before it lapses.
 	WatchRenew = 50 * time.Second
+	// boxWatchLasts is how long the box keeps one watch in force.
+	boxWatchLasts = 60 * time.Second
 	// roleOwner is the registry's owner role, as the roster names it.
 	// go/protocol does not generate role names yet.
 	roleOwner = "owner"
@@ -70,13 +72,25 @@ type Server struct {
 	now      func() time.Time
 	// renewEvery is WatchRenew; tests shorten it.
 	renewEvery time.Duration
+	// once counts the one-shot reads under way; onceMessage2 bounds their
+	// message 2, and onceEphemeral, when set, fixes their ephemeral key.
+	// Tests set the last two to replay golden vectors.
+	once          onceLimits
+	onceMessage2  int
+	onceEphemeral *appwire.KeyPair
 
 	// Push keeps the phones' APNs tokens. Nil ignores push.register and
 	// push.unregister. Set before serving.
 	Push Pusher
+	// Tokens issues extension tokens. Nil ignores token.get. Set before
+	// serving.
+	Tokens Tokens
 
 	mu      sync.Mutex
 	looking map[string]*look
+	// watchedUntil is, per home, when the box's watch a one-shot read asked
+	// for lapses, so a box that comes back before then is asked again.
+	watchedUntil map[string]time.Time
 }
 
 // Pusher keeps a device's APNs tokens. push.Service is one. dev and scopes
@@ -84,6 +98,13 @@ type Server struct {
 type Pusher interface {
 	Register(home string, dev cloudwire.Device, scopes []string, r cloudwire.PushRegister) error
 	Unregister(home string, dev cloudwire.Device, r cloudwire.PushUnregister) error
+}
+
+// Tokens gives a device its extension token. token.Service is one. dev
+// comes from store.For, never from the phone's message.
+type Tokens interface {
+	Issue(home string, dev cloudwire.Device) (cloudwire.Token, error)
+	Drop(home, deviceID string) error
 }
 
 // look is one home's phones that can see it, and the loop that keeps the
@@ -100,7 +121,8 @@ func New(st *store.Store, reg *registry.Registry, w Watcher, key appwire.KeyPair
 		log = slog.Default()
 	}
 	return &Server{store: st, registry: reg, watcher: w, key: key, log: log, now: time.Now,
-		renewEvery: WatchRenew, looking: map[string]*look{}}
+		renewEvery: WatchRenew, looking: map[string]*look{}, watchedUntil: map[string]time.Time{}, onceMessage2: maxNoiseMessage,
+		once: onceLimits{homes: map[string]int{}, devices: map[string]*onceDevice{}}}
 }
 
 var upgrader = websocket.Upgrader{
@@ -175,7 +197,7 @@ func (s *Server) serve(conn *websocket.Conn, home string) (int, error) {
 	}
 	defer sess.Close()
 
-	msg2Payload, rest, err := snapshotPayload(snap)
+	msg2Payload, rest, err := snapshotPayload(snap, maxNoiseMessage)
 	if err != nil {
 		return websocket.CloseInternalServerErr, err
 	}
@@ -183,7 +205,8 @@ func (s *Server) serve(conn *websocket.Conn, home string) (int, error) {
 	if err != nil {
 		return websocket.CloseInternalServerErr, err
 	}
-	c := &phoneConn{s: s, conn: conn, dev: dev, home: home, tokens: rateBurst, refilled: s.now()}
+	c := &phoneConn{s: s, conn: conn, dev: dev, home: home, tokens: rateBurst, refilled: s.now(),
+		replies: make(chan []byte, 1), quit: make(chan struct{})}
 	if err := c.write(msg2); err != nil {
 		return 0, err
 	}
@@ -216,9 +239,9 @@ func parseNow(payload []byte) (int, error) {
 	return now.Hz, nil
 }
 
-// snapshotPayload is message 2. Envelopes that do not fit in one Noise
-// message come back as rest, to follow as frames.
-func snapshotPayload(snap store.Snapshot) ([]byte, [][]byte, error) {
+// snapshotPayload is message 2. Envelopes that do not fit in a message 2 of
+// at most limit bytes come back as rest, to follow as frames.
+func snapshotPayload(snap store.Snapshot, limit int) ([]byte, [][]byte, error) {
 	envs := snap.Envelopes
 	var rest [][]byte
 	for {
@@ -226,7 +249,7 @@ func snapshotPayload(snap store.Snapshot) ([]byte, [][]byte, error) {
 		if err != nil {
 			return nil, nil, err
 		}
-		if len(payload)+appwire.Message2Overhead <= maxNoiseMessage || len(envs) == 0 {
+		if len(payload)+appwire.Message2Overhead <= limit || len(envs) == 0 {
 			return payload, rest, nil
 		}
 		rest = append([][]byte{envs[len(envs)-1]}, rest...)
@@ -272,14 +295,32 @@ func (s *Server) renew(home string, stop <-chan struct{}) {
 }
 
 // BoxConnected asks a box that just connected for one-second updates when a
-// phone is already looking. The uplink calls it after hello_ok.
+// phone is already looking, or a one-shot read asked for them less than a
+// minute ago. The uplink calls it after hello_ok.
 func (s *Server) BoxConnected(home string) {
 	s.mu.Lock()
-	looking := s.looking[home] != nil
+	looking := s.looking[home] != nil || s.now().Before(s.watchedUntil[home])
 	s.mu.Unlock()
 	if looking {
 		s.watcher.Watch(home)
 	}
+}
+
+// watchOnce asks the box for one-second updates for a one-shot read with
+// hz 1, as a looking phone does, without making the read wait on the box's
+// socket. The box's watch lasts a minute; a box that comes back within it
+// is asked again.
+func (s *Server) watchOnce(home string) {
+	now := s.now()
+	s.mu.Lock()
+	for h, until := range s.watchedUntil {
+		if !now.Before(until) {
+			delete(s.watchedUntil, h)
+		}
+	}
+	s.watchedUntil[home] = now.Add(boxWatchLasts)
+	s.mu.Unlock()
+	go s.watcher.Watch(home)
 }
 
 // phoneConn is one phone's session after the handshake.
@@ -297,6 +338,12 @@ type phoneConn struct {
 
 	tokens   float64
 	refilled time.Time
+
+	// replies carries the service's answers from the read loop to the
+	// session's goroutine, the only one that writes; quit closes when that
+	// goroutine is done.
+	replies chan []byte
+	quit    chan struct{}
 }
 
 func (c *phoneConn) setLooking(on bool) {
@@ -349,6 +396,7 @@ func (c *phoneConn) forward(env []byte) error {
 // run forwards until the store ends the session, the phone leaves or breaks
 // the protocol.
 func (c *phoneConn) run(sess *store.Session) (int, error) {
+	defer close(c.quit)
 	type result struct {
 		code int
 		err  error
@@ -363,6 +411,10 @@ func (c *phoneConn) run(sess *store.Session) (int, error) {
 	for {
 		select {
 		case env := <-sess.C():
+			if err := c.forward(env); err != nil {
+				return 0, err
+			}
+		case env := <-c.replies:
 			if err := c.forward(env); err != nil {
 				return 0, err
 			}
@@ -452,9 +504,34 @@ func (c *phoneConn) apply(frame []byte) (int, error) {
 		if c.s.Push != nil {
 			return 0, pushed(c.s.Push.Unregister(c.home, c.dev.Device(), r))
 		}
+	case cloudwire.MsgTokenGet:
+		if c.s.Tokens == nil {
+			return 0, nil
+		}
+		tok, err := c.s.Tokens.Issue(c.home, c.dev.Device())
+		if err != nil {
+			return 0, err
+		}
+		return 0, c.say(cloudwire.MsgToken, tok)
 	}
 	return 0, nil
 }
+
+// say hands an answer to the session's goroutine to send.
+func (c *phoneConn) say(t string, body any) error {
+	env, err := cloudwire.Unsigned(t, body)
+	if err != nil {
+		return err
+	}
+	select {
+	case c.replies <- env:
+		return nil
+	case <-c.quit:
+		return errClosed
+	}
+}
+
+var errClosed = errors.New("appsession: the session ended")
 
 // pushed lets the session go on after a registration the device may not
 // make, such as a viewer's: it gets no alerts, and nothing else changes.
@@ -486,7 +563,13 @@ func (c *phoneConn) suspend(deviceID string, on bool) error {
 		if err := c.s.registry.Suspend(c.home, d.ID, d.Epoch, c.s.now()); err != nil {
 			return err
 		}
+		// The suspended device's sessions end first, whatever happens to
+		// its token. Its token dies; lifting the suspension does not bring
+		// it back, the app asks for a new one.
 		c.dev.Recheck()
+		if c.s.Tokens != nil {
+			return c.s.Tokens.Drop(c.home, d.ID)
+		}
 		return nil
 	}
 	return nil

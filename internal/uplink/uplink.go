@@ -67,12 +67,12 @@ type Uplink struct {
 	// box that just came back for one-second updates and push can stop
 	// waiting to say it is out of reach. Set before serving.
 	OnConnect func(home string)
-	// OnEvent gets each event the box signed, as the envelope it arrived
-	// in; OnRoster each roster the service keeps; OnGone the end of the
-	// home's current uplink, with the reason the box gave in its bye, or
-	// "" when the socket just dropped. Push uses them. Each runs on the
-	// box's goroutine and must not block. Set before serving.
-	OnEvent  func(home string, envelope []byte)
+	// OnHeld gets each envelope the service holds, with its class, as the
+	// box signed it; OnRoster each roster the service keeps; OnGone the end
+	// of the home's current uplink, with the reason the box gave in its
+	// bye, or "" when the socket just dropped. Push uses them. Each runs on
+	// the box's goroutine and must not block. Set before serving.
+	OnHeld   func(home, class string, envelope []byte)
 	OnRoster func(home string, r *cloudwire.Roster)
 	OnGone   func(home, why string)
 }
@@ -369,8 +369,8 @@ func (c *boxConn) apply(env cloudwire.Envelope) (stop bool, err error) {
 	if err := c.handle.Put(env.T, raw, h.Seq, env.T == cloudwire.MsgLive && carriesTable(env.B)); err != nil {
 		return true, err
 	}
-	if env.T == cloudwire.MsgEvent && c.u.OnEvent != nil {
-		c.u.OnEvent(c.home, raw)
+	if c.u.OnHeld != nil {
+		c.u.OnHeld(c.home, env.T, raw)
 	}
 	return false, nil
 }

@@ -1,8 +1,9 @@
 # The Noise key phones dial
 
 A phone reads its home at `/v1/app` over Noise IK to the service's static
-X25519 key, and the app carries the public half. Without the key the service
-serves boxes, and `/v1/app` answers 501. Make the private key on a machine
+X25519 key, and the app carries the public half. A watch reads at
+`/v1/app/once` with the same key. Without the key the service serves boxes,
+and both answer 501. Make the private key on a machine
 signed in to the account and put it straight into AWS Systems Manager
 Parameter Store; delete the file once it is there.
 The host reads it from there into tmpfs at every boot. It is never in the
@@ -52,7 +53,18 @@ curl -s --http1.1 -o /dev/null -w '%{http_code}\n' --max-time 4 \
 
 It prints 101 and then times out, because the service waits for Noise
 message 1. Without the key it prints 501. Without the WebSocket headers it
-prints 400 either way, so leave them in. The start line in the log,
+prints 400 either way, so leave them in.
+
+The watch's door takes one POST:
+
+```bash
+head -c 96 /dev/urandom | curl -s -o /dev/null -w '%{http_code}\n' --max-time 4 \
+  -H 'Content-Type: application/octet-stream' --data-binary @- \
+  'https://cloud.ftw.energy/v1/app/once?home=aaaaaaaaaaaaaaaaaaaaaaaaaa'
+```
+
+It prints 403, because random bytes are no handshake to the service's key.
+Without the key it prints 501. The start line in the log,
 `ftwcloudd listening … noise_key=…`, shows the public half from step 1.
 
 ## 4. Put the public half in the app

@@ -96,7 +96,7 @@ func BenchmarkSnapshot(b *testing.B) {
 		if err != nil {
 			b.Fatal(err)
 		}
-		payload, _, err := snapshotPayload(snap)
+		payload, _, err := snapshotPayload(snap, maxNoiseMessage)
 		if err != nil {
 			b.Fatal(err)
 		}

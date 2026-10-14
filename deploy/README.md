@@ -153,7 +153,8 @@ curl -sI https://cloud.ftw.energy/source
 `ok` means DNS, the certificate and the service all work. `/source` returns
 the source archive, and its headers name the commit (`X-Source-Revision`) and
 the image digest (`X-Source-Image`), which should match what CI built.
-`/v1/app` and `/v1/now` answer 501 until C3 and C5.
+`/v1/app` answers 501 on a host without the Noise key, and `/v1/now` answers
+401 to a request without a valid token.
 
 ## Cost
 
@@ -198,6 +199,7 @@ Cloud data; the images on `ghcr.io` hold only code.
 ## Not here yet
 
 The APNs key ([apns.md](apns.md)) and the Noise key phones dial
-([noise.md](noise.md)) come from Parameter Store. Widget tokens (C5) and
-statistics (C7–C8) add secrets, egress and storage when they land. The erase test, canary homes
+([noise.md](noise.md)) come from Parameter Store. Widget tokens need no
+secret: the registry holds their hashes. Statistics (C7–C8) add secrets,
+egress and storage when they land. The erase test, canary homes
 and the external heartbeat that pages Sourceful belong with the first homes.

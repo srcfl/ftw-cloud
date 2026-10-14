@@ -25,5 +25,7 @@ jobs:
         run: bash scripts/check-imports.sh
       - name: What a box can send never panics the service
         run: go test -run XXX -fuzz FuzzBoxMessage -fuzztime 30s ./internal/uplink
+      - name: What a watch can post never panics the service
+        run: go test -run XXX -fuzz FuzzOnceMessage -fuzztime 30s ./internal/appsession
       - name: Builds for the host
         run: GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -o /dev/null ./cmd/ftwcloudd

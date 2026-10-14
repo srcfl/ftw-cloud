@@ -234,3 +234,37 @@ func TestOnlyAnAppleKeyIsTaken(t *testing.T) {
 		t.Fatal("sent to an environment that does not exist")
 	}
 }
+
+// A widgets push goes to the app's widgets topic with Apple's own push type
+// and default priority; a token from another app names that app's topic.
+func TestAWidgetsPushUsesTheWidgetsTopic(t *testing.T) {
+	p8, key := testP8(t)
+	apple := newFakeApple(t, &key.PublicKey)
+	now := time.Unix(1_791_820_800, 0)
+	c := apple.client(t, p8, func() time.Time { return now })
+	payload := []byte(`{"aps":{"content-changed":true}}`)
+	for _, n := range []Notification{
+		{Environment: Production, DeviceToken: []byte{1}, Type: PushWidgets, Payload: payload},
+		{Environment: Production, DeviceToken: []byte{2}, Type: PushWidgets, App: "energy.ftw.app.watchkitapp", Payload: payload},
+		{Environment: Production, DeviceToken: []byte{3}, App: "energy.ftw.app.watchkitapp", Payload: payload},
+	} {
+		if res, err := c.Send(context.Background(), n); err != nil || !res.OK() {
+			t.Fatalf("send: %+v %v", res, err)
+		}
+	}
+	for i, want := range []struct{ topic, kind, priority string }{
+		{"energy.ftw.app.push-type.widgets", "widgets", ""},
+		{"energy.ftw.app.watchkitapp.push-type.widgets", "widgets", ""},
+		{"energy.ftw.app.watchkitapp", "alert", "10"},
+	} {
+		r := apple.reqs[i]
+		if r.Header.Get("apns-topic") != want.topic || r.Header.Get("apns-push-type") != want.kind ||
+			r.Header.Get("apns-priority") != want.priority {
+			t.Errorf("push %d: topic %q, type %q, priority %q", i, r.Header.Get("apns-topic"),
+				r.Header.Get("apns-push-type"), r.Header.Get("apns-priority"))
+		}
+	}
+	if _, err := c.Send(context.Background(), Notification{Environment: Production, DeviceToken: []byte{4}, Type: "background"}); err == nil {
+		t.Fatal("an unknown push type was sent")
+	}
+}

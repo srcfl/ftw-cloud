@@ -3,8 +3,8 @@
 // by the team's .p8 key) that is renewed every 40 minutes.
 //
 // It knows nothing about homes or events. The caller hands it a device
-// token and the payload bytes, and gets back what Apple said, including
-// whether the token is gone for good.
+// token, the app, the push type and the payload bytes, and gets back what
+// Apple said, including whether the token is gone for good.
 package apns
 
 import (
@@ -41,6 +41,16 @@ const (
 	Production = "production"
 )
 
+// Push types. An alert shows on the phone; a widgets push carries no data
+// and tells WidgetKit to reload the app's widgets, which Apple budgets.
+const (
+	PushAlert   = "alert"
+	PushWidgets = "widgets"
+)
+
+// widgetsTopicSuffix follows the app's bundle id in a widgets push's topic.
+const widgetsTopicSuffix = ".push-type.widgets"
+
 // TokenLife is how long one provider token is used. Apple refuses a token
 // older than an hour and one renewed more often than every 20 minutes.
 const TokenLife = 40 * time.Minute
@@ -55,7 +65,8 @@ type Config struct {
 	// KeyID is the key's 10-character id; TeamID the team's.
 	KeyID  string
 	TeamID string
-	// Topic is the app's bundle id.
+	// Topic is the iPhone app's bundle id, for a notification that names
+	// no app.
 	Topic string
 
 	// Seams for tests. Production leaves them zero.
@@ -130,7 +141,12 @@ type Notification struct {
 	Environment string
 	// DeviceToken is the token the phone got from iOS.
 	DeviceToken []byte
-	Payload     []byte
+	// App is the bundle id of the app the token belongs to; empty is the
+	// iPhone app, Config.Topic.
+	App string
+	// Type is PushAlert, the default when empty, or PushWidgets.
+	Type    string
+	Payload []byte
 	// Expiration is when Apple may stop trying to deliver. Zero means
 	// deliver now or not at all.
 	Expiration time.Time
@@ -151,9 +167,18 @@ type Result struct {
 // OK reports whether Apple took the push.
 func (r Result) OK() bool { return r.Status == http.StatusOK }
 
-// Send posts one alert. Every alert has the same priority and push type,
-// and no collapse id, so nothing in the request says what kind it is.
+// Send posts one push. Every alert has the same priority and push type, and
+// no collapse id, so nothing in the request says what kind of event it
+// carries. A widgets push goes to the app's widgets topic with Apple's
+// default priority.
 func (c *Client) Send(ctx context.Context, n Notification) (Result, error) {
+	switch n.Type {
+	case "":
+		n.Type = PushAlert
+	case PushAlert, PushWidgets:
+	default:
+		return Result{}, fmt.Errorf("apns: unknown push type %q", n.Type)
+	}
 	base := c.cfg.ProductionURL
 	switch n.Environment {
 	case Production:
@@ -185,10 +210,18 @@ func (c *Client) post(ctx context.Context, base string, n Notification, renew bo
 	if err != nil {
 		return Result{}, err
 	}
+	topic := n.App
+	if topic == "" {
+		topic = c.cfg.Topic
+	}
 	req.Header.Set("authorization", "bearer "+token)
-	req.Header.Set("apns-topic", c.cfg.Topic)
-	req.Header.Set("apns-push-type", "alert")
-	req.Header.Set("apns-priority", "10")
+	req.Header.Set("apns-push-type", n.Type)
+	if n.Type == PushWidgets {
+		req.Header.Set("apns-topic", topic+widgetsTopicSuffix)
+	} else {
+		req.Header.Set("apns-topic", topic)
+		req.Header.Set("apns-priority", "10")
+	}
 	exp := int64(0)
 	if !n.Expiration.IsZero() {
 		exp = n.Expiration.Unix()

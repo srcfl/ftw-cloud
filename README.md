@@ -12,7 +12,7 @@ both in `srcfl/ftw`. Both are proposed. The service runs at
 `cloud.ftw.energy` ([deploy/README.md](deploy/README.md)), but no box sends
 to it yet.
 
-## What works today (C2, C3, C4)
+## What works today
 
 - A box with FTW Cloud on keeps one WebSocket at `/v1/box`. The service
   checks that the box signed `hello` over this TLS session's exporter value,
@@ -21,8 +21,9 @@ to it yet.
 - Each home's newest message of each class lives in memory, as the exact bytes
   the box sent. Readings are dropped an hour after the box goes quiet and are
   never written to disk.
-- The registry (SQLite) holds the home id, the box key, the signed roster and
-  owners' suspensions. A box that turns FTW Cloud off gets its home deleted
+- The registry (SQLite) holds the home id, the box key, the signed roster,
+  owners' suspensions, APNs registrations and the hashes of extension
+  tokens. A box that turns FTW Cloud off gets its home deleted
   and a signed receipt.
 - `/source` serves the source of the running build, as AGPL-3.0 asks, and
   names its commit and image digest.
@@ -35,6 +36,21 @@ to it yet.
   closes the sessions it touches at once.
 - While a phone looks, the service asks the box for one-second updates and
   asks again every 50 s; when nobody looks, it stops.
+- **One-shot read (ADR 0009).** watchOS gives an app HTTPS and nothing
+  lower, so a watch reads at `POST /v1/app/once?home=<id>`: the body is
+  Noise IK message 1 with the prologue `ftw.cloud.once.v1:` and the home id,
+  and it carries one of `read {have, hz}`, `token.get`, `push.register` or
+  `push.unregister`. The service admits the watch exactly as `/v1/app`
+  admits a phone: its key in the box's roster, a roster that has not run
+  out, no suspension. The box lists a watch with role `watch` and the
+  scopes it derives; the service checks no role. A refusal is
+  403 with an empty body. The answer is message 2 with the snapshot, less
+  the envelopes `have` says the watch holds, and the envelopes that did not
+  fit after it, each after its length. The box's bytes go unchanged, so the
+  watch grades their freshness itself. The service keeps no session and no
+  Noise state after the answer. Limits: one read at a time per device and 30
+  a minute, 16 at once per home, 64 at once in the process, message 1 at
+  most 4 KiB, the answer within 10 s.
 - Limits per home: 16 sessions, one per device, 256 envelopes queued per
   phone, and a small message rate from each phone.
 - **Alerts (C4).** A box's signed `event` goes to its phones through APNs,
@@ -48,32 +64,53 @@ to it yet.
   device, and go when the roster drops them or Apple says they are gone.
   Apple's key comes from Parameter Store
   ([deploy/apns.md](deploy/apns.md)).
+- **Widget push.** A widget registers its push token with `push.register
+  {kind: widgets}`, which needs `ftw.live.read`. A watch registers its
+  alert and widget tokens with `app: watch`; its pushes go to the watch
+  app's topic (`-apns-watch-topic`), and an alert to a watch is the same
+  payload, byte for byte, as to its phone. When a box's prices reach
+  further than before, as when tomorrow's arrive, or a car is plugged in,
+  the service sends Apple's widgets push: no data, only "content changed".
+  The widgets then read `/v1/now`. At most 4 an hour per home, since Apple
+  budgets widget reloads. A device holds at most 4 tokens of each kind; a
+  new one pushes out its oldest.
+- **Widget token.** A device asks for its extension token over its app
+  session with `token.get`. A widget reads `GET /v1/now` with it: the newest
+  `live`, `prices` and `hb` as the box signed them, and nothing else. The
+  service keeps the token's SHA-256, never the token. A device holds one
+  token, valid for 7 days; a new one replaces the old. It stops reading when
+  the roster drops the device, moves its epoch or runs out, an owner
+  suspends the device, or the home is purged.
 
-Not built yet, with a marked place in the code:
+Not built yet:
 
 | Step | What | Where |
 |---|---|---|
-| C5 | Widget token reads, `/v1/now`, tiles | `internal/server` |
+| C6 | Tiles | `internal/server` |
 | C7–C8 | Statistics | not started |
 
 ## How it holds a home
 
 ```
 box ──wss, TLS 1.3, signed frames──▶ /v1/box ──▶ store (memory) ◀── store.For(principal) ◀── /v1/app ◀──Noise IK── phone
-                                         └────▶ registry (SQLite: key, roster, tombstones, suspensions)
+                                         │                                  ◀── /v1/app/once ◀──Noise IK in one POST── watch
+                                         │                                  ◀── /v1/now ◀──token──── widget
+                                         └────▶ registry (SQLite: key, roster, tombstones, suspensions, APNs, token hashes)
 ```
 
 - **The home id is a hash of the box's key.** It comes from the key that
   signed `hello`, never from a field anyone sends. A second box cannot claim
   a home that is not its own.
 - **One way in.** `store.For(principal)` is the only access to a home: a
-  `Box` principal may write its own home, and a `Device` principal may
-  read the classes its role and the owner's grant both allow. There is no
+  `Box` principal may write its own home, a `Device` principal may
+  read the classes its role and the owner's grant both allow, and a `Token`
+  principal reads only `live`, `prices` and `hb` within that same scope. There is no
   listing and no principal for staff; `TestNoRouteReadsAHome` checks every
   route.
-- **A phone can narrow and nothing else.** It can say whether it is looking,
-  and an owner can suspend a device in the roster. Commands go from the app
-  to the box over the relay, never through here.
+- **A phone or a watch can narrow and nothing else.** A phone can say
+  whether it is looking, and an owner can suspend a device in the roster. A
+  watch can read, ask for its token and register for push. Commands go to
+  the box over the relay, never through here.
 - **The service sends five things.** `challenge`, `hello_ok`, `watch`,
   `resync` and `purged` are the whole downlink, and none asks the box to act.
   The box closes the uplink on anything else.

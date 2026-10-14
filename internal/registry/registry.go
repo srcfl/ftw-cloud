@@ -1,6 +1,7 @@
 // Package registry is the service's only disk state: which homes exist, the
-// box key each was claimed with, and the roster the box last signed. It holds
-// no readings. Deleted rows are overwritten (secure_delete), so a purge does
+// box key each was claimed with, the roster the box last signed, owners'
+// suspensions, APNs registrations and the hashes of extension tokens. It
+// holds no readings. Deleted rows are overwritten (secure_delete), so a purge does
 // not leave a home's roster in free pages.
 package registry
 
@@ -76,6 +77,10 @@ CREATE TABLE IF NOT EXISTS suspensions (
 		return nil, fmt.Errorf("registry: schema: %w", err)
 	}
 	if err := createPushTable(db); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("registry: schema: %w", err)
+	}
+	if err := createTokenTable(db); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("registry: schema: %w", err)
 	}

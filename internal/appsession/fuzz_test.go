@@ -76,3 +76,56 @@ func mustFrame(t string, body any) []byte {
 	}
 	return frame
 }
+
+// Whatever message 1 of a one-shot read carries, the service neither panics
+// nor does more than the protocol allows: it answers or refuses with a
+// status the protocol names, a viewer suspends nobody, and nothing stays
+// counted after the answer.
+func FuzzOnceMessage(f *testing.F) {
+	h := newHarness(f)
+	h.live(true)
+	for _, seed := range []struct {
+		t    string
+		body any
+	}{
+		{cloudwire.MsgRead, cloudwire.Read{Hz: 1}},
+		{cloudwire.MsgRead, cloudwire.Read{Have: cloudwire.Have{Boot: h.boot, Seq: map[string]uint64{"live": 9}}}},
+		{cloudwire.MsgTokenGet, struct{}{}},
+		{cloudwire.MsgPushRegister, cloudwire.PushRegister{APNsToken: []byte{1}, Environment: "sandbox", Kind: "alert", App: "watch"}},
+		{cloudwire.MsgPushUnregister, cloudwire.PushUnregister{APNsToken: []byte{1}}},
+		{cloudwire.MsgSuspend, cloudwire.Suspend{DeviceID: "owner"}},
+	} {
+		payload, _ := cloudwire.Unsigned(seed.t, seed.body)
+		f.Add(payload)
+	}
+	f.Add([]byte{0xa0})
+	f.Add([]byte{})
+	allowed := map[int]bool{200: true, 400: true, 403: true, 429: true, 501: true}
+	f.Fuzz(func(t *testing.T, payload []byte) {
+		h.app.once = onceLimits{homes: map[string]int{}, devices: map[string]*onceDevice{}}
+		init, err := appwire.NewInitiator(appwire.InitiatorOptions{StaticKey: h.viewer, RemoteStatic: h.noise.Public(),
+			Prologue: cloudwire.OncePrologue(h.home)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		msg1, err := init.WriteMessage(payload)
+		if err != nil {
+			return // larger than one Noise message: never reaches the service
+		}
+		body, status := h.app.answerOnce(h.home, msg1)
+		if !allowed[status] {
+			t.Fatalf("status %d", status)
+		}
+		if status == 200 {
+			if _, err := cloudwire.SplitOnceAnswer(body); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if h.reg.Suspended(h.home, "owner", 1) {
+			t.Fatal("a viewer's one-shot read suspended the owner")
+		}
+		if open, _ := h.app.once.held(); open != 0 {
+			t.Fatal("a read is still counted after its answer")
+		}
+	})
+}
