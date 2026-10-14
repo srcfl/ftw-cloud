@@ -337,3 +337,36 @@ func hashOf(t *testing.T, tok string) []byte {
 	sum := sha256.Sum256(raw)
 	return sum[:]
 }
+
+// A token asked for by a device that a suspension or roster has just shut
+// out is not kept: the access is checked again once the row is stored.
+func TestATokenIsNotIssuedPastItsDevicesAccess(t *testing.T) {
+	h := newHarness(t)
+	_ = h.reg.Suspend(h.home, "owner", 1, h.clock.t)
+	if _, err := h.svc.Issue(h.home, cloudwire.Device{ID: "owner", Epoch: 1}); err != store.ErrDenied {
+		t.Fatalf("a suspended device got a token: %v", err)
+	}
+	if _, err := h.svc.Issue(h.home, cloudwire.Device{ID: "owner", Epoch: 2}); err != store.ErrDenied {
+		t.Fatalf("a device at an epoch the roster does not list got a token: %v", err)
+	}
+	var n int
+	if err := h.reg.TokenPrune(h.home, func(string, uint64) bool { n++; return true }); err != nil || n != 0 {
+		t.Fatalf("refused tokens left %d rows", n)
+	}
+}
+
+// A roster that moves a device's epoch drops the token of the old epoch and
+// keeps one the device already got at the new epoch.
+func TestAPruneKeepsATokenOfTheNewEpoch(t *testing.T) {
+	h := newHarness(t)
+	old := h.issue("owner", 1)
+	r := h.roster(2, protocol.CloudScopes...)
+	fresh := h.issue("owner", 2)
+	h.svc.Roster(h.home, r)
+	if code, _ := h.get("Bearer " + old); code != http.StatusUnauthorized {
+		t.Fatalf("the old epoch's token read %d", code)
+	}
+	if code, _ := h.get("Bearer " + fresh); code != http.StatusOK {
+		t.Fatalf("the new epoch's token read %d", code)
+	}
+}

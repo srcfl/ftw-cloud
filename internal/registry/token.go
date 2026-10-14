@@ -66,6 +66,12 @@ func (r *Registry) TokenDrop(home, deviceID string) error {
 	return err
 }
 
+// TokenDropHash forgets one token by its hash.
+func (r *Registry) TokenDropHash(hash []byte) error {
+	_, err := r.db.Exec(`DELETE FROM tokens WHERE hash = ?`, hash)
+	return err
+}
+
 // TokenPrune keeps only the tokens whose device keep allows at its epoch, as
 // a new roster says.
 func (r *Registry) TokenPrune(home string, keep func(deviceID string, epoch uint64) bool) error {
@@ -73,21 +79,26 @@ func (r *Registry) TokenPrune(home string, keep func(deviceID string, epoch uint
 	if err != nil {
 		return err
 	}
-	var gone []string
+	type entry struct {
+		id    string
+		epoch int64
+	}
+	var gone []entry
 	for rows.Next() {
-		var id string
-		var epoch int64
-		if err := rows.Scan(&id, &epoch); err != nil {
+		var e entry
+		if err := rows.Scan(&e.id, &e.epoch); err != nil {
 			_ = rows.Close()
 			return err
 		}
-		if !keep(id, uint64(epoch)) {
-			gone = append(gone, id)
+		if !keep(e.id, uint64(e.epoch)) {
+			gone = append(gone, e)
 		}
 	}
 	_ = rows.Close()
-	for _, id := range gone {
-		if err := r.TokenDrop(home, id); err != nil {
+	// The epoch is part of the match, so a token the device got at its new
+	// epoch meanwhile stays.
+	for _, e := range gone {
+		if _, err := r.db.Exec(`DELETE FROM tokens WHERE home = ? AND device_id = ? AND epoch = ?`, home, e.id, e.epoch); err != nil {
 			return err
 		}
 	}

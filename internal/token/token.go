@@ -62,6 +62,10 @@ func New(st *store.Store, reg *registry.Registry, log *slog.Logger) *Service {
 
 // Issue makes a new token for a roster entry, in place of the device's old
 // one. dev comes from store.For, never from the device's message.
+//
+// The device's access is checked again once the token is stored: a
+// suspension or a roster that landed since store.For admitted the device
+// either finds the row and drops it, or is seen here and the row goes.
 func (s *Service) Issue(home string, dev cloudwire.Device) (cloudwire.Token, error) {
 	raw := make([]byte, tokenBytes)
 	if _, err := rand.Read(raw); err != nil {
@@ -71,6 +75,12 @@ func (s *Service) Issue(home string, dev cloudwire.Device) (cloudwire.Token, err
 	row := registry.TokenRow{Home: home, DeviceID: dev.ID, Epoch: dev.Epoch, Expires: s.now().Add(Life)}
 	if err := s.reg.TokenIssue(row, hash[:]); err != nil {
 		return cloudwire.Token{}, err
+	}
+	if _, err := s.store.For(store.Principal{Kind: store.Token, Home: home, DeviceID: dev.ID, Epoch: dev.Epoch}); err != nil {
+		if err := s.reg.TokenDropHash(hash[:]); err != nil {
+			return cloudwire.Token{}, err
+		}
+		return cloudwire.Token{}, store.ErrDenied
 	}
 	return cloudwire.Token{Token: base64.RawURLEncoding.EncodeToString(raw), ExpiresInS: int64(Life / time.Second)}, nil
 }
