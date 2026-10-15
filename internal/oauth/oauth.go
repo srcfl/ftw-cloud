@@ -239,7 +239,18 @@ func (s *Server) serveResourceMetadata(w http.ResponseWriter, _ *http.Request) {
 type rosterEvent struct {
 	home    string
 	devices []cloudwire.Device
+	// tries counts how often the event came back because the keys part
+	// could not keep an approved key.
+	tries int
 }
+
+// keepRetry is how long an approval waits before it tries the keys part
+// again, and keepTries how often. A box sends its roster when it changes,
+// so the approval cannot wait for the next one.
+var (
+	keepRetry = 5 * time.Second
+	keepTries = 24
+)
 
 // Roster hears each roster the service keeps. A device whose key a pending
 // consent made is that consent's approval; an agent the roster no longer
@@ -273,6 +284,7 @@ func (s *Server) Run(ctx context.Context) {
 
 func (s *Server) applyRoster(ctx context.Context, ev rosterEvent) {
 	now := s.now()
+	retry := false
 	listed := map[string]cloudwire.Device{}
 	for _, d := range ev.devices {
 		if d.Tun {
@@ -289,7 +301,8 @@ func (s *Server) applyRoster(ctx context.Context, ev rosterEvent) {
 			continue
 		}
 		if err := s.keys.Keep(ctx, c.Kid); err != nil {
-			s.log.Warn("an approved agent's key could not be kept; the next roster tries again", "err", err)
+			s.log.Warn("an approved agent's key could not be kept; trying again", "err", err)
+			retry = true
 			continue
 		}
 		c.Home, c.Agent, c.Shard = ev.home, d.ID, s.shard(ev.home)
@@ -298,6 +311,15 @@ func (s *Server) applyRoster(ctx context.Context, ev rosterEvent) {
 			continue
 		}
 		s.hub.notify(string(ridHash))
+	}
+	if retry && ev.tries < keepTries {
+		ev.tries++
+		time.AfterFunc(keepRetry, func() {
+			select {
+			case s.roster <- ev:
+			default:
+			}
+		})
 	}
 	// Revocations: an agent the roster no longer lists, or lists with
 	// another key.

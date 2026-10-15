@@ -876,3 +876,40 @@ func TestAuthorizeIsRateLimited(t *testing.T) {
 		t.Fatal("authorize is not limited")
 	}
 }
+
+// flakyKeys is a keys part that is away for a while.
+type flakyKeys struct {
+	AgentKeys
+	mu   sync.Mutex
+	down int
+}
+
+func (f *flakyKeys) Keep(ctx context.Context, kid string) error {
+	f.mu.Lock()
+	if f.down > 0 {
+		f.down--
+		f.mu.Unlock()
+		return keys.ErrUnavailable
+	}
+	f.mu.Unlock()
+	return f.AgentKeys.Keep(ctx, kid)
+}
+
+// A box sends its roster when it changes, not again: an approval the keys
+// part could not take at once is tried again without a new roster.
+func TestApprovalOutlastsAKeysPartThatIsAway(t *testing.T) {
+	old := keepRetry
+	keepRetry = 30 * time.Millisecond
+	t.Cleanup(func() { keepRetry = old })
+	g := newRig(t)
+	flaky := &flakyKeys{AgentKeys: g.keys, down: 3}
+	g.s.keys = flaky
+	f := g.start(cimdID, cimdBack, "")
+	ch, stop := g.events(f, true)
+	defer stop()
+	next(t, ch)
+	g.roster(home, agentDevice(f.agentKey(t), ScopeLiveRead))
+	if ev := next(t, ch); ev.name != "approved" {
+		t.Fatalf("event %q", ev.name)
+	}
+}
