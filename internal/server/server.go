@@ -8,6 +8,7 @@
 //	/source   the source of the running service, as AGPL-3.0 asks
 //	/healthz  liveness, and nothing about any home
 //	/oauth/*, /.well-known/oauth-*  the authorization server for assistants (package oauth)
+//	/mcp      the MCP server, for assistants with a token (package mcp)
 //
 // There is no route for staff. Reading a home needs its box's key, a phone in
 // its roster, or a token bound to one.
@@ -33,7 +34,7 @@ import (
 const SourceArchive = "/usr/share/ftw-cloud/source.tar.gz"
 
 // Routes are every path the service answers.
-var Routes = append([]string{"/v1/box", "/v1/app", "/v1/app/once", "/v1/now", "/source", "/healthz"}, oauth.Routes...)
+var Routes = append([]string{"/v1/box", "/v1/app", "/v1/app/once", "/v1/now", "/source", "/healthz", "/mcp"}, oauth.Routes...)
 
 // devRoutes adds a local inspection route in binaries built with
 // -tags ftwclouddev. It is nil in every other build.
@@ -50,8 +51,10 @@ type Server struct {
 	// Tokens answers /v1/now. Tokens come only over the app session, so
 	// without a Noise key every token read is refused.
 	Tokens *token.Service
-	// OAuth is the authorization server for assistants. Nil serves none.
+	// OAuth is the authorization server for assistants, and MCP the server
+	// they call. Nil serves none.
 	OAuth *oauth.Server
+	MCP   http.Handler
 	Log   *slog.Logger
 }
 
@@ -73,6 +76,9 @@ func (s *Server) Handler() http.Handler {
 	}
 	if s.OAuth != nil {
 		s.OAuth.Mount(mux)
+	}
+	if s.MCP != nil {
+		mux.Handle("/mcp", s.MCP)
 	}
 	mux.HandleFunc("/source", source)
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {

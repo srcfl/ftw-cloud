@@ -34,6 +34,7 @@ import (
 	"github.com/srcfl/ftw-cloud/internal/apns"
 	"github.com/srcfl/ftw-cloud/internal/appsession"
 	"github.com/srcfl/ftw-cloud/internal/keys"
+	"github.com/srcfl/ftw-cloud/internal/mcp"
 	"github.com/srcfl/ftw-cloud/internal/oauth"
 	"github.com/srcfl/ftw-cloud/internal/push"
 	"github.com/srcfl/ftw-cloud/internal/registry"
@@ -122,6 +123,12 @@ func serve(args []string) error {
 	}
 	defer auth.Close()
 	srv.OAuth = auth
+	// Each agent's session goes to its box through the door, as tun. The
+	// box's Noise key comes from the box with the agent contract; until a
+	// box says it, its home takes no agents and the tools say so.
+	agents := mcp.NewPool(st, up, agentKeys, func(string) ([]byte, bool) { return nil, false }, log)
+	auth.OnRevoke = agents.Drop
+	srv.MCP = mcp.New(auth, agents, log)
 
 	// Alerts: the box's signed events to its phones through Apple, and
 	// box.unreachable when a box is away. Widgets: a push with no data when
@@ -205,6 +212,7 @@ func serve(args []string) error {
 	go srv.Upkeep(ctx, time.Minute)
 	go pushSvc.Run(ctx)
 	go auth.Run(ctx)
+	go agents.Run(ctx)
 	if err := pushSvc.Resume(); err != nil {
 		log.Warn("could not restart the dead man's switch", "err", err)
 	}

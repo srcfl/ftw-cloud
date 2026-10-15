@@ -166,6 +166,25 @@ to it yet.
   or the box purging its home; a key the keys part could not forget stays
   queued until it has. Only each home's newest roster is applied.
 
+- **MCP at `/mcp`, Streamable HTTP.** It speaks revision 2026-07-28, which
+  is stateless: each request carries its version and capabilities in
+  `_meta`, mirrored in `MCP-Protocol-Version`, `Mcp-Method` and `Mcp-Name`,
+  and a header that disagrees with the body is refused. It also answers
+  clients of 2025-03-26 to 2025-11-25 that start with `initialize`, without
+  session ids or a GET stream. The read tools are `homes.list`, `status`,
+  `plan.get`, `plan.explain`, `history.query`, `health.get`,
+  `events.list`, `logs.tail`, `drivers.status`, `config.get` and
+  `diag.run`, each with typed arguments and mapped onto the box's own API
+  through `api.req`. A call without its scope gets 403 `insufficient_scope`,
+  so the client can ask the owner for more. Each call rides the agent's own
+  Noise session: `ftwkeysd` seals each frame and the door carries it as
+  `tun`, one forward to the box. A session stays warm for 60 s; the box
+  serves one request per session, so calls on one home queue, four at most,
+  and a process runs 256 at once. Results are data: each says it came from
+  the box and is not instructions, and control and formatting characters
+  are removed. Until the box-side agent contract lands, no box gives its
+  Noise key, so every home answers that it takes no assistants yet.
+
 Not built yet:
 
 | Step | What | Where |

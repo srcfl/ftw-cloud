@@ -10,11 +10,13 @@ import (
 	"testing"
 
 	"github.com/srcfl/ftw-cloud/internal/keys"
+	"github.com/srcfl/ftw-cloud/internal/mcp"
 	"github.com/srcfl/ftw-cloud/internal/oauth"
 )
 
-// The authorization server's routes read no home either, whatever they are
-// asked: they know agents and tokens, never readings.
+// The routes for assistants read no home either, whatever they are asked:
+// the authorization server knows agents and tokens, never readings, and
+// /mcp answers nothing without a token.
 func TestOAuthRoutesReadNoHome(t *testing.T) {
 	s, home := newServer(t)
 	sealer, _ := keys.FileSealerFromKey(bytes.Repeat([]byte{3}, 32))
@@ -28,9 +30,10 @@ func TestOAuthRoutesReadNoHome(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = auth.Close() })
 	s.OAuth = auth
+	s.MCP = mcp.New(auth, mcp.NewPool(s.Store, s.Uplink, ks.Local(), func(string) ([]byte, bool) { return nil, false }, nil), nil)
 	h := s.Handler()
 	paths := append(append([]string{}, oauth.Routes...), "/oauth/requests/"+home, "/oauth/requests?code="+home[:6],
-		"/oauth/authorize?client_id="+home, "/.well-known/oauth-protected-resource/"+home)
+		"/oauth/authorize?client_id="+home, "/.well-known/oauth-protected-resource/"+home, "/mcp?home="+home)
 	for _, p := range paths {
 		for _, m := range []string{http.MethodGet, http.MethodPost} {
 			w := httptest.NewRecorder()
