@@ -1002,6 +1002,10 @@ func TestTheOfferKeyIsPublished(t *testing.T) {
 	var v struct{ Alg, Tag, Kid, Pub string }
 	getJSON(t, g.srv.URL+"/.well-known/ftw-offer-key", &v)
 	pub, _ := g.keys.OfferKey(context.Background())
+	// The kid is the contract's, so Core's pin list takes it as it comes.
+	if keys.OfferKid(pub) != protocol.OfferKid(pub) {
+		t.Fatal("the keys part's kid is not the contract's")
+	}
 	if v.Alg != "ES256" || v.Tag != protocol.OfferTag || v.Kid != keys.OfferKid(pub) || v.Pub != base64.RawURLEncoding.EncodeToString(pub) {
 		t.Fatalf("offer key %+v", v)
 	}
