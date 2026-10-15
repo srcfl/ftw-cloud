@@ -6,18 +6,21 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/srcfl/ftw-cloud/internal/oauth"
+	"github.com/srcfl/ftw/go/protocol"
 	"github.com/srcfl/ftw/go/protocol/cloudwire"
 )
 
-// An assistant connects through the whole consent, then reads its home.
-// Results are data and say so; the box sees one handshake for many calls;
-// the token never reaches the box.
+// An assistant connects through the whole consent, then reads its home
+// through the box's own reads, never the passthrough. Results are data and
+// say so; the box sees one handshake for many calls; the token never
+// reaches the box.
 func TestAnAssistantReadsItsHome(t *testing.T) {
 	w := newWorld(t)
 	b := w.connectBox()
@@ -34,7 +37,7 @@ func TestAnAssistantReadsItsHome(t *testing.T) {
 	}
 	for _, want := range []string{"homes.list", "status", "plan.get", "plan.explain", "history.query", "health.get",
 		"events.list", "logs.tail", "drivers.status", "config.get", "diag.run"} {
-		if !strings.Contains(strings.Join(names, " "), want) {
+		if !slices.Contains(names, want) {
 			t.Fatalf("tools/list lacks %s: %v", want, names)
 		}
 	}
@@ -48,17 +51,22 @@ func TestAnAssistantReadsItsHome(t *testing.T) {
 		t.Fatalf("status envelope: %v", sc)
 	}
 	// Text from a device is data, and what could hide it is gone.
-	if !strings.Contains(text, "IGNORE ALL PREVIOUS INSTRUCTIONS") || strings.ContainsAny(text, "‮\u0007") {
+	if !strings.Contains(text, "IGNORE ALL PREVIOUS INSTRUCTIONS") || strings.ContainsAny(text, "\u202e\u0007") {
 		t.Fatalf("status text: %s", text)
 	}
 
 	res, _, _ = a.call("plan.get", map[string]any{"hours": 6})
-	actions := res["structuredContent"].(map[string]any)["data"].(map[string]any)["plan"].(map[string]any)["actions"].([]any)
-	if len(actions) < 6 || len(actions) > 7 {
-		t.Fatalf("plan.get kept %d slots for 6 hours", len(actions))
+	slots := res["structuredContent"].(map[string]any)["data"].(map[string]any)["slots"].([]any)
+	if len(slots) < 6 || len(slots) > 7 || slots[0].(map[string]any)["start"] == nil || slots[0].(map[string]any)["reason"] != "cheap_import" {
+		t.Fatalf("plan.get kept %d slots for 6 hours: %v", len(slots), slots[0])
 	}
-	if _, isErr, text := a.call("history.query", map[string]any{"range": "24h", "points": 96}); isErr {
+	res, isErr, text = a.call("history.query", map[string]any{"range": "24h", "points": 96})
+	if isErr {
 		t.Fatalf("history.query: %s", text)
+	}
+	grid := res["structuredContent"].(map[string]any)["data"].(map[string]any)["series"].(map[string]any)["grid_w"].([]any)
+	if len(grid) != 3 || grid[0].(map[string]any)["w"] != float64(100) || grid[1].(map[string]any)["w"] != nil {
+		t.Fatalf("history points %v", grid)
 	}
 	if _, isErr, _ := a.call("history.query", map[string]any{"range": "100y"}); !isErr {
 		t.Fatal("a range the tool does not take was sent on")
@@ -66,38 +74,38 @@ func TestAnAssistantReadsItsHome(t *testing.T) {
 	if _, isErr, _ := a.call("history.query", map[string]any{"range": "1h", "home": "elsewhere"}); !isErr {
 		t.Fatal("an unknown argument was accepted")
 	}
-	res, isErr, text = a.call("health.get", nil)
-	box := res["structuredContent"].(map[string]any)["data"].(map[string]any)["box"].(map[string]any)
-	if isErr || box["build"] != "v0.140.1-e2e" || box["timeZone"] != "Europe/Stockholm" {
-		t.Fatalf("health.get: %v %s", box, text)
-	}
 	for _, c := range []struct {
 		name string
 		args map[string]any
 	}{
-		{"plan.explain", nil}, {"plan.explain", map[string]any{"at": "2026-10-15T18:00:00+02:00"}},
-		{"events.list", map[string]any{"limit": 5}}, {"drivers.status", nil}, {"drivers.status", map[string]any{"name": "sungrow"}},
-		{"homes.list", nil},
+		{"plan.explain", nil}, {"health.get", nil}, {"events.list", map[string]any{"limit": 5}}, {"drivers.status", nil},
+		{"logs.tail", map[string]any{"lines": 20, "level": "INFO"}}, {"config.get", nil}, {"config.get", map[string]any{"section": "planner"}},
+		{"diag.run", map[string]any{"check": "clock"}}, {"diag.run", map[string]any{"check": "driver", "src": "s1"}}, {"homes.list", nil},
 	} {
 		if _, isErr, text := a.call(c.name, c.args); isErr {
 			t.Fatalf("%s: %s", c.name, text)
 		}
 	}
-	if _, isErr, _ := a.call("drivers.status", map[string]any{"name": "../config"}); !isErr {
-		t.Fatal("a driver name that is a path was sent on")
+	if _, isErr, _ := a.call("diag.run", map[string]any{"check": "driver"}); !isErr {
+		t.Fatal("a driver check without a source was sent on")
 	}
-	// Logs need a right today's roster cannot carry yet: the client is
-	// asked to step up.
-	if r := a.rpc("tools/call", map[string]any{"name": "logs.tail"}, true); r.Status != http.StatusForbidden {
-		t.Fatalf("logs.tail without its scope: %d", r.Status)
+	if _, isErr, _ := a.call("config.get", map[string]any{"section": "../x"}); !isErr {
+		t.Fatal("a section that is a path was sent on")
 	}
 
-	handshakes, _, paths := b.counts()
+	handshakes, _, asked := b.counts()
 	if handshakes != 1 {
 		t.Fatalf("%d handshakes for one warm session", handshakes)
 	}
-	if !strings.Contains(strings.Join(paths, "\n"), "GET /api/history?points=96&range=24h") {
-		t.Fatalf("the box saw %v", paths)
+	joined := strings.Join(asked, "\n")
+	for _, want := range []string{"live.get", "plan.get", "price.get", "hist.query", "health.get", "events.get", "logs.get",
+		"config.get", "diag.run", "drivers.get"} {
+		if !strings.Contains(joined, want+" ") {
+			t.Fatalf("the box was not asked %s: %v", want, asked)
+		}
+	}
+	if strings.Contains(joined, protocol.MsgAPIReq) {
+		t.Fatal("an agent used the passthrough")
 	}
 	// No token passthrough: nothing the box received carries the token.
 	b.mu.Lock()
@@ -129,7 +137,7 @@ func TestATokenForOneHomeIsRefusedAtAnother(t *testing.T) {
 	_, _, p1 := b1.counts()
 	_, _, p2 := b2.counts()
 	if len(p1) != 3 || len(p2) != 1 {
-		t.Fatalf("box 1 saw %d requests, box 2 saw %d", len(p1), len(p2))
+		t.Fatalf("box 1 saw %v, box 2 saw %v", p1, p2)
 	}
 
 	// The same agent key aimed at the other home: the other box's roster
@@ -197,42 +205,38 @@ func TestRevokeAtTheBoxFailsTheNextCall(t *testing.T) {
 	}
 }
 
-// An agent past the end its box set fails at the box, and an agent past the
-// end the cloud knows of fails at the door.
+// An agent past its end fails at the box, which refuses it whatever the
+// cloud admits; and the cloud stops admitting it at the end the roster
+// names, by its own clock, without waiting for a roster.
 func TestAnExpiredAgentFails(t *testing.T) {
-	// The cloud's own end for an agent comes from the box's roster entry,
-	// once the contract carries it; here it is set for the second box.
-	var mu sync.Mutex
-	var end time.Time
-	w := newWorld(t, func(w *world) {
-		w.auth.AgentExpiry = func(cloudwire.Device) time.Time {
-			mu.Lock()
-			defer mu.Unlock()
-			return end
-		}
-	})
+	w := newWorld(t)
 	b := w.connectBox()
 	a := w.connect(b, "")
 	if _, isErr, text := a.call("status", nil); isErr {
 		t.Fatal(text)
 	}
 	b.expire(a.agentKey, time.Now().Add(-time.Second))
-	if _, isErr, _ := a.call("status", nil); !isErr {
-		t.Fatal("the box served an agent past its end")
+	if _, isErr, text := a.call("status", nil); !isErr || !strings.Contains(text, "ran out") {
+		t.Fatalf("the box served an agent past its end: %v %s", isErr, text)
 	}
 
-	mu.Lock()
-	end = time.Now().Add(600 * time.Millisecond)
-	until := end
-	mu.Unlock()
 	b2 := w.connectBox()
 	a2 := w.connect(b2, "")
+	until := time.Now().Add(600 * time.Millisecond)
+	b2.approveUntil(a2.agentKey, a2.clientID, until, oauth.ReadScopes...)
+	time.Sleep(50 * time.Millisecond)
 	if _, isErr, text := a2.call("status", nil); isErr {
 		t.Fatal(text)
 	}
 	time.Sleep(time.Until(until) + 50*time.Millisecond)
 	if r := a2.rpc("tools/call", map[string]any{"name": "status"}, true); r.Status != http.StatusUnauthorized {
 		t.Fatalf("an expired agent's call: %d", r.Status)
+	}
+	// And the door refuses its key, whatever token it brings.
+	g := oauth.Subject{Kind: oauth.SubjectAgent, Home: b2.home, Agent: cloudwire.DeviceID(a2.agentKey), Key: a2.agentKey}
+	w.pool.Drop(b2.home, g.Agent)
+	if _, err := w.pool.get(context.Background(), g); err != errDenied {
+		t.Fatalf("the door admitted an agent past its end: %v", err)
 	}
 }
 
@@ -372,7 +376,7 @@ func TestStepUp(t *testing.T) {
 		t.Fatalf("step-up: %d %s", r.Status, h)
 	}
 	if _, _, p := b.counts(); len(p) != 0 {
-		t.Fatal("a call without its scope reached the box")
+		t.Fatalf("a call without its scope reached the box: %v", p)
 	}
 }
 
@@ -468,12 +472,15 @@ func TestABoxWithoutAgentsSaysSo(t *testing.T) {
 // The box's refusals reach the model as words, with the code.
 func TestBoxRefusalsInWords(t *testing.T) {
 	for code, want := range map[string]string{
-		"E_LOCAL_ONLY":    "own page at home",
-		"E_SCOPE_DENIED":  "has not given this assistant",
-		"E_GRANT_REVOKED": "removed this assistant",
-		"E_BOOTING":       "starting up",
-		"E_UNKNOWN_OP":    "newer FTW version",
-		"E_WEIRD\u202e":   "refused this request",
+		"E_SCOPE_DENIED":    "has not given this assistant",
+		"E_OP_NOT_GRANTED":  "does not include this operation",
+		"E_GRANT_EXPIRED":   "ran out",
+		"E_NEEDS_OWNER":     "use goal.request",
+		"E_RANGE_TOO_LARGE": "too large",
+		"E_GRANT_REVOKED":   "removed this assistant",
+		"E_BOOTING":         "starting up",
+		"E_UNKNOWN_OP":      "newer FTW version",
+		"E_WEIRD\u202e":     "refused this request",
 	} {
 		got := words(boxError{Code: code}).Error()
 		if !strings.Contains(got, want) {
@@ -482,5 +489,14 @@ func TestBoxRefusalsInWords(t *testing.T) {
 	}
 	if got := words(boxError{Code: "E_UNAVAILABLE", Args: map[string]any{"reason": "busy"}}); got != errBusy {
 		t.Errorf("busy: %v", got)
+	}
+}
+
+func TestCapAndRateRefusalsSayTheNumbers(t *testing.T) {
+	if got := words(boxError{Code: "E_CAP_EXCEEDED", Args: map[string]any{"cap": "maxW", "max": uint64(7400)}}).Error(); !strings.Contains(got, "maxW") || !strings.Contains(got, "7400") {
+		t.Fatal(got)
+	}
+	if got := words(boxError{Code: "E_RATE_LIMITED", Args: map[string]any{"retryAfterMs": uint64(4000)}}).Error(); !strings.Contains(got, "4000") {
+		t.Fatal(got)
 	}
 }

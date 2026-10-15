@@ -8,15 +8,16 @@ import (
 	"github.com/srcfl/ftw/go/protocol/cloudwire"
 )
 
-// Pacing. The door limits tun per home and direction and drops what is
-// over. Noise transport survives a lost message, but a call whose answer
-// lost one waits out its time, and a home's phones share the same limits.
-// So the agents' calls on one home are paced to a quarter of them: a burst
-// of calls, then a few a second, and a budget of bytes answered.
+// Pacing. The box takes 60 reads a minute from an agent and refuses the
+// rest; the door limits tun per home and drops what is over, and a home's
+// phones share those limits. So the agents' calls on one home are paced
+// under both: a burst of calls, then less than one a second, so that no
+// rolling minute holds more than 60, and a quarter of the door's bytes.
 const (
-	paceShare          = 4
-	paceCallBurst      = 20
-	paceCallsPerSecond = 4
+	paceShare = 4
+	// PaceBurst and PacePerSecond: 15 + 45 in any minute.
+	PaceBurst          = 15
+	PacePerSecond      = 0.75
 	paceByteBurst      = cloudwire.TunByteBurst / paceShare
 	paceBytesPerSecond = cloudwire.TunBytesPerSecond / paceShare
 	// paceWaitMost is the longest a call waits for its turn in the budget
@@ -31,16 +32,17 @@ type pacer struct {
 	mu           sync.Mutex
 	calls, bytes float64
 	at           time.Time
+	burst, rate  float64
 }
 
-func newPacer(now time.Time) *pacer {
-	return &pacer{calls: paceCallBurst, bytes: paceByteBurst, at: now}
+func newPacer(now time.Time, burst, rate float64) *pacer {
+	return &pacer{calls: burst, bytes: paceByteBurst, at: now, burst: burst, rate: rate}
 }
 
 func (pc *pacer) refill(now time.Time) {
 	dt := now.Sub(pc.at).Seconds()
 	if dt > 0 {
-		pc.calls = min(paceCallBurst, pc.calls+dt*paceCallsPerSecond)
+		pc.calls = min(pc.burst, pc.calls+dt*pc.rate)
 		pc.bytes = min(paceByteBurst, pc.bytes+dt*paceBytesPerSecond)
 		pc.at = now
 	}
@@ -51,7 +53,7 @@ func (pc *pacer) delay(now time.Time) time.Duration {
 	pc.refill(now)
 	var d time.Duration
 	if pc.calls < 1 {
-		d = time.Duration((1 - pc.calls) / paceCallsPerSecond * float64(time.Second))
+		d = time.Duration((1 - pc.calls) / pc.rate * float64(time.Second))
 	}
 	if pc.bytes < 0 {
 		d = max(d, time.Duration(-pc.bytes/paceBytesPerSecond*float64(time.Second)))
@@ -97,7 +99,7 @@ func (p *Pool) pace(home string) *pacer {
 	defer p.mu.Unlock()
 	pc := p.paces[home]
 	if pc == nil {
-		pc = newPacer(p.now())
+		pc = newPacer(p.now(), p.PaceBurst, p.PacePerSecond)
 		p.paces[home] = pc
 	}
 	return pc
@@ -109,7 +111,7 @@ func (p *Pool) forgetFullPacesLocked(now time.Time) {
 	for home, pc := range p.paces {
 		pc.mu.Lock()
 		pc.refill(now)
-		full := pc.calls >= paceCallBurst && pc.bytes >= paceByteBurst
+		full := pc.calls >= pc.burst && pc.bytes >= paceByteBurst
 		pc.mu.Unlock()
 		if full {
 			delete(p.paces, home)

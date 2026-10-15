@@ -52,7 +52,7 @@ type Session struct {
 // sends falls between them. A second session from the same device replaces
 // the first.
 func (x *Handle) Open() (Snapshot, *Session, error) {
-	if x.kind != Device {
+	if x.kind != Device && x.kind != Agent {
 		return Snapshot{}, nil, ErrDenied
 	}
 	x.h.mu.Lock()
@@ -67,7 +67,7 @@ func (x *Handle) Open() (Snapshot, *Session, error) {
 		if !x.h.spendLocked(x.pair, x.s.now()) {
 			return Snapshot{}, nil, ErrDenied
 		}
-	} else if _, _, ok := x.s.access(x.id, x.h, byKey(x.device.Key)); !ok {
+	} else if _, _, ok := x.s.admit(x.kind, x.id, x.h, byKey(x.device.Key)); !ok {
 		return Snapshot{}, nil, ErrDenied
 	}
 	for sess := range x.h.sessions {

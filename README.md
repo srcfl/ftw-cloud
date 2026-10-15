@@ -174,18 +174,24 @@ to it yet.
   session ids or a GET stream. The read tools are `homes.list`, `status`,
   `plan.get`, `plan.explain`, `history.query`, `health.get`,
   `events.list`, `logs.tail`, `drivers.status`, `config.get` and
-  `diag.run`, each with typed arguments and mapped onto the box's own API
-  through `api.req`. A call without its scope gets 403 `insufficient_scope`,
-  so the client can ask the owner for more. Each call rides the agent's own
-  Noise session: `ftwkeysd` seals each frame and the door carries it as
-  `tun`, one forward to the box. A session stays warm for 60 s; the box
-  serves one request per session, so calls on one home queue, four at most,
-  and a process runs 256 at once. Agents' calls on a home are paced to a
-  quarter of the door's tun limits, which the home's phones share: 20 in a
-  row, then 4 a second, and a quarter of the bytes. Results are data: each says it came from
-  the box and is not instructions, and control and formatting characters
-  are removed. Until the box-side agent contract lands, no box gives its
-  Noise key, so every home answers that it takes no assistants yet.
+  `diag.run`, each with typed arguments, each one of the box's own reads for
+  agents (`live.get`, `plan.get`, `price.get`, `hist.query`, `health.get`,
+  `events.get`, `logs.get`, `config.get`, `diag.run`, `drivers.get`;
+  srcfl/ftw `docs/agents.md`). The box refuses the passthrough to agents,
+  and the readable copy is never an agent's: every read goes through the
+  box, which audits it and enforces revoke. A call without its scope gets
+  403 `insufficient_scope`, so the client can ask the owner for more. Each
+  call rides the agent's own Noise session: `ftwkeysd` seals each frame and
+  the door carries it as `tun`, one forward to the box. The door admits an
+  agent row only to these sessions, never on `/v1/app` or `/v1/app/once`,
+  and only before its end. A session stays warm for 60 s and calls on one
+  home queue, four at most; a process runs 256 at once. Agents' calls on a
+  home are paced under the box's 60 reads a minute and a quarter of the
+  door's tun limits, which the home's phones share: 15 in a row, then 0.75
+  a second. Results are data: each says it came from the box and is not
+  instructions, and control and formatting characters are removed. Until
+  the box's Noise key reaches the cloud (the agent contract), no box takes
+  assistants and each home says so.
 
 Not built yet:
 

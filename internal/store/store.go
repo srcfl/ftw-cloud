@@ -37,6 +37,11 @@ const (
 	// Token is a widget or an extension, proven by a token the registry
 	// bound to one roster entry. It reads only Now.
 	Token
+	// Agent is an agent row (an assistant, support or the release check),
+	// for a session the keys part opens and nothing else: its roster entry
+	// carries `agent`, which keeps it off /v1/app and /v1/app/once, and it
+	// is admitted only before the end the entry names, by this clock.
+	Agent
 )
 
 // Principal is who is asking for a home.
@@ -146,10 +151,16 @@ func (s *Store) For(p Principal) (*Handle, error) {
 	switch p.Kind {
 	case Box:
 		return &Handle{s: s, id: p.Home, h: h, kind: Box}, nil
-	case Device:
+	case Device, Agent:
 		h.mu.Lock()
 		defer h.mu.Unlock()
-		dev, scopes, ok := s.access(p.Home, h, byKey(p.DeviceKey))
+		dev, scopes, ok := s.admit(p.Kind, p.Home, h, byKey(p.DeviceKey))
+		if p.Kind == Agent {
+			if !ok {
+				return nil, ErrDenied
+			}
+			return &Handle{s: s, id: p.Home, h: h, kind: Agent, device: dev, scopes: scopes}, nil
+		}
 		if ok {
 			return &Handle{s: s, id: p.Home, h: h, kind: Device, device: dev, scopes: scopes}, nil
 		}
@@ -161,7 +172,7 @@ func (s *Store) For(p Principal) (*Handle, error) {
 	case Token:
 		h.mu.Lock()
 		defer h.mu.Unlock()
-		dev, scopes, ok := s.access(p.Home, h, func(d cloudwire.Device) bool {
+		dev, scopes, ok := s.admit(Token, p.Home, h, func(d cloudwire.Device) bool {
 			return p.DeviceID != "" && d.ID == p.DeviceID && d.Epoch == p.Epoch
 		})
 		if !ok {
@@ -223,6 +234,19 @@ func phoneRow(d cloudwire.Device) bool {
 
 func byKey(key []byte) func(cloudwire.Device) bool {
 	return func(d cloudwire.Device) bool { return len(key) == 32 && bytes.Equal(d.Key, key) }
+}
+
+// admit is access for a kind of principal: an agent row only as Agent,
+// before its end; a phone, a watch or a token never by an agent row.
+func (s *Store) admit(k Kind, id string, h *home, match func(cloudwire.Device) bool) (cloudwire.Device, []string, bool) {
+	dev, scopes, ok := s.access(id, h, match)
+	if !ok || (dev.Agent != nil) != (k == Agent) {
+		return cloudwire.Device{}, nil, false
+	}
+	if k == Agent && !s.now().Before(time.UnixMilli(dev.Agent.ExpiresAtMs)) {
+		return cloudwire.Device{}, nil, false
+	}
+	return dev, scopes, true
 }
 
 // access is the one admission rule for a device: a roster in force that
@@ -398,7 +422,7 @@ func (x *Handle) Recheck() {
 
 func (x *Handle) recheckLocked() {
 	for sess := range x.h.sessions {
-		dev, scopes, ok := x.s.access(x.id, x.h, byKey(sess.x.device.Key))
+		dev, scopes, ok := x.s.admit(sess.x.kind, x.id, x.h, byKey(sess.x.device.Key))
 		switch {
 		case sess.x.pairing && ok:
 			// The box paired the phone: its session takes the roster's
@@ -497,6 +521,11 @@ func (x *Handle) Now() (Snapshot, error) {
 }
 
 func (x *Handle) mayRead(class string) bool {
+	if x.kind == Agent {
+		// An agent reads through its box, which audits and enforces
+		// revoke; never from the copy.
+		return false
+	}
 	scope, forwarded := cloudwire.ClassScope[class]
 	return forwarded && (scope == "" || slices.Contains(x.scopes, scope))
 }

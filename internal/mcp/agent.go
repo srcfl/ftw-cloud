@@ -20,8 +20,8 @@ import (
 // An agent's session with its box. One warm session per agent of a home:
 // the first call opens it (a handshake, one round trip to the box), later
 // calls ride it (one round trip each), and it closes after a short idle
-// time. The box serves one request per session at a time, so calls on one
-// home wait their turn, a few at most.
+// time. Calls on one session go one at a time, so calls on one home wait
+// their turn, a few at most.
 
 // Door carries tun to a home's box: package uplink.
 type Door interface {
@@ -55,6 +55,8 @@ type Pool struct {
 	// refuses an agent sends none. Idle closes a quiet session. Call bounds
 	// one request.
 	Handshake, Idle, Call time.Duration
+	// PaceBurst and PacePerSecond are each home's budget of calls.
+	PaceBurst, PacePerSecond float64
 
 	mu    sync.Mutex
 	conns map[connKey]*agentConn
@@ -70,7 +72,8 @@ const (
 	maxConns = 1024
 	// maxWaiting bounds the calls queued on one session.
 	maxWaiting = 4
-	// maxAnswer bounds what one api.req may return.
+	// maxAnswer bounds what one history query may return; every other read
+	// fits one 16 KiB frame.
 	maxAnswer = 1 << 20
 )
 
@@ -80,7 +83,8 @@ func NewPool(st *store.Store, door Door, keys Keys, boxKey BoxKey, log *slog.Log
 		log = slog.Default()
 	}
 	return &Pool{store: st, door: door, keys: keys, boxKey: boxKey, log: log, now: time.Now,
-		Handshake: 5 * time.Second, Idle: 60 * time.Second, Call: 15 * time.Second, conns: map[connKey]*agentConn{},
+		Handshake: 5 * time.Second, Idle: 60 * time.Second, Call: 15 * time.Second, PaceBurst: PaceBurst, PacePerSecond: PacePerSecond,
+		conns: map[connKey]*agentConn{},
 		paces: map[string]*pacer{}}
 }
 
@@ -213,6 +217,7 @@ var (
 	errTimeout  = userError("The box took too long to answer.")
 	errEnded    = userError("The box ended the session. Try again.")
 	errRevoked  = userError("The owner removed this assistant.")
+	errExpired  = userError("This assistant's access ran out. The owner can renew it in the FTW app.")
 	errIdle     = errors.New("mcp: idle")
 )
 
@@ -277,7 +282,7 @@ func (c *agentConn) open(ctx context.Context, sub oauth.Subject) error {
 	if !ok {
 		return errNoAgents
 	}
-	h, err := c.p.store.For(store.Principal{Kind: store.Device, Home: sub.Home, DeviceKey: sub.Key})
+	h, err := c.p.store.For(store.Principal{Kind: store.Agent, Home: sub.Home, DeviceKey: sub.Key})
 	if err != nil {
 		return errDenied
 	}
@@ -387,7 +392,13 @@ func (c *agentConn) dispatch(env appwire.Envelope) {
 		}
 		return
 	case protocol.MsgSessionTerminate:
-		go c.close(errRevoked)
+		var st protocol.SessionTerminate
+		_ = cbor.Unmarshal(env.B, &st)
+		why := errRevoked
+		if st.Reason == protocol.TerminateExpired {
+			why = errExpired
+		}
+		go c.close(why)
 		return
 	case protocol.MsgCmdAck, protocol.MsgCmdResult:
 		var b struct {
@@ -403,15 +414,30 @@ func (c *agentConn) dispatch(env appwire.Envelope) {
 			}
 		}
 	}
+	ch := c.inflightLocked()
 	if env.ID != nil {
-		if ch := c.waiting[*env.ID]; ch != nil {
-			select {
-			case ch <- env:
-			default:
-				// A call that cannot keep up has failed anyway.
-			}
+		ch = c.waiting[*env.ID]
+	}
+	if ch != nil {
+		select {
+		case ch <- env:
+		default:
+			// A call that cannot keep up has failed anyway.
 		}
 	}
+}
+
+// inflightLocked is the one call waiting for an answer, for a message that
+// came without an id; nil when none or more than one wait. The caller holds
+// c.mu.
+func (c *agentConn) inflightLocked() chan appwire.Envelope {
+	if len(c.waiting) != 1 {
+		return nil
+	}
+	for _, ch := range c.waiting {
+		return ch
+	}
+	return nil
 }
 
 // send seals one message and puts it on the door.
@@ -537,67 +563,80 @@ type boxError struct {
 
 func (e boxError) Error() string { return "box: " + e.Code }
 
-// apiAnswer is one answer from the box's own HTTP API.
-type apiAnswer struct {
-	Status  int
-	Headers map[string]string
-	Body    []byte
-}
-
-// api runs one request against the box's HTTP API, over api.req.
-func (c *agentConn) api(ctx context.Context, method, path string, query map[string]string, body []byte) (apiAnswer, error) {
+// ask sends one request on the session and waits for its answer: the next
+// message with the request's id, or an error. The box answers an agent's
+// reads with messages of their own (docs/agents.md, "What each scope
+// opens"); api.req, the passthrough, is refused to agents.
+func (c *agentConn) ask(ctx context.Context, t string, body any) (appwire.Envelope, error) {
 	release, err := c.take(ctx)
 	if err != nil {
-		return apiAnswer{}, err
+		return appwire.Envelope{}, err
 	}
 	defer release()
 	id := c.newID()
 	ch := c.register(id)
 	defer c.unregister(id)
-	req := protocol.APIReq{Method: method, Path: path, Query: query, Body: body, MaxBytes: maxAnswer}
-	if err := c.send(ctx, protocol.MsgAPIReq, &id, req); err != nil {
-		return apiAnswer{}, err
+	if err := c.send(ctx, t, &id, body); err != nil {
+		return appwire.Envelope{}, err
 	}
-	var ans apiAnswer
-	var next uint32
+	select {
+	case env := <-ch:
+		if env.T == protocol.MsgError {
+			return env, decodeBoxError(env.B)
+		}
+		c.p.pace(c.home).spend(len(env.B), c.p.now())
+		return env, nil
+	case <-c.done:
+		return appwire.Envelope{}, c.closeErr
+	case <-ctx.Done():
+		// The box may still be working on it; a fresh session is the
+		// clean way on.
+		c.close(errTimeout)
+		return appwire.Envelope{}, errTimeout
+	}
+}
+
+// hist runs one history query: hist.chunk tiles until hist.end.
+func (c *agentConn) hist(ctx context.Context, q protocol.HistQuery) ([]protocol.HistChunk, protocol.HistEnd, error) {
+	release, err := c.take(ctx)
+	if err != nil {
+		return nil, protocol.HistEnd{}, err
+	}
+	defer release()
+	id := c.newID()
+	ch := c.register(id)
+	defer c.unregister(id)
+	if err := c.send(ctx, protocol.MsgHistQuery, &id, q); err != nil {
+		return nil, protocol.HistEnd{}, err
+	}
+	var chunks []protocol.HistChunk
+	size := 0
 	for {
 		select {
 		case env := <-ch:
 			switch env.T {
-			case protocol.MsgAPIHead:
-				var h protocol.APIHeadMsg
-				if cbor.Unmarshal(env.B, &h) != nil {
-					return ans, errEnded
+			case protocol.MsgHistChunk:
+				var hc protocol.HistChunk
+				if cbor.Unmarshal(env.B, &hc) != nil {
+					return nil, protocol.HistEnd{}, errEnded
 				}
-				ans.Status, ans.Headers = h.Status, h.Headers
-			case protocol.MsgAPIChunk:
-				var ck protocol.APIChunk
-				if cbor.Unmarshal(env.B, &ck) != nil || ck.Seq != next {
-					c.close(errEnded)
-					return ans, userError("Part of the box's answer was lost. Try again.")
+				if size += len(env.B); size > maxAnswer {
+					return nil, protocol.HistEnd{}, userError("The box's answer is too large. Ask for less.")
 				}
-				next++
-				if len(ans.Body)+len(ck.Data) > maxAnswer {
-					return ans, userError("The box's answer is too large. Ask for less.")
-				}
-				ans.Body = append(ans.Body, ck.Data...)
-			case protocol.MsgAPIEnd:
-				c.p.pace(c.home).spend(len(ans.Body), c.p.now())
-				var end protocol.APIEnd
-				if cbor.Unmarshal(env.B, &end) == nil && end.Truncated {
-					return ans, userError("The box's answer is too large. Ask for less.")
-				}
-				return ans, nil
+				chunks = append(chunks, hc)
+			case protocol.MsgHistEnd:
+				var end protocol.HistEnd
+				_ = cbor.Unmarshal(env.B, &end)
+				c.p.pace(c.home).spend(size, c.p.now())
+				return chunks, end, nil
 			case protocol.MsgError:
-				return ans, decodeBoxError(env.B)
+				return nil, protocol.HistEnd{}, decodeBoxError(env.B)
 			}
 		case <-c.done:
-			return ans, c.closeErr
+			return nil, protocol.HistEnd{}, c.closeErr
 		case <-ctx.Done():
-			// The box may still be working on it; a fresh session is the
-			// clean way on.
 			c.close(errTimeout)
-			return ans, errTimeout
+			return nil, protocol.HistEnd{}, errTimeout
 		}
 	}
 }
