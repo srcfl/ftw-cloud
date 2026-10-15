@@ -2,7 +2,9 @@ package uplink
 
 import (
 	"errors"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/gorilla/websocket"
 	"github.com/srcfl/ftw-cloud/internal/shard"
@@ -148,5 +150,54 @@ func TestRestoreTakesOnlyThisShardsHomes(t *testing.T) {
 	n, err := up.Restore()
 	if err != nil || n != 1 {
 		t.Fatalf("restored %d, %v", n, err)
+	}
+}
+
+// A box that stops reading holds up only its own home: a phone of another
+// home reaches its box at once while writes to the stuck one wait for
+// their deadline.
+func TestAStuckBoxDoesNotHoldUpAnotherHome(t *testing.T) {
+	s := newService(t)
+	stuck := tunConnect(t, s) // never reads again
+	live := tunConnect(t, s)
+	wait(t, "both boxes are their homes'", func() bool { return s.up.Boxes() == 2 })
+	got := make(chan struct{}, 64)
+	go func() {
+		for {
+			if _, _, err := live.conn.ReadMessage(); err != nil {
+				return
+			}
+			got <- struct{}{}
+		}
+	}()
+	// Fill the stuck box's socket from a few phones at once; each send
+	// waits on its write, up to the deadline.
+	big := make([]byte, cloudwire.TunDataMax)
+	var done atomic.Int64
+	for range 4 {
+		go func() {
+			for range 64 {
+				s.up.Tun(stuck.home, cloudwire.Tun{Dev: "owner", Sid: 1, D: big})
+				done.Add(1)
+			}
+		}()
+	}
+	time.Sleep(300 * time.Millisecond)
+	if done.Load() == 4*64 {
+		t.Fatal("the stuck box took every write; the test proves nothing")
+	}
+	for i := range 10 {
+		start := time.Now()
+		if !s.up.Tun(live.home, cloudwire.Tun{Dev: "owner", Sid: 2, D: []byte{byte(i)}}) {
+			t.Fatal("the live box is gone")
+		}
+		select {
+		case <-got:
+		case <-time.After(time.Second):
+			t.Fatal("a tun for another home waited behind the stuck box")
+		}
+		if d := time.Since(start); d > 200*time.Millisecond {
+			t.Fatalf("a tun for another home took %s", d)
+		}
 	}
 }
