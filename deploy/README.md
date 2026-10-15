@@ -158,9 +158,11 @@ service makes that short and spreads the return:
 3. It waits up to 2 s for the phones' closes to go out, and up to 3 s for
    queued alerts. A box closed this way starts no `box.unreachable`.
 4. It exits, in about 0.1 s in the load test.
-5. The new container reads every signed roster back and checks it, one
-   core each, before it listens. Phones are admitted at once; readings
-   come back with the boxes.
+5. The new container reads every signed roster back and checks the
+   signatures on all cores before it listens: 0.35 s for 10,000 homes on
+   two M5 cores (`BenchmarkRestore10k`), about 1.2 s on the host by the
+   estimate under [Load](#load). Phones are admitted at once; readings come
+   back with the boxes.
 6. A box with srcfl/ftw#1645 redials at a random moment within the spread,
    and so does a phone once the apps honour 4503. Older clients redial on
    their own backoff, within 0.5 s, and those that come before the new
