@@ -91,9 +91,9 @@ func newStack(t *testing.T) *stack {
 		tokens.Roster(home, r)
 	}
 	up.OnGone = pushSvc.BoxGone
-	up.OnConnect = func(home string) {
+	up.OnConnect = func(home string, conn uint64) {
 		app.BoxConnected(home)
-		pushSvc.BoxConnected(home)
+		pushSvc.BoxConnected(home, conn)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)

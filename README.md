@@ -41,9 +41,13 @@ to it yet.
   way. The box session's first message may ride in the app session's message
   1 (`now.tun`), so it is up one round trip after TLS. An empty `d` ends a
   session: the box hears when the phone's app session ends, and the phone
-  when the box's uplink does. tun has its own queues and limits per home and
-  direction: 240 messages then 60 a second, 4 MiB then 512 KiB a second. A
-  roster device needs `tun` or a readable copy to be admitted at all.
+  when the box's uplink does, or when the box dials again. From the box,
+  tun rides a queue of its own per phone session, apart from the readings;
+  from a phone it is written straight to the box's socket. Each direction
+  has limits per home: 240 messages then 60 a second, 4 MiB then 512 KiB a
+  second. Past them the service drops and counts, and logs the count each
+  minute; a box at twice them is closed, and so is a phone. A roster device
+  needs `tun` or a readable copy to be admitted at all.
 - **Pairing through the service.** While a QR code is on the box's screen,
   its roster lists the code's hash. A new phone proves the hash in `now.pair`
   and is admitted once, as a device that may only open a tunnel; the box

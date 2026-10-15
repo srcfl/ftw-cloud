@@ -49,13 +49,14 @@ const (
 	// is counted apart.
 	rateBurst  = 60
 	ratePerSec = 10
-	// tun per home and direction, as the relay allows one stream. Past it
-	// the service drops tun and counts the drop; Noise transport survives a
-	// lost message.
-	tunMsgBurst   = 240
-	tunMsgPerSec  = 60
-	tunByteBurst  = 4 << 20
-	tunBytePerSec = 512 << 10
+	// tun per home and direction, the limits the relay puts on a box's
+	// uplink, shared with the box, which paces its bulk under them. Past
+	// them the service drops tun and counts the drop; Noise transport
+	// survives a lost message.
+	tunMsgBurst   = cloudwire.TunMsgBurst
+	tunMsgPerSec  = cloudwire.TunMsgsPerSecond
+	tunByteBurst  = cloudwire.TunByteBurst
+	tunBytePerSec = cloudwire.TunBytesPerSecond
 	// maxPending bounds the pairing codes one roster may list, and
 	// maxPendingTTL how long one may last.
 	maxPending    = 4
@@ -81,8 +82,10 @@ type Uplink struct {
 
 	// OnConnect runs after a box's hello_ok, so the app sessions can ask a
 	// box that just came back for one-second updates and push can stop
-	// waiting to say it is out of reach. Set before serving.
-	OnConnect func(home string)
+	// waiting to say it is out of reach. conn, here and in OnGone, is the
+	// home's connection number, which rises with each connection, so a
+	// hook heard late can be told from a newer one. Set before serving.
+	OnConnect func(home string, conn uint64)
 	// OnHeld gets each envelope the service holds, with its class, as the
 	// box signed it; OnRoster each roster the service keeps; OnGone the end
 	// of the home's current uplink, with the reason the box gave in its
@@ -90,7 +93,7 @@ type Uplink struct {
 	// the box's goroutine and must not block. Set before serving.
 	OnHeld   func(home, class string, envelope []byte)
 	OnRoster func(home string, r *cloudwire.Roster)
-	OnGone   func(home, why string)
+	OnGone   func(home, why string, conn uint64)
 }
 
 // New builds the handler. key is the service key that signs hello_ok and
@@ -131,7 +134,9 @@ func (u *Uplink) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	now := u.now()
 	c := &boxConn{u: u, conn: conn, ekm: ekm, tokens: rateBurst, refilled: now,
 		upMsgs: newBucket(tunMsgBurst, tunMsgPerSec, now), upBytes: newBucket(tunByteBurst, tunBytePerSec, now),
-		downMsgs: newBucket(tunMsgBurst, tunMsgPerSec, now), downBytes: newBucket(tunByteBurst, tunBytePerSec, now)}
+		upHardMsgs:  newBucket(2*tunMsgBurst, 2*tunMsgPerSec, now),
+		upHardBytes: newBucket(2*tunByteBurst, 2*tunBytePerSec, now),
+		downMsgs:    newBucket(tunMsgBurst, tunMsgPerSec, now), downBytes: newBucket(tunByteBurst, tunBytePerSec, now)}
 	c.write = c.writeFrame
 	if err := c.run(); err != nil && !websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
 		u.log.Debug("box uplink closed", "err", err)
@@ -224,8 +229,11 @@ type boxConn struct {
 	refilled time.Time
 
 	// The tunnel's limits: up from the box, read on its goroutine; down
-	// from the home's phones, from theirs.
+	// from the home's phones, from theirs. upHard is twice the up limits: a
+	// box past it is not pacing its tunnel, and its uplink closes.
 	upMsgs, upBytes bucket
+	upHardMsgs      bucket
+	upHardBytes     bucket
 	downMu          sync.Mutex
 	downMsgs        bucket
 	downBytes       bucket
@@ -334,11 +342,11 @@ func (c *boxConn) run() error {
 			}
 			c.u.mu.Unlock()
 			if current && c.u.OnGone != nil {
-				c.u.OnGone(c.home, c.bye)
+				c.u.OnGone(c.home, c.bye, gen)
 			}
 		}()
 		if c.u.OnConnect != nil {
-			go c.u.OnConnect(c.home)
+			go c.u.OnConnect(c.home, gen)
 		}
 	}
 
@@ -404,7 +412,11 @@ func (c *boxConn) fromBox(env cloudwire.Envelope) error {
 	if len(env.Sig) != 0 || cloudwire.Unmarshal(env.B, &t) != nil || len(t.D) > cloudwire.TunDataMax || t.Dev == "" {
 		return fmt.Errorf("%w: a tun the service cannot route", errProtocol)
 	}
-	if !tunAllowed(&c.upMsgs, &c.upBytes, len(t.D), c.u.now()) {
+	now := c.u.now()
+	if !tunAllowed(&c.upHardMsgs, &c.upHardBytes, len(t.D), now) {
+		return fmt.Errorf("%w: tun at twice the home's limits", errProtocol)
+	}
+	if !tunAllowed(&c.upMsgs, &c.upBytes, len(t.D), now) {
 		c.u.TunDropped.Add(1)
 		return nil
 	}

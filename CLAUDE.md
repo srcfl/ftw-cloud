@@ -19,9 +19,13 @@ maintains it.
   names.
 - **One way to a home:** `store.For(principal)`. No listing, no second lookup,
   no principal for staff. A new route needs a row in `server.Routes` and must
-  pass `TestNoRouteReadsAHome`.
+  pass `TestNoRouteReadsAHome`. The one other way in is `store.Seed`, called
+  once at start: it puts back the rosters the registry holds, each checked
+  against its home's key, and reads nothing out.
 - **The home id comes from the key that signed hello** on this connection,
-  never from a body field. Every later box message must verify with that key.
+  never from a body field. Every later box message but `tun` must verify
+  with that key. `tun` is unsigned: its `d` is a phone's ciphertext, which
+  the service routes by `dev` and `sid` and never reads.
 - **No readings on disk.** Memory holds readings, and only while the roster's
   grant serves a copy; SQLite holds only the home id, the box key, the signed
   roster, owners' suspensions, tombstones, APNs registrations, the hashes of
@@ -46,9 +50,24 @@ maintains it.
 - Check open PRs on the files you touch; an open PR has right of way.
 - A wire change is a pair: `srcfl/ftw` (`go/protocol` and its golden vectors)
   first, then this repository, moving the pin in `go.mod`. Say so in both PRs.
-- Keep the service small. The budget is about 3,000 lines of Go; tiles go
-  first if it is overrun. It is over today; the one-door plan gives each part
-  a budget of its own.
+- Keep the service small. The old budget was about 3,000 lines of Go in all,
+  and the service is over it. The one-door plan gives each part a budget of
+  its own, and the numbers are Fredrik's call. Until he sets them, a PR that
+  grows a part says by how much. Lines of Go without tests, at
+  srcfl/ftw-cloud#15:
+
+  | Part | Lines |
+  |---|---|
+  | `internal/appsession` (app session, one-shot read) | 1,020 |
+  | `internal/store` | 807 |
+  | `internal/uplink` | 719 |
+  | `internal/registry` | 694 |
+  | `cmd/ftwcloudd` | 553 |
+  | `internal/push` | 542 |
+  | `internal/apns` | 299 |
+  | `internal/server` | 205 |
+  | `internal/token` | 170 |
+  | All | 5,009 |
 - Nothing is deployed from here without the owner. `deploy/` describes the
   running host; it does not run itself.
 - Keep task breakdowns and agent notes out of the repository.

@@ -126,8 +126,11 @@ type Service struct {
 type homeState struct {
 	online bool
 	// gen moves on every connect and disconnect, so a timer set for one
-	// outage cannot fire into the next.
+	// outage cannot fire into the next. conn is the newest uplink
+	// connection heard of, so the end of an older one, heard late, does
+	// not start the switch for a box that is back.
 	gen  uint64
+	conn uint64
 	stop func() bool
 	told bool
 	sent map[string][]time.Time
@@ -315,9 +318,16 @@ func pricedUntil(p cloudwire.Prices) int64 {
 }
 
 // BoxConnected stops the dead man's switch for a home whose box is back.
-func (s *Service) BoxConnected(home string) {
+// conn is the uplink's connection number for the home, which rises with
+// every connection.
+func (s *Service) BoxConnected(home string, conn uint64) {
 	s.mu.Lock()
 	st := s.state(home)
+	if conn < st.conn {
+		s.mu.Unlock()
+		return
+	}
+	st.conn = conn
 	st.gen++
 	st.online, st.told = true, false
 	if st.stop != nil {
@@ -333,8 +343,15 @@ func (s *Service) BoxConnected(home string) {
 // BoxGone starts the dead man's switch. why is the box's bye reason, empty
 // when the socket just dropped. A bye for an update holds box.unreachable
 // back until the box has been away for cloudwire.UpdateGraceMs; a revoke
-// ends it, since the home is gone.
-func (s *Service) BoxGone(home, why string) {
+// ends it, since the home is gone. The end of a connection older than one
+// already back is ignored.
+func (s *Service) BoxGone(home, why string, conn uint64) {
+	s.mu.Lock()
+	stale := s.homes[home] != nil && conn < s.homes[home].conn
+	s.mu.Unlock()
+	if stale {
+		return
+	}
 	if why == cloudwire.ByeRevoked {
 		s.mu.Lock()
 		if st := s.homes[home]; st != nil && st.stop != nil {
@@ -352,20 +369,26 @@ func (s *Service) BoxGone(home, why string) {
 		wait = time.Duration(cloudwire.UpdateGraceMs) * time.Millisecond
 	}
 	s.log.Info("a box went away", "bye", why, "out_of_reach_after", wait)
+	if !s.arm(home, wait, conn) {
+		return
+	}
 	// Kept on disk, so a restart in the meantime neither forgets the alert
 	// nor sends it twice.
 	if err := s.reg.AwaySet(home, s.now().Add(wait)); err != nil {
 		s.log.Warn("could not record a box's absence", "err", err)
 	}
-	s.arm(home, wait)
 }
 
-// arm starts the wait for box.unreachable. The home's generation moves, so
-// a timer from an earlier absence cannot fire into this one.
-func (s *Service) arm(home string, wait time.Duration) {
+// arm starts the wait for box.unreachable, unless a newer connection than
+// conn is already up. The home's generation moves, so a timer from an
+// earlier absence cannot fire into this one.
+func (s *Service) arm(home string, wait time.Duration, conn uint64) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	st := s.state(home)
+	if conn < st.conn {
+		return false
+	}
 	st.gen++
 	st.online, st.told = false, false
 	if st.stop != nil {
@@ -373,6 +396,7 @@ func (s *Service) arm(home string, wait time.Duration) {
 	}
 	gen := st.gen
 	st.stop = s.after(wait, func() { s.unreachable(home, gen) })
+	return true
 }
 
 // Resume starts the dead man's switch again after a restart. A home recorded
@@ -395,7 +419,7 @@ func (s *Service) Resume() error {
 			s.mu.Unlock()
 			continue
 		}
-		s.arm(a.Home, max(0, a.Due.Sub(now)))
+		s.arm(a.Home, max(0, a.Due.Sub(now)), 0)
 	}
 	homes, err := s.reg.PushHomes(cloudwire.PushKindAlert)
 	if err != nil {
@@ -409,7 +433,7 @@ func (s *Service) Resume() error {
 		if err := s.reg.AwaySet(home, now.Add(wait)); err != nil {
 			return err
 		}
-		s.arm(home, wait)
+		s.arm(home, wait, 0)
 	}
 	return nil
 }

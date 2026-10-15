@@ -203,3 +203,16 @@ func TestPastTheTunLimitsTheServiceDrops(t *testing.T) {
 		t.Fatal("the box is gone")
 	}
 }
+
+// A box that sends tun at twice the home's limits is not pacing its tunnel,
+// and its uplink closes.
+func TestABoxFloodingTunIsClosed(t *testing.T) {
+	s := newService(t)
+	b := tunConnect(t, s)
+	for range 3 * tunMsgBurst {
+		b.tun(cloudwire.Tun{Dev: "nobody", Sid: 1})
+	}
+	if !b.closed() {
+		t.Fatal("a box flooding tun stayed connected")
+	}
+}

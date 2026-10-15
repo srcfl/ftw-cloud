@@ -9,6 +9,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -28,7 +29,15 @@ const (
 // Registry is the SQLite file.
 type Registry struct {
 	db *sql.DB
+
+	// suspended mirrors the suspensions table, so admission, which runs
+	// under a home's lock, never waits for SQLite. Every write updates it
+	// after the file.
+	susMu     sync.Mutex
+	suspended map[suspendKey]uint64
 }
+
+type suspendKey struct{ home, device string }
 
 // Home is one registered home.
 type Home struct {
@@ -89,7 +98,40 @@ CREATE TABLE IF NOT EXISTS away (
 		_ = db.Close()
 		return nil, fmt.Errorf("registry: schema: %w", err)
 	}
-	return &Registry{db: db}, nil
+	r := &Registry{db: db, suspended: map[suspendKey]uint64{}}
+	if err := r.loadSuspensions(); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("registry: suspensions: %w", err)
+	}
+	return r, nil
+}
+
+func (r *Registry) loadSuspensions() error {
+	rows, err := r.db.Query(`SELECT home, device_id, epoch FROM suspensions`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var k suspendKey
+		var epoch int64
+		if err := rows.Scan(&k.home, &k.device, &epoch); err != nil {
+			return err
+		}
+		r.suspended[k] = uint64(epoch)
+	}
+	return rows.Err()
+}
+
+// forgetSuspensions drops a home's suspensions from memory, after the file.
+func (r *Registry) forgetSuspensions(home string) {
+	r.susMu.Lock()
+	defer r.susMu.Unlock()
+	for k := range r.suspended {
+		if k.home == home {
+			delete(r.suspended, k)
+		}
+	}
 }
 
 // Close closes the file.
@@ -227,7 +269,11 @@ func (r *Registry) Purge(home string, grantID []byte, now time.Time) error {
 		ON CONFLICT (home) DO NOTHING`, home, grantID, now.UnixMilli()); err != nil {
 		return err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	r.forgetSuspensions(home)
+	return nil
 }
 
 // Tombstone returns a purged home's grant id and when it was deleted.
@@ -278,6 +324,7 @@ func (r *Registry) Expire(now time.Time) ([]string, error) {
 		if _, err := r.db.Exec(`DELETE FROM suspensions WHERE home = ?`, h); err != nil {
 			return nil, err
 		}
+		r.forgetSuspensions(h)
 	}
 	_, err = r.db.Exec(`DELETE FROM tombstones WHERE deleted_ms < ?`, now.Add(-TombstoneKept).UnixMilli())
 	return gone, err
@@ -288,6 +335,11 @@ func (r *Registry) Expire(now time.Time) ([]string, error) {
 // which the caller checks, and the suspension ends when the roster drops the
 // device or its epoch changes.
 func (r *Registry) Suspend(home, deviceID string, epoch uint64, now time.Time) error {
+	// Memory first: a suspension narrows, so it bites before the write
+	// is done, and a write that fails leaves it biting until a restart.
+	r.susMu.Lock()
+	r.suspended[suspendKey{home, deviceID}] = epoch
+	r.susMu.Unlock()
 	_, err := r.db.Exec(`INSERT INTO suspensions (home, device_id, epoch, since_ms) VALUES (?, ?, ?, ?)
 		ON CONFLICT (home, device_id) DO UPDATE SET epoch = excluded.epoch, since_ms = excluded.since_ms`,
 		home, deviceID, int64(epoch), now.UnixMilli())
@@ -296,19 +348,22 @@ func (r *Registry) Suspend(home, deviceID string, epoch uint64, now time.Time) e
 
 // Unsuspend lifts a suspension.
 func (r *Registry) Unsuspend(home, deviceID string) error {
-	_, err := r.db.Exec(`DELETE FROM suspensions WHERE home = ? AND device_id = ?`, home, deviceID)
-	return err
+	if _, err := r.db.Exec(`DELETE FROM suspensions WHERE home = ? AND device_id = ?`, home, deviceID); err != nil {
+		return err
+	}
+	r.susMu.Lock()
+	delete(r.suspended, suspendKey{home, deviceID})
+	r.susMu.Unlock()
+	return nil
 }
 
-// Suspended reports whether a device is suspended at this epoch. A read that
-// fails counts as suspended: the safe answer narrows.
+// Suspended reports whether a device is suspended at this epoch. It reads
+// memory, never the file, so admission under a home's lock never waits.
 func (r *Registry) Suspended(home, deviceID string, epoch uint64) bool {
-	var held int64
-	err := r.db.QueryRow(`SELECT epoch FROM suspensions WHERE home = ? AND device_id = ?`, home, deviceID).Scan(&held)
-	if errors.Is(err, sql.ErrNoRows) {
-		return false
-	}
-	return err != nil || uint64(held) == epoch
+	r.susMu.Lock()
+	defer r.susMu.Unlock()
+	held, ok := r.suspended[suspendKey{home, deviceID}]
+	return ok && held == epoch
 }
 
 // PruneSuspensions drops the suspensions a new roster ended: devices it no

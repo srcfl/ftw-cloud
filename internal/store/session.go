@@ -58,9 +58,16 @@ func (x *Handle) Open() (Snapshot, *Session, error) {
 	x.h.mu.Lock()
 	defer x.h.mu.Unlock()
 	// The access checked in For may have changed since: check it again
-	// under the lock that roster changes take. A pairing was checked, and
-	// spent, there.
-	if _, _, ok := x.s.access(x.id, x.h, byKey(x.device.Key)); !ok && !x.pairing {
+	// under the lock that roster changes take. A pairing hash is spent here,
+	// once the session is sure to open, so a busy home does not burn it.
+	if x.pairing {
+		if len(x.h.sessions) >= MaxSessionsPerHome {
+			return Snapshot{}, nil, ErrBusy
+		}
+		if !x.h.spendLocked(x.pair, x.s.now()) {
+			return Snapshot{}, nil, ErrDenied
+		}
+	} else if _, _, ok := x.s.access(x.id, x.h, byKey(x.device.Key)); !ok {
 		return Snapshot{}, nil, ErrDenied
 	}
 	for sess := range x.h.sessions {

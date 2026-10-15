@@ -235,6 +235,8 @@ func (s *Server) serve(conn *websocket.Conn, home string) (int, error) {
 	c := &phoneConn{s: s, conn: conn, dev: dev, home: home, tokens: rateBurst, refilled: s.now(),
 		tunTokens: tunBurst, tunAt: s.now(), sess: sess,
 		replies: make(chan []byte, 1), quit: make(chan struct{})}
+	// Whatever ends this session from here on, the box hears its tunnel end.
+	defer c.endTun()
 	// The box session's message 1, when it rode in message 1, goes to the
 	// box before message 2 goes back: the box's answer then follows message
 	// 2 by one leg, and the session is up one round trip after TLS.
@@ -257,7 +259,6 @@ func (s *Server) serve(conn *websocket.Conn, home string) (int, error) {
 
 	c.setLooking(hz >= cloudwire.HzLooking)
 	defer c.stopLooking()
-	defer c.endTun()
 	return c.run(sess)
 }
 
@@ -517,11 +518,15 @@ func (c *phoneConn) readLoop() (int, error) {
 
 // tun forwards the phone's own session to its box, under the device id the
 // handshake proved. A device without tun in the roster sends nothing. When
-// no box takes it, the phone hears its session ended.
-func (c *phoneConn) tun(t cloudwire.AppTun) error {
+// no box takes it, the phone hears its session ended. A d larger than any
+// session message breaks the protocol.
+func (c *phoneConn) tun(t cloudwire.AppTun) (int, error) {
+	if len(t.D) > cloudwire.TunDataMax {
+		return cloudwire.CloseProtocol, errProtocol
+	}
 	dev := c.dev.Device()
-	if !dev.Tun || len(t.D) > cloudwire.TunDataMax {
-		return nil
+	if !dev.Tun {
+		return 0, nil
 	}
 	c.tunMu.Lock()
 	c.tunSid, c.hasTun = t.Sid, len(t.D) > 0
@@ -530,12 +535,12 @@ func (c *phoneConn) tun(t cloudwire.AppTun) error {
 		c.sess.SetSid(t.Sid)
 	}
 	if c.s.Tunnel != nil && c.s.Tunnel.Tun(c.home, cloudwire.Tun{Dev: dev.ID, Sid: t.Sid, D: t.D}) {
-		return nil
+		return 0, nil
 	}
 	if len(t.D) == 0 {
-		return nil
+		return 0, nil
 	}
-	return c.say(cloudwire.MsgTun, cloudwire.AppTun{Sid: t.Sid})
+	return 0, c.say(cloudwire.MsgTun, cloudwire.AppTun{Sid: t.Sid})
 }
 
 // tunEarly forwards the box session's message 1 that rode in message 1. No
@@ -591,7 +596,7 @@ func (c *phoneConn) apply(frame []byte) (int, error) {
 		if err := cloudwire.Unmarshal(env.B, &t); err != nil {
 			return cloudwire.CloseProtocol, err
 		}
-		return 0, c.tun(t)
+		return c.tun(t)
 	}
 	// tun has limits of its own, per home; everything else counts here.
 	if len(frame) > maxPlainMessage || !c.allow() {

@@ -403,7 +403,8 @@ func FuzzBoxTun(f *testing.F) {
 		now := time.Now()
 		c := &boxConn{u: u, home: home, pub: &key.PublicKey, handle: handle, tun: true,
 			write:  func([]byte) error { return nil },
-			upMsgs: newBucket(tunMsgBurst, tunMsgPerSec, now), upBytes: newBucket(tunByteBurst, tunBytePerSec, now)}
+			upMsgs: newBucket(tunMsgBurst, tunMsgPerSec, now), upBytes: newBucket(tunByteBurst, tunBytePerSec, now),
+			upHardMsgs: newBucket(2*tunMsgBurst, 2*tunMsgPerSec, now), upHardBytes: newBucket(2*tunByteBurst, 2*tunBytePerSec, now)}
 		_ = c.fromBox(cloudwire.Envelope{T: cloudwire.MsgTun, B: body})
 	})
 }

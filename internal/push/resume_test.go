@@ -21,8 +21,8 @@ func (r *rig) restart(t *testing.T) {
 func TestARestartKeepsTheWaitForBoxUnreachable(t *testing.T) {
 	r := newRig(t)
 	_ = r.register(t, r.owner, r.all, "tok")
-	r.svc.BoxConnected(r.home)
-	r.svc.BoxGone(r.home, "")
+	r.connected()
+	r.gone("")
 	r.clock.advance(400 * time.Second)
 	r.restart(t)
 	r.clock.advance(199 * time.Second)
@@ -39,8 +39,8 @@ func TestARestartKeepsTheWaitForBoxUnreachable(t *testing.T) {
 func TestARestartDoesNotRepeatBoxUnreachable(t *testing.T) {
 	r := newRig(t)
 	_ = r.register(t, r.owner, r.all, "tok")
-	r.svc.BoxConnected(r.home)
-	r.svc.BoxGone(r.home, "")
+	r.connected()
+	r.gone("")
 	r.clock.advance(601 * time.Second)
 	if n := unreachableSent(t, r); n != 1 {
 		t.Fatalf("sent %d", n)
@@ -57,10 +57,10 @@ func TestARestartDoesNotRepeatBoxUnreachable(t *testing.T) {
 func TestARestartGivesAConnectedBoxItsWholeWait(t *testing.T) {
 	r := newRig(t)
 	_ = r.register(t, r.owner, r.all, "tok")
-	r.svc.BoxConnected(r.home)
+	r.connected()
 	r.restart(t)
 	r.clock.advance(30 * time.Second)
-	r.svc.BoxConnected(r.home)
+	r.connected()
 	r.clock.advance(time.Hour)
 	if n := unreachableSent(t, r); n != 0 {
 		t.Fatalf("sent %d for a box that came back", n)
@@ -70,5 +70,23 @@ func TestARestartGivesAConnectedBoxItsWholeWait(t *testing.T) {
 	r.clock.advance(601 * time.Second)
 	if n := unreachableSent(t, r); n != 1 {
 		t.Fatalf("sent %d for a box that never came back after a restart", n)
+	}
+}
+
+// The end of an older connection, heard after the next one is up, does not
+// start the switch for a box that is back.
+func TestALateEndOfAnOlderConnectionSaysNothing(t *testing.T) {
+	r := newRig(t)
+	_ = r.register(t, r.owner, r.all, "tok")
+	r.connected()
+	old := r.conn
+	r.connected()
+	r.svc.BoxGone(r.home, "", old)
+	r.clock.advance(time.Hour)
+	if n := unreachableSent(t, r); n != 0 {
+		t.Fatalf("sent %d for a box that was back", n)
+	}
+	if away, _ := r.reg.AwayAll(); len(away) != 0 {
+		t.Fatalf("an absence was recorded: %+v", away)
 	}
 }

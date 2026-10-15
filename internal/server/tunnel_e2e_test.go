@@ -60,8 +60,15 @@ type boxSide struct {
 func (s *stack) connectTunBox() *tunBox {
 	s.t.Helper()
 	key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	pk, _ := cloudwire.PublicKeyBytesOf(&key.PublicKey)
 	static, _ := appwire.GenerateKeyPair()
+	return s.connectTunBoxAs(key, static)
+}
+
+// connectTunBoxAs is the same box dialling again, as after a network change
+// while its old socket is still open.
+func (s *stack) connectTunBoxAs(key *ecdsa.PrivateKey, static appwire.KeyPair) *tunBox {
+	s.t.Helper()
+	pk, _ := cloudwire.PublicKeyBytesOf(&key.PublicKey)
 	b := &tunBox{t: s.t, key: key, home: cloudwire.HomeID(pk), static: static, allowed: map[string][]byte{},
 		sessions: map[string]*boxSide{}, purged: make(chan cloudwire.Purged, 4), closed: make(chan struct{})}
 	pool := x509.NewCertPool()
@@ -272,6 +279,8 @@ type tunPhone struct {
 	in    *appwire.InitiatorState
 	tuns  chan cloudwire.AppTun
 	code  int
+	// ended is how the stream ended, set before tuns closes.
+	ended error
 }
 
 // dialPhone opens the app session. A refusal comes back as code, before
@@ -326,6 +335,7 @@ func (s *stack) dialPhone(home string, key appwire.KeyPair, now cloudwire.Now, o
 			_ = conn.SetReadDeadline(time.Time{})
 			_, msg, err := conn.ReadMessage()
 			if err != nil {
+				p.ended = err
 				close(p.tuns)
 				return
 			}
@@ -696,5 +706,58 @@ func TestOnlyTheWebAppsOriginIsLetIn(t *testing.T) {
 	}
 	if p := s.dialPhone(box.home, key, cloudwire.Now{}, "https://app.ftw.energy"); p.tr == nil {
 		t.Fatalf("the web app's origin was refused: %d", p.code)
+	}
+}
+
+// A box that dials again while its old socket is still open: the phone's
+// tunnel on the old uplink is gone at the box, and the phone hears so.
+func TestABoxThatRedialsEndsThePhonesOldTunnel(t *testing.T) {
+	s := newStack(t)
+	box := s.connectTunBox()
+	key, _ := appwire.GenerateKeyPair()
+	box.roster(2, grantOff, nil, key.Public())
+	waitRoster(t, s, box.home, key)
+	phone := s.dialPhone(box.home, key, cloudwire.Now{Hz: 1}, "")
+	phone.open(box.static.Public(), 11, nil)
+
+	again := s.connectTunBoxAs(box.key, box.static)
+	end := phone.next()
+	if end.Sid != 11 || len(end.D) != 0 {
+		t.Fatalf("after the box redialled the phone got %+v", end)
+	}
+	// The new uplink carries a new session.
+	again.roster(3, grantOff, nil, key.Public())
+	time.Sleep(100 * time.Millisecond)
+	phone.open(again.static.Public(), 12, nil)
+	if _, res := phone.cmd(12, "0192f2a0-7c1e-7000-8000-00000000b0b1"); res != protocol.CmdApplied {
+		t.Fatalf("result %q on the new uplink", res)
+	}
+}
+
+// A phone that sends a d larger than any session message breaks the
+// protocol and is closed with 4400.
+func TestAnOversizeTunClosesThePhone(t *testing.T) {
+	s := newStack(t)
+	box := s.connectTunBox()
+	key, _ := appwire.GenerateKeyPair()
+	box.roster(2, grantOff, nil, key.Public())
+	waitRoster(t, s, box.home, key)
+	phone := s.dialPhone(box.home, key, cloudwire.Now{Hz: 1}, "")
+	phone.sendRaw(cloudwire.AppTun{Sid: 1, D: make([]byte, cloudwire.TunDataMax+1)})
+	deadline := time.After(3 * time.Second)
+	for {
+		select {
+		case _, ok := <-phone.tuns:
+			if ok {
+				continue
+			}
+			var ce *websocket.CloseError
+			if !asClose(phone.ended, &ce) || ce.Code != cloudwire.CloseProtocol {
+				t.Fatalf("closed with %v", phone.ended)
+			}
+			return
+		case <-deadline:
+			t.Fatal("the session stayed open")
+		}
 	}
 }

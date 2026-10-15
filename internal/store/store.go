@@ -125,6 +125,7 @@ type Handle struct {
 	// runs out at pairedUntil, or the roster lists its key.
 	pairing     bool
 	pairedUntil time.Time
+	pair        []byte
 }
 
 // For returns the principal's access to its home, or ErrDenied. A box may
@@ -153,7 +154,7 @@ func (s *Store) For(p Principal) (*Handle, error) {
 			return &Handle{s: s, id: p.Home, h: h, kind: Device, device: dev, scopes: scopes}, nil
 		}
 		if until, ok := s.pair(h, p); ok {
-			return &Handle{s: s, id: p.Home, h: h, kind: Device, pairing: true, pairedUntil: until,
+			return &Handle{s: s, id: p.Home, h: h, kind: Device, pairing: true, pairedUntil: until, pair: bytes.Clone(p.Pair),
 				device: cloudwire.Device{ID: cloudwire.DeviceID(p.DeviceKey), Key: bytes.Clone(p.DeviceKey), Tun: true}}, nil
 		}
 		return nil, ErrDenied
@@ -176,25 +177,42 @@ func newHome() *home {
 		pending: map[string]time.Time{}, spent: map[string]time.Time{}}
 }
 
-// pair spends a pending pairing hash for a key the roster does not list. The
-// device it admits may only open a tunnel; the box decides inside it whether
-// the phone pairs. The caller holds h.mu.
+// pair checks a pending pairing hash for a key the roster does not list at
+// all: a listed key that access refused, suspended or without a tunnel, never
+// gets in this way. The device it admits may only open a tunnel; the box
+// decides inside it whether the phone pairs. Open spends the hash. The
+// caller holds h.mu.
 func (s *Store) pair(h *home, p Principal) (time.Time, bool) {
 	if len(p.Pair) != cloudwire.PairingHashBytes || len(p.DeviceKey) != 32 || h.roster == nil {
 		return time.Time{}, false
+	}
+	for _, d := range h.roster.Devices {
+		if bytes.Equal(d.Key, p.DeviceKey) {
+			return time.Time{}, false
+		}
 	}
 	now := s.now()
 	if now.After(h.rosterAt.Add(time.Duration(h.roster.TTLS) * time.Second)) {
 		return time.Time{}, false
 	}
-	key := hex.EncodeToString(p.Pair)
-	until, ok := h.pending[key]
+	until, ok := h.pending[hex.EncodeToString(p.Pair)]
 	if !ok || !now.Before(until) {
 		return time.Time{}, false
 	}
+	return until, true
+}
+
+// spendLocked takes a pending pairing hash for good. False means it went
+// meanwhile. The caller holds h.mu.
+func (h *home) spendLocked(pair []byte, now time.Time) bool {
+	key := hex.EncodeToString(pair)
+	until, ok := h.pending[key]
+	if !ok || !now.Before(until) {
+		return false
+	}
 	delete(h.pending, key)
 	h.spent[key] = until
-	return until, true
+	return true
 }
 
 // byKey matches the roster entry with a device's Noise static key.
@@ -237,9 +255,15 @@ func (s *Store) access(id string, h *home, match func(cloudwire.Device) bool) (c
 
 // Connected marks the box's socket up and returns its number. A later
 // connection replaces this one; Disconnected with an older number is ignored.
+//
+// A new connection also ends every tunnel the older one carried: the box
+// dropped those sessions with its old socket, so their phones hear it now,
+// even when the old socket is still open and its own end comes too late to
+// count.
 func (x *Handle) Connected() uint64 {
 	x.h.mu.Lock()
 	defer x.h.mu.Unlock()
+	x.h.tunGoneLocked()
 	x.h.conn++
 	x.h.online = true
 	x.h.lastSeen = x.s.now()
@@ -320,6 +344,10 @@ func (x *Handle) SetRoster(r *cloudwire.Roster) bool {
 		return false
 	}
 	x.h.roster, x.h.rosterAt = r, x.s.now()
+	if !slices.Contains(r.Grant.Purposes, protocol.CloudPurposeServe) {
+		// The copy is off or withdrawn: no reading stays in memory.
+		x.h.latest, x.h.full = map[string]Held{}, nil
+	}
 	x.h.setPendingLocked(r, x.h.rosterAt)
 	x.recheckLocked()
 	return true
@@ -371,7 +399,7 @@ func (x *Handle) recheckLocked() {
 		case !ok:
 			sess.endLocked(cloudwire.CloseDenied)
 		case dev.ID != sess.x.device.ID || dev.Epoch != sess.x.device.Epoch || dev.Role != sess.x.device.Role ||
-			!slices.Equal(scopes, sess.x.scopes):
+			dev.Tun != sess.x.device.Tun || !slices.Equal(scopes, sess.x.scopes):
 			sess.endLocked(cloudwire.CloseChanged)
 		}
 	}
@@ -515,8 +543,10 @@ func (s *Store) Seed(id string, r *cloudwire.Roster, at time.Time) {
 	if h.roster != nil {
 		return
 	}
+	// Pairing codes are not restored: which of them a phone already spent
+	// is not on disk, and the box lists any still on its screen when it
+	// reconnects.
 	h.roster, h.rosterAt, h.lastSeen = r, at, at
-	h.setPendingLocked(r, at)
 }
 
 // Forget drops a home the registry has deleted, as after 90 days without a

@@ -145,11 +145,11 @@ func serve(args []string) error {
 		srv.App.Tunnel = up
 	}
 	app := srv.App
-	up.OnConnect = func(home string) {
+	up.OnConnect = func(home string, conn uint64) {
 		if app != nil {
 			app.BoxConnected(home)
 		}
-		pushSvc.BoxConnected(home)
+		pushSvc.BoxConnected(home, conn)
 	}
 
 	// TLS ends here and nowhere else: each box binds its handshake to this

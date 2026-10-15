@@ -22,7 +22,7 @@ type heard struct {
 
 func listen(s *service) *heard {
 	h := &heard{}
-	s.up.OnConnect = func(string) { h.mu.Lock(); h.conns++; h.mu.Unlock() }
+	s.up.OnConnect = func(string, uint64) { h.mu.Lock(); h.conns++; h.mu.Unlock() }
 	s.up.OnHeld = func(home, class string, env []byte) {
 		h.mu.Lock()
 		defer h.mu.Unlock()
@@ -36,7 +36,7 @@ func listen(s *service) *heard {
 		h.rosters = append(h.rosters, r.RosterSeq)
 		h.mu.Unlock()
 	}
-	s.up.OnGone = func(home, why string) {
+	s.up.OnGone = func(home, why string, _ uint64) {
 		h.mu.Lock()
 		h.gone = append(h.gone, why)
 		h.mu.Unlock()
