@@ -4,6 +4,7 @@
 //
 //	ftwcloudd keygen -out service.key          make the service key; prints its public half
 //	ftwcloudd keygen -noise -out noise.key     make the Noise key phones dial; prints its public half
+//	ftwcloudd metrics                          print the running service's counts, from inside its container
 //	ftwcloudd [flags]                          serve
 package main
 
@@ -23,19 +24,23 @@ import (
 	"io"
 	"log"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
 	"github.com/srcfl/ftw-cloud/internal/apns"
 	"github.com/srcfl/ftw-cloud/internal/appsession"
+	"github.com/srcfl/ftw-cloud/internal/metrics"
 	"github.com/srcfl/ftw-cloud/internal/push"
 	"github.com/srcfl/ftw-cloud/internal/registry"
 	"github.com/srcfl/ftw-cloud/internal/server"
+	"github.com/srcfl/ftw-cloud/internal/shard"
 	"github.com/srcfl/ftw-cloud/internal/store"
 	"github.com/srcfl/ftw-cloud/internal/token"
 	"github.com/srcfl/ftw-cloud/internal/uplink"
@@ -47,6 +52,13 @@ import (
 func main() {
 	if len(os.Args) > 1 && os.Args[1] == "keygen" {
 		if err := keygen(os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
+	if len(os.Args) > 1 && os.Args[1] == "metrics" {
+		if err := printMetrics(os.Args[2:]); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
@@ -73,6 +85,9 @@ func serve(args []string) error {
 	apnsWatch := fs.String("apns-watch-topic", "energy.ftw.app.watchkitapp", "the watch app's bundle id")
 	devPush := fs.String("dev-push-listen", "", "loopback address for registering a token by hand (development builds only)")
 	devCapture := fs.String("dev-apns-capture", "", "write each alert to this directory instead of sending it to Apple (development builds only)")
+	shardsPath := fs.String("shards", "", "shard directory, JSON; without it this instance holds every home")
+	metricsAddr := fs.String("metrics-listen", defaultMetricsAddr, "loopback address for /metrics; empty turns it off")
+	restartRate := fs.Int("restart-rate", defaultRestartRate, "sockets a second the next instance can take after a restart; sets the spread of the redial")
 	_ = fs.Parse(args)
 
 	harden()
@@ -90,6 +105,15 @@ func serve(args []string) error {
 	} else if err != nil {
 		return err
 	}
+	shards := shard.Single(*domain)
+	if *shardsPath != "" {
+		if shards, err = shard.Load(*shardsPath); err != nil {
+			return err
+		}
+		if shards.Host() != *domain {
+			return fmt.Errorf("shards: this instance is %s at %s, but -domain is %s", shards.Self(), shards.Host(), *domain)
+		}
+	}
 	reg, err := registry.Open(filepath.Join(*stateDir, "registry.db"))
 	if err != nil {
 		return err
@@ -99,15 +123,18 @@ func serve(args []string) error {
 	st := store.New(nil)
 	st.UseSuspensions(reg.Suspended)
 	up := uplink.New(st, reg, key, log)
+	up.Shards = shards
 	// A restart is a deploy, and commands ride through here: phones are
 	// admitted by the rosters their boxes signed before, without waiting
 	// for every box to reconnect.
+	restoreStart := time.Now()
 	if n, err := up.Restore(); err != nil {
 		return err
 	} else if n > 0 {
-		log.Info("rosters restored from the registry", "homes", n)
+		log.Info("rosters restored from the registry", "homes", n, "took", time.Since(restoreStart).Round(time.Millisecond))
 	}
 	tokens := token.New(st, reg, log)
+	tokens.Shards = shards
 	srv := &server.Server{Store: st, Registry: reg, Uplink: up, Tokens: tokens, Log: log}
 
 	// Alerts: the box's signed events to its phones through Apple, and
@@ -143,6 +170,7 @@ func serve(args []string) error {
 		srv.App.Push = pushSvc
 		srv.App.Tokens = tokens
 		srv.App.Tunnel = up
+		srv.App.Shards = shards
 	}
 	app := srv.App
 	up.OnConnect = func(home string, conn uint64) {
@@ -184,10 +212,16 @@ func serve(args []string) error {
 		ErrorLog: log0(),
 	}
 
+	metrics.Default.GaugeFunc("ftwcloud_homes", "Homes held in memory.", func() int64 { return int64(st.Homes()) })
+	metrics.Default.GaugeFunc("ftwcloud_homes_connected", "Homes whose box is connected.", func() int64 { return int64(up.Boxes()) })
+
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	go srv.Upkeep(ctx, time.Minute)
-	go pushSvc.Run(ctx)
+	// Push outlives the signal until the queued alerts are out.
+	pushCtx, stopPush := context.WithCancel(context.Background())
+	defer stopPush()
+	go pushSvc.Run(pushCtx)
 	if err := pushSvc.Resume(); err != nil {
 		log.Warn("could not restart the dead man's switch", "err", err)
 	}
@@ -196,20 +230,104 @@ func serve(args []string) error {
 			return err
 		}
 	}
+	if *metricsAddr != "" {
+		if err := serveMetrics(ctx, *metricsAddr); err != nil {
+			return err
+		}
+	}
+	go metrics.Default.Summarise(ctx, os.Stdout, shards.Self(), time.Minute)
+
+	// A deploy: stop accepting, tell every box and phone to come back within
+	// a spread the next instance can take, let the queued alerts go, then
+	// exit. A box closed this way starts no box.unreachable.
+	drained := make(chan struct{})
 	go func() {
+		defer close(drained)
 		<-ctx.Done()
 		shutdown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		_ = httpSrv.Shutdown(shutdown)
+		go func() { _ = httpSrv.Shutdown(shutdown) }()
+		phones := 0
+		if app != nil {
+			phones = app.Sockets()
+		}
+		spread := restartSpread(up.Boxes()+phones, *restartRate)
+		reason := strconv.FormatInt(spread.Milliseconds(), 10)
+		boxes := up.Drain(reason)
+		if app != nil {
+			app.Drain(reason)
+		}
+		log.Info("draining for a restart", "boxes", boxes, "phones", phones, "spread", spread)
+		if left := pushSvc.Flush(3 * time.Second); left > 0 {
+			log.Warn("alerts still queued at exit", "count", left)
+		}
+		stopPush()
 	}()
 
 	pub, _ := cloudwire.PublicKeyBytesOf(&key.PublicKey)
-	log.Info("ftwcloudd listening", "addr", *listen, "service_key", base64.RawURLEncoding.EncodeToString(pub),
-		"noise_key", base64.RawURLEncoding.EncodeToString(noise.Public()))
-	if err := httpSrv.ListenAndServeTLS("", ""); err != nil && !errors.Is(err, http.ErrServerClosed) {
+	log.Info("ftwcloudd listening", "addr", *listen, "shard", shards.Self(), "shards", shards.Shards(),
+		"service_key", base64.RawURLEncoding.EncodeToString(pub), "noise_key", base64.RawURLEncoding.EncodeToString(noise.Public()))
+	err = httpSrv.ListenAndServeTLS("", "")
+	if err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return err
 	}
+	<-drained
 	return nil
+}
+
+// defaultRestartRate is how many sockets a second one instance takes on
+// the host, with room to spare: deploy/README.md, "Load", has the numbers.
+const defaultRestartRate = 500
+
+// restartSpread is how long sockets wait at most before they redial: their
+// number at rate a second, from 1 s to cloudwire.RestartSpreadMaxMs.
+func restartSpread(sockets, rate int) time.Duration {
+	if rate <= 0 {
+		rate = defaultRestartRate
+	}
+	d := time.Duration(sockets) * time.Second / time.Duration(rate)
+	return min(max(d, time.Second), time.Duration(cloudwire.RestartSpreadMaxMs)*time.Millisecond)
+}
+
+// defaultMetricsAddr is inside the container only; an operator reads it
+// with docker exec and ftwcloudd metrics.
+const defaultMetricsAddr = "127.0.0.1:9464"
+
+// serveMetrics answers /metrics on a loopback address until ctx ends.
+func serveMetrics(ctx context.Context, addr string) error {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return fmt.Errorf("metrics-listen: %w", err)
+	}
+	if ip := net.ParseIP(host); host != "localhost" && (ip == nil || !ip.IsLoopback()) {
+		return fmt.Errorf("metrics-listen: %s is not a loopback address", addr)
+	}
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return err
+	}
+	m := &http.Server{Handler: metrics.Default, ReadHeaderTimeout: 5 * time.Second, ErrorLog: log0()}
+	go func() { _ = m.Serve(ln) }()
+	go func() {
+		<-ctx.Done()
+		_ = m.Close()
+	}()
+	return nil
+}
+
+// printMetrics prints the running service's /metrics.
+func printMetrics(args []string) error {
+	fs := flag.NewFlagSet("metrics", flag.ExitOnError)
+	addr := fs.String("addr", defaultMetricsAddr, "where the service answers /metrics")
+	_ = fs.Parse(args)
+	c := &http.Client{Timeout: 5 * time.Second}
+	resp, err := c.Get("http://" + *addr + "/metrics")
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	_, err = io.Copy(os.Stdout, resp.Body)
+	return err
 }
 
 func log0() *log.Logger { return log.New(io.Discard, "", 0) }

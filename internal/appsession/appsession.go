@@ -25,8 +25,10 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/srcfl/ftw-cloud/internal/metrics"
 	"github.com/srcfl/ftw-cloud/internal/push"
 	"github.com/srcfl/ftw-cloud/internal/registry"
+	"github.com/srcfl/ftw-cloud/internal/shard"
 	"github.com/srcfl/ftw-cloud/internal/store"
 	"github.com/srcfl/ftw/go/protocol/appwire"
 	"github.com/srcfl/ftw/go/protocol/cloudwire"
@@ -78,6 +80,17 @@ type Tunneler interface {
 	Tun(home string, t cloudwire.Tun) bool
 }
 
+// What the app sessions count, summed over all homes.
+var (
+	appSockets     = metrics.Sockets("app")
+	appHandshake   = metrics.Handshake("app")
+	onceHandshake  = metrics.Handshake("once")
+	envelopeOut    = metrics.Forward("envelope")
+	tunUp          = metrics.Forward("tun_up")
+	appWrongShard  = metrics.WrongShard("app")
+	onceWrongShard = metrics.WrongShard("once")
+)
+
 // WebOrigin is the one browser origin the service accepts on /v1/app: the
 // web app's. The phone and the box send no Origin.
 const WebOrigin = "https://app.ftw.energy"
@@ -108,6 +121,15 @@ type Server struct {
 	// Tunnel carries the phones' sessions to their boxes. Nil answers every
 	// tun with its end. Set before serving.
 	Tunnel Tunneler
+	// Shards says which homes this instance holds. Nil holds every home.
+	// Set before serving.
+	Shards *shard.Directory
+
+	// draining closes when Drain starts; restartReason is what its close
+	// says.
+	draining      chan struct{}
+	drainOnce     sync.Once
+	restartReason string
 
 	mu      sync.Mutex
 	looking map[string]*look
@@ -145,7 +167,8 @@ func New(st *store.Store, reg *registry.Registry, w Watcher, key appwire.KeyPair
 	}
 	return &Server{store: st, registry: reg, watcher: w, key: key, log: log, now: time.Now,
 		renewEvery: WatchRenew, looking: map[string]*look{}, watchedUntil: map[string]time.Time{}, onceMessage2: maxNoiseMessage,
-		once: onceLimits{homes: map[string]int{}, devices: map[string]*onceDevice{}}}
+		draining: make(chan struct{}),
+		once:     onceLimits{homes: map[string]int{}, devices: map[string]*onceDevice{}}}
 }
 
 var upgrader = websocket.Upgrader{
@@ -173,20 +196,57 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer conn.Close()
+	appSockets.Add(1)
+	defer appSockets.Add(-1)
 	conn.SetReadLimit(maxPhoneMessage)
-	code, err := s.serve(conn, home)
-	if err != nil {
-		s.log.Debug("app session closed", "err", err)
+	// The close goes before message 1 is read: a browser cannot see the
+	// status of a refused upgrade, but every client reads a close.
+	code, reason := 0, ""
+	if host, ours := s.owner(home); !ours {
+		appWrongShard.Inc()
+		code, reason = cloudwire.CloseWrongShard, host
+	} else {
+		code, err = s.serve(conn, home)
+		if err != nil {
+			s.log.Debug("app session closed", "err", err)
+		}
+		if code == cloudwire.CloseRestart {
+			reason = s.restartReason
+		}
 	}
 	if code != 0 {
-		_ = conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(code, ""), time.Now().Add(time.Second))
+		_ = conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(code, reason), time.Now().Add(time.Second))
 	}
+}
+
+// owner is the host of the shard that holds home, and whether it is this
+// instance.
+func (s *Server) owner(home string) (string, bool) {
+	if s.Shards == nil {
+		return "", true
+	}
+	return s.Shards.Owner(home)
+}
+
+// Sockets is how many app sessions are open.
+func (s *Server) Sockets() int { return int(appSockets.Load()) }
+
+// Drain ends every app session with cloudwire.CloseRestart and reason, the
+// spread in milliseconds, and every session that finishes its handshake
+// from now on. It returns how many sockets were open.
+func (s *Server) Drain(reason string) int {
+	s.drainOnce.Do(func() {
+		s.restartReason = reason
+		close(s.draining)
+	})
+	return int(appSockets.Load())
 }
 
 var errProtocol = errors.New("appsession: the phone broke the protocol")
 
 // serve runs one session and returns the close code to end it with.
 func (s *Server) serve(conn *websocket.Conn, home string) (int, error) {
+	start := time.Now()
 	_ = conn.SetReadDeadline(time.Now().Add(handshakeTimeout))
 	kind, msg1, err := conn.ReadMessage()
 	if err != nil {
@@ -246,6 +306,7 @@ func (s *Server) serve(conn *websocket.Conn, home string) (int, error) {
 	if err := c.write(msg2); err != nil {
 		return 0, err
 	}
+	appHandshake.Since(start)
 	keys, err := hs.Split()
 	if err != nil {
 		return websocket.CloseInternalServerErr, err
@@ -457,22 +518,26 @@ func (c *phoneConn) run(sess *store.Session) (int, error) {
 	defer ping.Stop()
 	for {
 		select {
-		case env := <-sess.C():
-			if err := c.forward(env); err != nil {
+		case out := <-sess.C():
+			if err := c.forward(out.Env); err != nil {
 				return 0, err
 			}
+			envelopeOut.Since(out.At)
 		case env := <-c.replies:
 			if err := c.forward(env); err != nil {
 				return 0, err
 			}
 		case t := <-sess.Tun():
-			env, err := cloudwire.Unsigned(cloudwire.MsgTun, t)
+			env, err := cloudwire.Unsigned(cloudwire.MsgTun, t.AppTun)
 			if err != nil {
 				return 0, err
 			}
 			if err := c.forward(env); err != nil {
 				return 0, err
 			}
+			tunUp.Since(t.At)
+		case <-c.s.draining:
+			return cloudwire.CloseRestart, nil
 		case <-sess.Done():
 			return sess.Code(), nil
 		case r := <-read:

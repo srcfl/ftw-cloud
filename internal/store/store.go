@@ -78,6 +78,13 @@ func New(now func() time.Time) *Store {
 	return &Store{homes: map[string]*home{}, now: now}
 }
 
+// Homes is how many homes the store holds.
+func (s *Store) Homes() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.homes)
+}
+
 // UseSuspensions sets where owners' suspensions are kept. Call it before
 // serving.
 func (s *Store) UseSuspensions(suspended func(home, deviceID string, epoch uint64) bool) {
@@ -314,9 +321,10 @@ func (x *Handle) Put(t string, env []byte, seq uint64, carriesTable bool) error 
 		x.h.full = &held
 	}
 	x.h.lastSeen = x.s.now()
+	at := time.Now()
 	for sess := range x.h.sessions {
 		if sess.x.mayRead(t) {
-			sess.deliver(env)
+			sess.deliver(env, at)
 		}
 	}
 	return nil

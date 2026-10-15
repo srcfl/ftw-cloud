@@ -34,6 +34,7 @@ func sessionPrologue(boxStatic []byte) []byte {
 // the box's half of each phone's session.
 type tunBox struct {
 	t      *testing.T
+	ended  error // why the socket closed, once closed is
 	key    *ecdsa.PrivateKey
 	home   string
 	static appwire.KeyPair
@@ -167,6 +168,9 @@ func (b *tunBox) serve() {
 		_ = b.conn.SetReadDeadline(time.Time{})
 		_, msg, err := b.conn.ReadMessage()
 		if err != nil {
+			b.mu.Lock()
+			b.ended = err
+			b.mu.Unlock()
 			return
 		}
 		payload, _ := cloudwire.DecodeFrame(msg)
