@@ -35,6 +35,14 @@ and turns `ftwkeysd` on.
 - **Revoking deletes the key.** When the box's roster drops an agent, or it
   expires, `ftwcloudd` asks `ftwkeysd` to forget the key, which ends its
   sessions too.
+- **The offer key.** One P-256 key signs every grant offer the consent page
+  hands the owner's app, so the app can tell an offer from FTW Cloud from a
+  copy. It is made at the first start, sealed like an agent key (its data
+  key's context names `offer-key`), and kept in memory while `ftwkeysd`
+  runs. It signs only arrays that start with `ftw.offer.v1`. The app pins
+  its public half: `ftwkeysd` logs it when it makes the key, and
+  `ftwcloudd` serves it at `/.well-known/ftw-offer-key`. Losing the volume
+  makes a new offer key, which the app must then pin anew.
 - **Nothing logs a key.** Errors on the socket are a few fixed words.
 - **The volume is not backed up.** Losing it means every assistant must be
   approved again; no home is exposed by it.

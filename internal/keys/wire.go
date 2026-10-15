@@ -39,6 +39,7 @@ const (
 	opSeal   = "seal"   // encrypt frame d of sess; answers d
 	opUnseal = "unseal" // decrypt message d of sess; answers d
 	opClose  = "close"  // end sess
+	// offer.pub and offer.sign are in offer.go.
 )
 
 // maxFrame bounds one frame between the processes: one Noise transport

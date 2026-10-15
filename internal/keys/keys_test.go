@@ -356,10 +356,17 @@ func TestKMSSealerBindsTheContext(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = c.Keep(ctx, kid)
-	for _, blob := range kms.blobs {
-		if blob.ctx["purpose"] != EncryptionContextPurpose || blob.ctx["kid"] != kid {
+	var wrapped []byte
+	for b, blob := range kms.blobs {
+		if blob.ctx["purpose"] != EncryptionContextPurpose || (blob.ctx["kid"] != kid && blob.ctx["kid"] != offerKid) {
 			t.Fatalf("encryption context %v", blob.ctx)
 		}
+		if blob.ctx["kid"] == kid {
+			wrapped = []byte(b)
+		}
+	}
+	if wrapped == nil {
+		t.Fatal("no data key for the agent key")
 	}
 	before := kms.calls
 	sess, msg1, err := c.Open(ctx, kid, b.static.Public())
@@ -372,10 +379,6 @@ func TestKMSSealerBindsTheContext(t *testing.T) {
 	_, _, _ = b.answer(t, msg1)
 
 	// The wrapped data key does not open for another kid.
-	var wrapped []byte
-	for blob := range kms.blobs {
-		wrapped = []byte(blob)
-	}
 	if _, err := sealer.Unwrap(ctx, "AAAAAAAAAAAAAAAAAAAAAA", wrapped); err == nil {
 		t.Fatal("a data key opened under another kid")
 	}
@@ -508,4 +511,50 @@ func TestManySessionsAtOnce(t *testing.T) {
 		}()
 	}
 	wg.Wait()
+}
+
+// The offer key: made once, sealed, the same after a restart, and it signs
+// only offers. A signature verifies with its public half and nothing else
+// does.
+func TestTheOfferKeySignsOffers(t *testing.T) {
+	s, sealer, logs := newTestServer(t)
+	c := s.Local()
+	pub, err := c.OfferKey(ctx)
+	if err != nil || len(pub) != 65 || pub[0] != 4 {
+		t.Fatalf("offer key: %x %v", pub, err)
+	}
+	offer := []byte{0xa1, 0x61, 0x76, 0x01} // {"v": 1}
+	sig, err := c.SignOffer(ctx, offer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := VerifyOffer(pub, offer, sig); err != nil {
+		t.Fatal(err)
+	}
+	if VerifyOffer(pub, []byte{0xa1, 0x61, 0x76, 0x02}, sig) == nil {
+		t.Fatal("a signature verified for another offer")
+	}
+	if _, err := c.SignOffer(ctx, nil); !errors.Is(err, ErrRefused) {
+		t.Fatalf("an empty offer: %v", err)
+	}
+	// A restart reads the same key back; it is not on disk in the clear.
+	s2, err := NewServer(s.dir, sealer, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pub2, _ := s2.Local().OfferKey(ctx)
+	if !bytes.Equal(pub, pub2) {
+		t.Fatal("the offer key changed across a restart")
+	}
+	raw, _ := os.ReadFile(filepath.Join(s.dir, "offer.key"))
+	d, _ := s.offer.Bytes()
+	if bytes.Contains(raw, d) || bytes.Contains(logs.Bytes(), d) || bytes.Contains(logs.Bytes(), []byte(hex.EncodeToString(d))) {
+		t.Fatal("the offer key's secret is on disk or in the log")
+	}
+	// Its data key is bound to the offer key, not to any agent kid.
+	var rec offerRecord
+	_ = decMode.Unmarshal(raw, &rec)
+	if _, err := sealer.Unwrap(ctx, "AAAAAAAAAAAAAAAAAAAAAA", rec.DEK); err == nil {
+		t.Fatal("the offer key's data key opens under an agent kid")
+	}
 }

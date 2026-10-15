@@ -3,6 +3,7 @@ package keys
 import (
 	"context"
 	"crypto/ecdh"
+	"crypto/ecdsa"
 	"crypto/rand"
 	"encoding/base64"
 	"errors"
@@ -56,6 +57,8 @@ type Server struct {
 
 	mu       sync.Mutex
 	sessions map[string]*session
+	// offer signs consent offers (offer.go).
+	offer *ecdsa.PrivateKey
 }
 
 type session struct {
@@ -77,7 +80,11 @@ func NewServer(dir string, sealer Sealer, log *slog.Logger) (*Server, error) {
 			return nil, err
 		}
 	}
-	return &Server{dir: dir, sealer: sealer, log: log, now: time.Now, PeerUID: -1, sessions: map[string]*session{}}, nil
+	s := &Server{dir: dir, sealer: sealer, log: log, now: time.Now, PeerUID: -1, sessions: map[string]*session{}}
+	if err := s.loadOfferKey(); err != nil {
+		return nil, err
+	}
+	return s, nil
 }
 
 // Serve accepts connections until ln closes. Each must come from PeerUID.
@@ -161,6 +168,10 @@ func (s *Server) handle(req request) response {
 		})
 	case opClose:
 		s.end(req.Sess)
+	case opOfferPub:
+		resp.Pub, err = s.offerPub()
+	case opOfferSign:
+		resp.D, err = s.signOffer(req.D)
 	default:
 		err = ErrRefused
 	}
