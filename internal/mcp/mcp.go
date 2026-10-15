@@ -83,9 +83,10 @@ type Server struct {
 	pool  *pool
 	tools []*tool
 	log   *slog.Logger
-	// Shard is this process's shard. A token for another shard gets 421,
-	// so a router can send it on.
-	Shard int
+	// Ours reports whether this instance holds a home (shard.Directory).
+	// A token for a home held elsewhere gets 421, so a router can send it
+	// on. Nil holds every home.
+	Ours func(home string) bool
 	// inflight bounds tool calls in this process.
 	inflight chan struct{}
 }
@@ -120,7 +121,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		oauth.Challenge(w, aerr)
 		return
 	}
-	if grant.Subject.Shard != s.Shard {
+	if s.Ours != nil && !s.Ours(grant.Subject.Home) {
 		http.Error(w, "this home lives on another shard", http.StatusMisdirectedRequest)
 		return
 	}
