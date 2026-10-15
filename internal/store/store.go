@@ -275,7 +275,11 @@ func (s *Store) access(id string, h *home, match func(cloudwire.Device) bool) (c
 				scopes = append(scopes, sc)
 			}
 		}
-		if !d.Tun && !slices.Contains(r.Grant.Purposes, protocol.CloudPurposeServe) {
+		// A phone needs something to do here: a tunnel, or the copy to
+		// read. An agent row has neither (tun is false) and is admitted
+		// only as an Agent, for a session the keys part opens; admit
+		// decides that.
+		if d.Agent == nil && !d.Tun && !slices.Contains(r.Grant.Purposes, protocol.CloudPurposeServe) {
 			return cloudwire.Device{}, nil, false
 		}
 		return d, scopes, true

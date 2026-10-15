@@ -414,30 +414,19 @@ func (c *agentConn) dispatch(env appwire.Envelope) {
 			}
 		}
 	}
-	ch := c.inflightLocked()
-	if env.ID != nil {
-		ch = c.waiting[*env.ID]
+	// Every answer carries its request's id. A message without one that is
+	// not above (agent.decided, the box telling an open session how a
+	// request ended) answers no call; requests.list reads the same.
+	if env.ID == nil {
+		return
 	}
-	if ch != nil {
+	if ch := c.waiting[*env.ID]; ch != nil {
 		select {
 		case ch <- env:
 		default:
 			// A call that cannot keep up has failed anyway.
 		}
 	}
-}
-
-// inflightLocked is the one call waiting for an answer, for a message that
-// came without an id; nil when none or more than one wait. The caller holds
-// c.mu.
-func (c *agentConn) inflightLocked() chan appwire.Envelope {
-	if len(c.waiting) != 1 {
-		return nil
-	}
-	for _, ch := range c.waiting {
-		return ch
-	}
-	return nil
 }
 
 // send seals one message and puts it on the door.

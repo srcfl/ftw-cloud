@@ -172,14 +172,18 @@ to it yet.
   and a header that disagrees with the body is refused. It also answers
   clients of 2025-03-26 to 2025-11-25 that start with `initialize`, without
   session ids or a GET stream. The read tools are `homes.list`, `status`,
-  `plan.get`, `plan.explain`, `history.query`, `health.get`,
-  `events.list`, `logs.tail`, `drivers.status`, `config.get` and
+  `chargers.list`, `cars.list`, `plan.get`, `plan.explain`,
+  `history.query`, `health.get`, `events.list`, `logs.tail` (both with
+  before and after cursors), `drivers.status`, `config.get` and
   `diag.run`, each with typed arguments, each one of the box's own reads for
-  agents (`live.get`, `plan.get`, `price.get`, `hist.query`, `health.get`,
-  `events.get`, `logs.get`, `config.get`, `diag.run`, `drivers.get`;
-  srcfl/ftw `docs/agents.md`). The box refuses the passthrough to agents,
+  agents (`live.get`, `loadpoints.get`, `cars.get`, `plan.get`, `price.get`,
+  `hist.query`, `health.get`, `events.get`, `logs.get`, `config.get`,
+  `diag.run`, `drivers.get`; srcfl/ftw `docs/agents.md`), under the scope
+  the registry names for it. The box names chargers and cars by its agent
+  ids, which the control tools take back. The box refuses the passthrough to agents,
   and the readable copy is never an agent's: every read goes through the
-  box, which audits it and enforces revoke. A call without its scope gets
+  box, which audits it and enforces revoke. An agent row has no tunnel of
+  its own. A call without its scope gets
   403 `insufficient_scope`, so the client can ask the owner for more. Each
   call rides the agent's own Noise session: `ftwkeysd` seals each frame and
   the door carries it as `tun`, one forward to the box. The door admits an

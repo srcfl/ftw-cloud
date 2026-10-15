@@ -13,11 +13,12 @@ import (
 var agentKey = bytes.Repeat([]byte{7}, 32)
 
 // rosterWithAgent lists the owner, the viewer and one agent row that ends
-// at end, with empty copy scopes, as the contract has it.
+// at end, with empty copy scopes and no tunnel of its own, as the contract
+// has it.
 func rosterWithAgent(seq uint64, end time.Time) *cloudwire.Roster {
 	r := roster(seq, protocol.ScopeLiveRead)
 	r.Devices = append(r.Devices, cloudwire.Device{ID: cloudwire.DeviceID(agentKey), Key: agentKey, Role: protocol.RoleAgent,
-		Scopes: []string{}, Epoch: 1, Tun: true,
+		Scopes: []string{}, Epoch: 1,
 		Agent: &cloudwire.Agent{Scopes: []string{protocol.ScopeLiveRead}, ExpiresAtMs: end.UnixMilli()}})
 	return r
 }
@@ -82,5 +83,20 @@ func TestARosterWithoutTheAgentEndsItsSession(t *testing.T) {
 	case <-sess.Done():
 	default:
 		t.Fatal("the agent's session outlived its row")
+	}
+}
+
+// With the readable copy off, an agent row, which has no tunnel of its own,
+// is still admitted as an agent; a phone row without a tunnel is not.
+func TestAnAgentNeedsNoCopyAndNoTunnel(t *testing.T) {
+	s, box, c := filled(t)
+	r := rosterWithAgent(2, c.t.Add(time.Hour))
+	r.Grant = cloudwire.Grant{Scopes: []string{}, Purposes: []string{}, Controller: "sourceful"}
+	box.SetRoster(r)
+	if _, err := s.For(Principal{Kind: Agent, Home: "h1", DeviceKey: agentKey}); err != nil {
+		t.Fatalf("an agent with the copy off: %v", err)
+	}
+	if _, err := s.For(Principal{Kind: Device, Home: "h1", DeviceKey: ownerKey}); !errors.Is(err, ErrDenied) {
+		t.Fatalf("a phone with neither tunnel nor copy: %v", err)
 	}
 }

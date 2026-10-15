@@ -27,10 +27,7 @@ func TestTheBoxKeyComesOnlyFromTheBoxsSignedRoster(t *testing.T) {
 	home := cloudwire.HomeID(pk)
 	noise := bytes.Repeat([]byte{9}, 32)
 	signed := func(k *ecdsa.PrivateKey, h string, n []byte) []byte {
-		env, err := cloudwire.Seal(k, h, cloudwire.MsgRoster, struct {
-			cloudwire.Roster
-			Noise []byte `cbor:"noise"`
-		}{cloudwire.Roster{RosterSeq: 1, TTLS: 60}, n})
+		env, err := cloudwire.Seal(k, h, cloudwire.MsgRoster, cloudwire.Roster{RosterSeq: 1, TTLS: 60, Noise: n})
 		if err != nil {
 			t.Fatal(err)
 		}

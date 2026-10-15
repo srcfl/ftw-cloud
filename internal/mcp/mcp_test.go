@@ -35,8 +35,8 @@ func TestAnAssistantReadsItsHome(t *testing.T) {
 	for _, x := range tools {
 		names = append(names, x.(map[string]any)["name"].(string))
 	}
-	for _, want := range []string{"homes.list", "status", "plan.get", "plan.explain", "history.query", "health.get",
-		"events.list", "logs.tail", "drivers.status", "config.get", "diag.run"} {
+	for _, want := range []string{"homes.list", "status", "chargers.list", "cars.list", "plan.get", "plan.explain", "history.query",
+		"health.get", "events.list", "logs.tail", "drivers.status", "config.get", "diag.run"} {
 		if !slices.Contains(names, want) {
 			t.Fatalf("tools/list lacks %s: %v", want, names)
 		}
@@ -79,7 +79,8 @@ func TestAnAssistantReadsItsHome(t *testing.T) {
 		args map[string]any
 	}{
 		{"plan.explain", nil}, {"health.get", nil}, {"events.list", map[string]any{"limit": 5}}, {"drivers.status", nil},
-		{"logs.tail", map[string]any{"lines": 20, "level": "INFO"}}, {"config.get", nil}, {"config.get", map[string]any{"section": "planner"}},
+		{"events.list", map[string]any{"limit": 5, "before": "2026-10-15T18:00:00+02:00"}}, {"chargers.list", nil}, {"cars.list", nil},
+		{"logs.tail", map[string]any{"lines": 20, "level": "INFO", "after": "2026-10-15T17:00:00Z"}}, {"config.get", nil}, {"config.get", map[string]any{"section": "planner"}},
 		{"diag.run", map[string]any{"check": "clock"}}, {"diag.run", map[string]any{"check": "driver", "src": "s1"}}, {"homes.list", nil},
 	} {
 		if _, isErr, text := a.call(c.name, c.args); isErr {
@@ -92,14 +93,17 @@ func TestAnAssistantReadsItsHome(t *testing.T) {
 	if _, isErr, _ := a.call("config.get", map[string]any{"section": "../x"}); !isErr {
 		t.Fatal("a section that is a path was sent on")
 	}
+	if _, isErr, _ := a.call("events.list", map[string]any{"before": "yesterday"}); !isErr {
+		t.Fatal("a cursor that is no time was sent on")
+	}
 
 	handshakes, _, asked := b.counts()
 	if handshakes != 1 {
 		t.Fatalf("%d handshakes for one warm session", handshakes)
 	}
 	joined := strings.Join(asked, "\n")
-	for _, want := range []string{"live.get", "plan.get", "price.get", "hist.query", "health.get", "events.get", "logs.get",
-		"config.get", "diag.run", "drivers.get"} {
+	for _, want := range []string{"live.get", "loadpoints.get", "cars.get", "plan.get", "price.get", "hist.query", "health.get",
+		"events.get", "logs.get", "config.get", "diag.run", "drivers.get"} {
 		if !strings.Contains(joined, want+" ") {
 			t.Fatalf("the box was not asked %s: %v", want, asked)
 		}
@@ -488,8 +492,10 @@ func TestBoxRefusalsInWords(t *testing.T) {
 		"E_SCOPE_DENIED":    "has not given this assistant",
 		"E_OP_NOT_GRANTED":  "does not include this operation",
 		"E_GRANT_EXPIRED":   "ran out",
-		"E_NEEDS_OWNER":     "use goal.request",
+		"E_NEEDS_OWNER":     "owner's hold wins",
 		"E_RANGE_TOO_LARGE": "too large",
+		"E_CLOCK_SKEW":      "clock",
+		"E_NOT_FOUND":       "ids its reads give",
 		"E_GRANT_REVOKED":   "removed this assistant",
 		"E_BOOTING":         "starting up",
 		"E_UNKNOWN_OP":      "newer FTW version",
@@ -499,6 +505,9 @@ func TestBoxRefusalsInWords(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Errorf("%s: %q", code, got)
 		}
+	}
+	if got := words(boxError{Code: "E_NEEDS_OWNER", Args: map[string]any{"use": "agent.request"}}).Error(); !strings.Contains(got, "goal.request") {
+		t.Errorf("a durable op as cmd: %q", got)
 	}
 	if got := words(boxError{Code: "E_UNAVAILABLE", Args: map[string]any{"reason": "busy"}}); got != errBusy {
 		t.Errorf("busy: %v", got)

@@ -12,7 +12,7 @@ type Rosters interface {
 }
 
 // RosterBoxKey reads a home's box Noise static key from the roster its box
-// signed (`noise`, srcfl/ftw docs/agents.md): the newest one the registry
+// signed (Roster.Noise, srcfl/ftw docs/agents.md): the newest one the registry
 // holds, checked again with the home's key, so the service opens an agent's
 // session only to a key the box itself named. A roster without one is a box
 // that takes no agents yet.
@@ -30,12 +30,10 @@ func RosterBoxKey(r Rosters) BoxKey {
 		if err != nil || env.T != cloudwire.MsgRoster || cloudwire.Verify(pub, home, env) != nil {
 			return nil, false
 		}
-		var body struct {
-			Noise []byte `cbor:"noise"`
-		}
-		if cloudwire.Unmarshal(env.B, &body) != nil || len(body.Noise) != appwire.DHBytes {
+		var r cloudwire.Roster
+		if cloudwire.Unmarshal(env.B, &r) != nil || len(r.Noise) != appwire.DHBytes {
 			return nil, false
 		}
-		return body.Noise, true
+		return r.Noise, true
 	}
 }
