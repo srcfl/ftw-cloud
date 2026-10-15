@@ -6,6 +6,7 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -33,6 +34,14 @@ const (
 	opOfferPub  = "offer.pub"  // the offer key's public half, SEC1 uncompressed
 	opOfferSign = "offer.sign" // sign offer bytes d; answers r ‖ s
 )
+
+// OfferKid names an offer key by its public half: the first 16 characters
+// of the base64url SHA-256 of the SEC1 point. The app and the box pin keys
+// by it, so a new key can be added beside the old one.
+func OfferKid(pub []byte) string {
+	sum := sha256.Sum256(pub)
+	return base64.RawURLEncoding.EncodeToString(sum[:])[:16]
+}
 
 // OfferBytes is what the offer key signs: the deterministic CBOR array
 // [OfferTag, offer], where offer is the offer's own CBOR encoding.
@@ -143,7 +152,8 @@ func (s *Server) makeOfferKey(path string) error {
 		return err
 	}
 	s.offer = key
-	s.log.Info("made the offer key; pin its public half in the app", "pub", fmt.Sprintf("%x", pub))
+	s.log.Info("made the offer key; pin it in Core and the apps", "kid", OfferKid(pub),
+		"pub", base64.RawURLEncoding.EncodeToString(pub))
 	return nil
 }
 

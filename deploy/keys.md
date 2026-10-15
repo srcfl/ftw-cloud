@@ -39,10 +39,12 @@ and turns `ftwkeysd` on.
   hands the owner's app, so the app can tell an offer from FTW Cloud from a
   copy. It is made at the first start, sealed like an agent key (its data
   key's context names `offer-key`), and kept in memory while `ftwkeysd`
-  runs. It signs only arrays that start with `ftw.offer.v1`. The app pins
-  its public half: `ftwkeysd` logs it when it makes the key, and
-  `ftwcloudd` serves it at `/.well-known/ftw-offer-key`. Losing the volume
-  makes a new offer key, which the app must then pin anew.
+  runs. It signs only arrays that start with `ftw.offer.v1`. Core and the
+  apps pin it by its kid, the first 16 characters of the base64url SHA-256
+  of its public half. `ftwkeysd` logs both when it makes the key,
+  `ftwkeysd offerkey` prints them, and `ftwcloudd` serves them at
+  `/.well-known/ftw-offer-key`. Losing the volume makes a new offer key,
+  which Core and the apps must then pin beside the old one.
 - **Nothing logs a key.** Errors on the socket are a few fixed words.
 - **The volume is not backed up.** Losing it means every assistant must be
   approved again; no home is exposed by it.
@@ -120,7 +122,12 @@ cannot read the apps' sessions with their boxes.
    `/etc/ftw-cloud/compose.env`.
 
 5. **Deploy** as usual (`ftw-cloud-deploy sha256:<digest>`). Compose starts
-   `ftwkeysd` beside `ftwcloudd`. Its log says `ftwkeysd listening`.
+   `ftwkeysd` beside `ftwcloudd`. Its log says `ftwkeysd listening`, and on
+   its first start, `made the offer key` with the kid and public half.
+
+6. **Pin the offer key** in Core and the apps (srcfl/ftw `docs/agents.md`,
+   "The grant offer"): until a build pins it, no offer opens. Read it from
+   `https://cloud.ftw.energy/.well-known/ftw-offer-key` or the log.
 
 To turn assistants off again, remove `COMPOSE_PROFILES=agents` and deploy.
 Approved agents stay sealed in the volume and work again when it comes back,

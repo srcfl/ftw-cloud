@@ -558,3 +558,10 @@ func TestTheOfferKeySignsOffers(t *testing.T) {
 		t.Fatal("the offer key's data key opens under an agent kid")
 	}
 }
+
+func TestOfferKidNamesTheKey(t *testing.T) {
+	a, b := bytes.Repeat([]byte{4}, 65), bytes.Repeat([]byte{5}, 65)
+	if len(OfferKid(a)) != 16 || OfferKid(a) == OfferKid(b) || OfferKid(a) != OfferKid(bytes.Clone(a)) {
+		t.Fatal("kid")
+	}
+}

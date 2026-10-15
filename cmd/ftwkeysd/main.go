@@ -4,11 +4,13 @@
 // internal/keys and deploy/keys.md.
 //
 //	ftwkeysd filekey -out dev.key       make a development file key
+//	ftwkeysd offerkey [flags]           print the offer key's kid and public half, making it if need be
 //	ftwkeysd [flags]                    serve
 package main
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"flag"
 	"fmt"
@@ -42,47 +44,94 @@ func main() {
 		}
 		return
 	}
+	if len(os.Args) > 1 && os.Args[1] == "offerkey" {
+		if err := offerKey(os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
 	if err := serve(os.Args[1:]); err != nil {
 		slog.Error("ftwkeysd stopped", "err", err)
 		os.Exit(1)
 	}
 }
 
+// sealerFlags are the flags that choose where keys are sealed.
+type sealerFlags struct {
+	state, kmsKey, region, fileKey *string
+}
+
+func addSealerFlags(fs *flag.FlagSet) sealerFlags {
+	return sealerFlags{
+		state:   fs.String("state", "/state/keys", "directory for the sealed keys"),
+		kmsKey:  fs.String("kms-key", "", "AWS KMS key id, ARN or alias that wraps the data keys"),
+		region:  fs.String("region", "eu-north-1", "AWS region of the KMS key"),
+		fileKey: fs.String("file-key", "", "a local file key instead of KMS (development only)"),
+	}
+}
+
+func (f sealerFlags) sealer(log *slog.Logger) (keys.Sealer, error) {
+	switch {
+	case *f.kmsKey != "" && *f.fileKey != "":
+		return nil, errors.New("choose -kms-key or -file-key, not both")
+	case *f.kmsKey != "":
+		cfg, err := config.LoadDefaultConfig(context.Background(), config.WithRegion(*f.region))
+		if err != nil {
+			return nil, fmt.Errorf("aws config: %w", err)
+		}
+		return keys.KMSSealer{KMS: kmsClient{kms.NewFromConfig(cfg)}, KeyID: *f.kmsKey}, nil
+	case *f.fileKey != "":
+		s, err := keys.NewFileSealer(*f.fileKey)
+		if err != nil {
+			return nil, err
+		}
+		log.Warn("agent keys sealed with a local file key; for development only")
+		return s, nil
+	}
+	return nil, errors.New("no sealer: set -kms-key, or -file-key in development")
+}
+
+// offerKey prints the offer key's kid and SEC1 public half, base64url, for
+// Core and the apps to pin. It makes the key on first use, in the same state
+// directory the server uses.
+func offerKey(args []string) error {
+	fs := flag.NewFlagSet("offerkey", flag.ExitOnError)
+	sf := addSealerFlags(fs)
+	_ = fs.Parse(args)
+	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
+	sealer, err := sf.sealer(log)
+	if err != nil {
+		return err
+	}
+	srv, err := keys.NewServer(*sf.state, sealer, log)
+	if err != nil {
+		return err
+	}
+	pub, err := srv.Local().OfferKey(context.Background())
+	if err != nil {
+		return err
+	}
+	fmt.Printf("kid %s\npub %s\n", keys.OfferKid(pub), base64.RawURLEncoding.EncodeToString(pub))
+	return nil
+}
+
 func serve(args []string) error {
 	fs := flag.NewFlagSet("ftwkeysd", flag.ExitOnError)
 	socket := fs.String("socket", "/run/ftw-cloud-keys/keys.sock", "unix socket to answer on")
-	state := fs.String("state", "/state/keys", "directory for the sealed keys")
-	kmsKey := fs.String("kms-key", "", "AWS KMS key id, ARN or alias that wraps the data keys")
-	region := fs.String("region", "eu-north-1", "AWS region of the KMS key")
-	fileKey := fs.String("file-key", "", "a local file key instead of KMS (development only)")
+	sf := addSealerFlags(fs)
 	peerUID := fs.Int("peer-uid", -1, "the one user allowed to connect; -1 is this process's own")
 	socketMode := fs.Uint("socket-mode", 0o660, "permissions of the socket file")
 	_ = fs.Parse(args)
 
 	harden()
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
-	var sealer keys.Sealer
-	switch {
-	case *kmsKey != "" && *fileKey != "":
-		return errors.New("choose -kms-key or -file-key, not both")
-	case *kmsKey != "":
-		cfg, err := config.LoadDefaultConfig(context.Background(), config.WithRegion(*region))
-		if err != nil {
-			return fmt.Errorf("aws config: %w", err)
-		}
-		sealer = keys.KMSSealer{KMS: kmsClient{kms.NewFromConfig(cfg)}, KeyID: *kmsKey}
-	case *fileKey != "":
-		s, err := keys.NewFileSealer(*fileKey)
-		if err != nil {
-			return err
-		}
-		log.Warn("agent keys sealed with a local file key; for development only")
-		sealer = s
-	default:
-		return errors.New("no sealer: set -kms-key, or -file-key in development")
+	sealer, err := sf.sealer(log)
+	if err != nil {
+		return err
 	}
 
-	srv, err := keys.NewServer(*state, sealer, log)
+	srv, err := keys.NewServer(*sf.state, sealer, log)
 	if err != nil {
 		return err
 	}
