@@ -248,6 +248,9 @@ var upgrader = websocket.Upgrader{
 	// A box sends no Origin. A browser always does, and has no business
 	// here.
 	CheckOrigin: func(r *http.Request) bool { return r.Header.Get("Origin") == "" },
+	// A box's socket is idle between messages; it borrows a write buffer
+	// only while it writes.
+	WriteBufferPool: &sync.Pool{},
 }
 
 func (u *Uplink) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -398,6 +401,9 @@ type boxConn struct {
 	// once hello named the home.
 	started time.Time
 	lim     *limits
+	// pinger pings the box every pingEvery until stopped.
+	pinger  atomic.Pointer[time.Timer]
+	stopped atomic.Bool
 }
 
 // bucket is a token bucket.
@@ -550,9 +556,14 @@ func (c *boxConn) run() error {
 		}
 	}
 
-	done := make(chan struct{})
-	defer close(done)
-	go c.ping(done)
+	// The ping is a timer, not a goroutine of its own: a box's socket is
+	// idle most of the time, and ten thousand idle stacks are memory.
+	pinger := time.AfterFunc(pingEvery, c.ping)
+	c.pinger.Store(pinger)
+	defer func() {
+		c.stopped.Store(true)
+		pinger.Stop()
+	}()
 	_ = c.conn.SetReadDeadline(time.Now().Add(readTimeout))
 	c.conn.SetPongHandler(func(string) error {
 		return c.conn.SetReadDeadline(time.Now().Add(readTimeout))
@@ -645,18 +656,14 @@ func (c *boxConn) rosterSeq() uint64 {
 	return seq
 }
 
-func (c *boxConn) ping(done <-chan struct{}) {
-	t := time.NewTicker(pingEvery)
-	defer t.Stop()
-	for {
-		select {
-		case <-done:
-			return
-		case <-t.C:
-			if c.conn.WriteControl(websocket.PingMessage, nil, time.Now().Add(writeTimeout)) != nil {
-				return
-			}
-		}
+// ping sends one ping and sets the next, until the connection ends or a
+// ping cannot be written.
+func (c *boxConn) ping() {
+	if c.stopped.Load() || c.conn.WriteControl(websocket.PingMessage, nil, time.Now().Add(writeTimeout)) != nil {
+		return
+	}
+	if t := c.pinger.Load(); t != nil && !c.stopped.Load() {
+		t.Reset(pingEvery)
 	}
 }
 

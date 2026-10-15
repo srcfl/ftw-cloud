@@ -70,10 +70,12 @@ type config struct {
 	stormAt, stormJitter time.Duration
 	sigtermAt            time.Duration
 	jsonPath, src        string
+	serverMetrics        bool
 }
 
 func parseFlags() config {
 	var c config
+	flag.BoolVar(&c.serverMetrics, "server-metrics", true, "read the service's own latencies from its -metrics-listen (off for a build without it)")
 	flag.StringVar(&c.bin, "ftwcloudd", "", "path to a built ftwcloudd (go build -o <tmp>/ftwcloudd ./cmd/ftwcloudd)")
 	flag.IntVar(&c.serverProcs, "server-procs", 2, "GOMAXPROCS for ftwcloudd")
 	flag.IntVar(&c.procs, "procs", 6, "GOMAXPROCS for the harness")
@@ -184,6 +186,11 @@ func run() int {
 	}
 	steadyStart := time.Now()
 	h.measuring.Store(true)
+	var scrapeBefore promSnap
+	if srv.metricsAddr != "" {
+		scrapeBefore, _ = scrape(srv.metricsAddr)
+	}
+	cpuBefore := cpuSelf()
 	var stormC, sigC <-chan time.Time
 	if cfg.stormAt > 0 {
 		stormC = time.After(cfg.stormAt)
@@ -215,6 +222,13 @@ steady:
 		}
 	}
 	steadyEnd := time.Now()
+	cpuHarness := cpuSelf() - cpuBefore
+	var view *serverView
+	if srv.metricsAddr != "" && scrapeBefore != nil && sigAt.IsZero() {
+		if after, err := scrape(srv.metricsAddr); err == nil {
+			view = newServerView(scrapeBefore, after)
+		}
+	}
 	h.measuring.Store(false)
 	h.quiet.Store(true)
 	boxesUp, phonesUp := h.boxesUp.Load(), h.phonesUp.Load()
@@ -250,6 +264,8 @@ steady:
 	srv.kill()
 
 	rep := h.report(samp, steadyStart, steadyEnd, stormAt, sigAt, exitedAt, boxesUp, phonesUp)
+	rep.Inside = view
+	rep.HarnessCPUPct = 100 * cpuHarness.Seconds() / steadyEnd.Sub(steadyStart).Seconds()
 	rep.ServerLog = scanLog(srv.logPath)
 	if diedEarly {
 		rep.Notes = append(rep.Notes, "ftwcloudd exited during the steady phase")
@@ -407,15 +423,17 @@ func newDialer(pool *x509.CertPool, src string) (*websocket.Dialer, error) {
 // --------------------------------------------------------------------------
 
 type server struct {
-	cmd      *exec.Cmd
-	exited   chan struct{}
-	dog      *exec.Cmd
-	logPath  string
-	addr     string
-	service  *ecdsa.PublicKey
-	noise    []byte
-	pool     *x509.CertPool
-	killOnce sync.Once
+	cmd     *exec.Cmd
+	exited  chan struct{}
+	dog     *exec.Cmd
+	logPath string
+	addr    string
+	// metricsAddr is the service's loopback /metrics, empty when off.
+	metricsAddr string
+	service     *ecdsa.PublicKey
+	noise       []byte
+	pool        *x509.CertPool
+	killOnce    sync.Once
 }
 
 // startServer makes keys and a certificate in dir, starts ftwcloudd on a
@@ -451,8 +469,18 @@ func startServer(ctx context.Context, cfg config, dir string, slot *atomic.Point
 	if err != nil {
 		return nil, err
 	}
-	s.cmd = exec.Command(cfg.bin, "-listen", s.addr, "-state", state, "-service-key", servicePath,
-		"-noise-key", noisePath, "-tls-cert", certPath, "-tls-key", keyPath, "-apns-dir", filepath.Join(dir, "no-apns"))
+	args := []string{"-listen", s.addr, "-state", state, "-service-key", servicePath,
+		"-noise-key", noisePath, "-tls-cert", certPath, "-tls-key", keyPath, "-apns-dir", filepath.Join(dir, "no-apns")}
+	if cfg.serverMetrics {
+		ml, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			return nil, err
+		}
+		s.metricsAddr = ml.Addr().String()
+		_ = ml.Close()
+		args = append(args, "-metrics-listen", s.metricsAddr)
+	}
+	s.cmd = exec.Command(cfg.bin, args...)
 	s.cmd.Env = append(withoutEnv(os.Environ(), "GOMAXPROCS"), "GOMAXPROCS="+strconv.Itoa(cfg.serverProcs))
 	s.cmd.Stdout, s.cmd.Stderr = logf, logf
 	if err := s.cmd.Start(); err != nil {

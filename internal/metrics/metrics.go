@@ -14,6 +14,7 @@ import (
 	"io"
 	"math"
 	"net/http"
+	runtimemetrics "runtime/metrics"
 	"slices"
 	"sort"
 	"strings"
@@ -284,4 +285,22 @@ func Forward(path string) *Histogram {
 // WrongShard counts connections and requests for a home another shard holds.
 func WrongShard(kind string) *Counter {
 	return Default.Counter("ftwcloud_wrong_shard_total", "Connections and requests for a home another shard holds, by kind.", "kind", kind)
+}
+
+// Runtime adds the Go runtime's heap, the memory it holds from the system,
+// and its goroutines. Call it once.
+func Runtime() {
+	read := func(name string) func() int64 {
+		return func() int64 {
+			s := []runtimemetrics.Sample{{Name: name}}
+			runtimemetrics.Read(s)
+			if s[0].Value.Kind() != runtimemetrics.KindUint64 {
+				return 0
+			}
+			return int64(s[0].Value.Uint64())
+		}
+	}
+	Default.GaugeFunc("ftwcloud_go_heap_bytes", "Bytes in live and not yet swept heap objects.", read("/memory/classes/heap/objects:bytes"))
+	Default.GaugeFunc("ftwcloud_go_memory_bytes", "Bytes the Go runtime holds from the system.", read("/memory/classes/total:bytes"))
+	Default.GaugeFunc("ftwcloud_go_goroutines", "Goroutines.", read("/sched/goroutines:goroutines"))
 }

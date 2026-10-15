@@ -167,18 +167,22 @@ func (m *sampler) run(ctx context.Context, pid int, exited <-chan struct{}) {
 }
 
 func (m *sampler) take(pid int) {
-	out, err := exec.Command("ps", "-o", "rss=,time=", "-p", strconv.Itoa(pid)).Output()
-	if err != nil {
-		return
-	}
-	f := strings.Fields(string(out))
-	if len(f) < 2 {
-		return
-	}
-	rss, err1 := strconv.ParseInt(f[0], 10, 64)
-	cpu, err2 := parseCPUTime(f[1])
-	if err1 != nil || err2 != nil {
-		return
+	rss, cpu, ok := procStat(pid)
+	if !ok {
+		out, err := exec.Command("ps", "-o", "rss=,time=", "-p", strconv.Itoa(pid)).Output()
+		if err != nil {
+			return
+		}
+		f := strings.Fields(string(out))
+		if len(f) < 2 {
+			return
+		}
+		var err1, err2 error
+		rss, err1 = strconv.ParseInt(f[0], 10, 64)
+		cpu, err2 = parseCPUTime(f[1])
+		if err1 != nil || err2 != nil {
+			return
+		}
 	}
 	m.mu.Lock()
 	m.s = append(m.s, sample{at: time.Now(), rssKiB: rss, cpu: cpu})
@@ -291,10 +295,14 @@ type report struct {
 		Samples        int              `json:"samples"`
 		WrongShardSeen map[string]int64 `json:"wrongShardSeen,omitempty"`
 	} `json:"server"`
-	Storm     *stormReport   `json:"storm,omitempty"`
-	Sigterm   *sigtermReport `json:"sigterm,omitempty"`
-	ServerLog logReport      `json:"serverLog"`
-	Notes     []string       `json:"notes,omitempty"`
+	// Inside is the service's own latencies over the steady phase, from
+	// its /metrics; HarnessCPUPct the harness's own CPU meanwhile.
+	Inside        *serverView    `json:"inside,omitempty"`
+	HarnessCPUPct float64        `json:"harnessCpuPct"`
+	Storm         *stormReport   `json:"storm,omitempty"`
+	Sigterm       *sigtermReport `json:"sigterm,omitempty"`
+	ServerLog     logReport      `json:"serverLog"`
+	Notes         []string       `json:"notes,omitempty"`
 }
 
 type stormReport struct {
@@ -415,6 +423,18 @@ func (r *report) print(w io.Writer) {
 	fmt.Fprintf(w, "server     cpu %.1f%% (100 = one core, %d samples)  rss peak %.1f MiB, steady %.1f MiB, idle %.1f MiB\n",
 		s.CPUPct, s.Samples, s.PeakRSSMiB, s.SteadyRSSMiB, s.IdleRSSMiB)
 	fmt.Fprintf(w, "           per 1k homes: cpu %.1f%%, %.1f MiB above idle\n", s.CPUPctPer1k, s.MiBPer1k)
+	fmt.Fprintf(w, "harness    cpu %.0f%%\n", r.HarnessCPUPct)
+	if in := r.Inside; in != nil {
+		fmt.Fprintf(w, "inside     envelope %s\n", in.Forward["envelope"])
+		fmt.Fprintf(w, "           tun_up   %s\n", in.Forward["tun_up"])
+		fmt.Fprintf(w, "           tun_down %s\n", in.Forward["tun_down"])
+		fmt.Fprintf(w, "           hs box   %s\n", in.Handshake["box"])
+		fmt.Fprintf(w, "           hs app   %s\n", in.Handshake["app"])
+		fmt.Fprintf(w, "           heap %.1f MiB, runtime %.1f MiB, %d goroutines\n", in.HeapMiB, in.GoMemMiB, in.Goroutines)
+		if len(in.Drops) > 0 {
+			fmt.Fprintf(w, "           drops    %s\n", counts(in.Drops))
+		}
+	}
 	if st := r.Storm; st != nil {
 		fmt.Fprintf(w, "storm      back %d/%d in %s, server cpu peak %.0f%% avg %.0f%%\n",
 			st.Recovered, st.Wanted, secs(st.RecoveryS), st.PeakCPUPct, st.AvgCPUPct)
@@ -502,4 +522,32 @@ func scanLog(path string) logReport {
 		}
 	}
 	return r
+}
+
+// procStat reads a Linux child's RSS and CPU time from /proc, which is finer
+// than ps and works where ps is busybox's. False elsewhere.
+func procStat(pid int) (rssKiB int64, cpu time.Duration, ok bool) {
+	stat, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/stat")
+	if err != nil {
+		return 0, 0, false
+	}
+	// The fields after the command, which sits in parentheses.
+	i := strings.LastIndexByte(string(stat), ')')
+	if i < 0 {
+		return 0, 0, false
+	}
+	f := strings.Fields(string(stat)[i+1:])
+	// utime and stime are fields 14 and 15 (from 1), so 11 and 12 here;
+	// rss in pages is field 24, so 21 here.
+	if len(f) < 22 {
+		return 0, 0, false
+	}
+	ut, err1 := strconv.ParseInt(f[11], 10, 64)
+	st, err2 := strconv.ParseInt(f[12], 10, 64)
+	pages, err3 := strconv.ParseInt(f[21], 10, 64)
+	if err1 != nil || err2 != nil || err3 != nil {
+		return 0, 0, false
+	}
+	const tick = 100 // USER_HZ on Linux
+	return pages * int64(os.Getpagesize()) / 1024, time.Duration(ut+st) * time.Second / tick, true
 }

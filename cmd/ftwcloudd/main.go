@@ -214,6 +214,7 @@ func serve(args []string) error {
 
 	metrics.Default.GaugeFunc("ftwcloud_homes", "Homes held in memory.", func() int64 { return int64(st.Homes()) })
 	metrics.Default.GaugeFunc("ftwcloud_homes_connected", "Homes whose box is connected.", func() int64 { return int64(up.Boxes()) })
+	metrics.Runtime()
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -256,8 +257,11 @@ func serve(args []string) error {
 		boxes := up.Drain(reason)
 		if app != nil {
 			app.Drain(reason)
+			if left := app.WaitClosed(2 * time.Second); left > 0 {
+				log.Warn("app sessions still open at exit", "count", left)
+			}
 		}
-		log.Info("draining for a restart", "boxes", boxes, "phones", phones, "spread", spread)
+		log.Info("drained for a restart", "boxes", boxes, "phones", phones, "spread", spread)
 		if left := pushSvc.Flush(3 * time.Second); left > 0 {
 			log.Warn("alerts still queued at exit", "count", left)
 		}

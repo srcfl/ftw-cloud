@@ -152,11 +152,11 @@ type Tokens interface {
 	Drop(home, deviceID string) error
 }
 
-// look is one home's phones that can see it, and the loop that keeps the
+// look is one home's phones that can see it, and the timer that keeps the
 // box's watch in force while there is at least one.
 type look struct {
-	n    int
-	stop chan struct{}
+	n     int
+	timer *time.Timer
 }
 
 // New builds the handler. key is the service's Noise static key; the app
@@ -179,6 +179,9 @@ var upgrader = websocket.Upgrader{
 		o := r.Header.Get("Origin")
 		return o == "" || o == WebOrigin
 	},
+	// A phone's socket is idle between messages; it borrows a write buffer
+	// only while it writes.
+	WriteBufferPool: &sync.Pool{},
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -230,6 +233,17 @@ func (s *Server) owner(home string) (string, bool) {
 
 // Sockets is how many app sessions are open.
 func (s *Server) Sockets() int { return int(appSockets.Load()) }
+
+// WaitClosed waits, at most d, until every app session has closed, as after
+// Drain, and reports how many are still open. Each session writes its own
+// close, so the process must not exit before they have.
+func (s *Server) WaitClosed(d time.Duration) int {
+	deadline := time.Now().Add(d)
+	for appSockets.Load() > 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	return int(appSockets.Load())
+}
 
 // Drain ends every app session with cloudwire.CloseRestart and reason, the
 // spread in milliseconds, and every session that finishes its handshake
@@ -366,28 +380,24 @@ func (s *Server) setLooking(home string, delta int) {
 	}
 	l.n += delta
 	switch {
-	case l.n > 0 && l.stop == nil:
-		l.stop = make(chan struct{})
-		go s.renew(home, l.stop)
+	case l.n > 0 && l.timer == nil:
+		// A timer, not a goroutine per home: it renews the watch every
+		// renewEvery while this look is the home's.
+		var renew func()
+		renew = func() {
+			s.watcher.Watch(home)
+			s.mu.Lock()
+			defer s.mu.Unlock()
+			if s.looking[home] == l && l.n > 0 {
+				l.timer = time.AfterFunc(s.renewEvery, renew)
+			}
+		}
+		l.timer = time.AfterFunc(0, renew)
 	case l.n <= 0:
-		if l.stop != nil {
-			close(l.stop)
+		if l.timer != nil {
+			l.timer.Stop()
 		}
 		delete(s.looking, home)
-	}
-}
-
-func (s *Server) renew(home string, stop <-chan struct{}) {
-	s.watcher.Watch(home)
-	t := time.NewTicker(s.renewEvery)
-	defer t.Stop()
-	for {
-		select {
-		case <-stop:
-			return
-		case <-t.C:
-			s.watcher.Watch(home)
-		}
 	}
 }
 
@@ -522,7 +532,7 @@ func (c *phoneConn) run(sess *store.Session) (int, error) {
 			if err := c.forward(out.Env); err != nil {
 				return 0, err
 			}
-			envelopeOut.Since(out.At)
+			envelopeOut.Observe(out.Waited())
 		case env := <-c.replies:
 			if err := c.forward(env); err != nil {
 				return 0, err
@@ -535,7 +545,7 @@ func (c *phoneConn) run(sess *store.Session) (int, error) {
 			if err := c.forward(env); err != nil {
 				return 0, err
 			}
-			tunUp.Since(t.At)
+			tunUp.Observe(t.Waited())
 		case <-c.s.draining:
 			return cloudwire.CloseRestart, nil
 		case <-sess.Done():

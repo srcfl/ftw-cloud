@@ -15,17 +15,31 @@ var (
 )
 
 // Out is one envelope for a phone and when its box frame arrived, so the
-// time it waited here can be measured.
+// time it waited here can be measured. At is on the monotonic clock since
+// the process started, eight bytes where a time.Time is 24: each phone's
+// queues hold hundreds.
 type Out struct {
 	Env []byte
-	At  time.Time
+	At  time.Duration
 }
 
 // TunOut is one tun for a phone and when it arrived.
 type TunOut struct {
 	cloudwire.AppTun
-	At time.Time
+	At time.Duration
 }
+
+// epoch starts the clock Out and TunOut are stamped with.
+var epoch = time.Now()
+
+// stamp is now on that clock.
+func stamp() time.Duration { return time.Since(epoch) }
+
+// Waited is how long the envelope has waited since it arrived.
+func (o Out) Waited() time.Duration { return stamp() - o.At }
+
+// Waited is how long the tun has waited since it arrived.
+func (t TunOut) Waited() time.Duration { return stamp() - t.At }
 
 // Limits on the phones reading one home.
 const (
@@ -128,7 +142,7 @@ func (s *Session) Ended(sid uint32) {
 		return
 	}
 	select {
-	case s.tun <- TunOut{AppTun: cloudwire.AppTun{Sid: sid}, At: time.Now()}:
+	case s.tun <- TunOut{AppTun: cloudwire.AppTun{Sid: sid}, At: stamp()}:
 	default:
 		dropPhoneTun.Inc()
 	}
@@ -147,7 +161,7 @@ func (x *Handle) Tun(t cloudwire.Tun) bool {
 			continue
 		}
 		select {
-		case sess.tun <- TunOut{AppTun: cloudwire.AppTun{Sid: t.Sid, D: t.D}, At: time.Now()}:
+		case sess.tun <- TunOut{AppTun: cloudwire.AppTun{Sid: t.Sid, D: t.D}, At: stamp()}:
 		default:
 			dropPhoneTun.Inc()
 		}
@@ -164,7 +178,7 @@ func (h *home) tunGoneLocked() {
 			continue
 		}
 		select {
-		case sess.tun <- TunOut{AppTun: cloudwire.AppTun{Sid: sess.sid}, At: time.Now()}:
+		case sess.tun <- TunOut{AppTun: cloudwire.AppTun{Sid: sess.sid}, At: stamp()}:
 		default:
 			dropPhoneTun.Inc()
 		}
@@ -191,7 +205,7 @@ func (s *Session) Close() {
 
 // deliver queues one envelope without ever blocking the box. The caller holds
 // the home's lock.
-func (s *Session) deliver(env []byte, at time.Time) {
+func (s *Session) deliver(env []byte, at time.Duration) {
 	if s.ended {
 		return
 	}

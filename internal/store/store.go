@@ -321,7 +321,7 @@ func (x *Handle) Put(t string, env []byte, seq uint64, carriesTable bool) error 
 		x.h.full = &held
 	}
 	x.h.lastSeen = x.s.now()
-	at := time.Now()
+	at := stamp()
 	for sess := range x.h.sessions {
 		if sess.x.mayRead(t) {
 			sess.deliver(env, at)
