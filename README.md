@@ -200,6 +200,21 @@ to it yet.
   session goes to the Noise key the box names in the roster it signs
   (`noise`); a box that names none takes no assistants yet, and each such
   home says so.
+- **Control, capped and temporary.** `ev.charge_now` sends one
+  `loadpoint.hold` (or `clear` with `stop`), the one hold the contract
+  opens to agents: only when the owner's grant lists it, with the
+  arguments the registry allows an agent (`RegistryAgentArgs`) and within
+  the grant's caps (`holdS`, `maxW`), checked here before the box does and
+  never loosened. A hold always has an end, so control ends when the
+  assistant stops renewing; the service never renews one by itself, and an
+  owner's own hold wins. Each `cmd` has a fresh UUIDv7, a validity of 30 s
+  in the box's uptime, and the control revision the box last named; a
+  stale one is learnt from `E_CONFLICT` and tried once more. `goal.request`
+  asks for a lasting change (the mode, the planning style, a charger's
+  solar-only charging, a car's charge level) as `agent.request`, with the
+  assistant's own words for why; the box keeps it until an owner confirms
+  it with Face ID, and `requests.list` shows how it ended. The report says
+  only what the box confirmed.
 
 Not built yet:
 

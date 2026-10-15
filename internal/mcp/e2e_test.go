@@ -57,6 +57,8 @@ type world struct {
 	mcp   *Server
 	mu    sync.Mutex
 	boxes map[string]*stubBox
+	// heard is each /mcp request's version and method headers.
+	heard []string
 }
 
 func newWorld(t *testing.T, opts ...func(*world)) *world {
@@ -99,7 +101,12 @@ func newWorld(t *testing.T, opts ...func(*world)) *world {
 	mux := http.NewServeMux()
 	mux.Handle("/v1/box", w.up)
 	w.auth.Mount(mux)
-	mux.Handle(Path, w.mcp)
+	mux.HandleFunc(Path, func(rw http.ResponseWriter, r *http.Request) {
+		w.mu.Lock()
+		w.heard = append(w.heard, r.Header.Get("MCP-Protocol-Version")+" "+r.Header.Get("Mcp-Method"))
+		w.mu.Unlock()
+		w.mcp.ServeHTTP(rw, r)
+	})
 	w.srv = httptest.NewUnstartedServer(mux)
 	w.srv.TLS = &tls.Config{MinVersion: tls.VersionTLS13}
 	w.srv.StartTLS()

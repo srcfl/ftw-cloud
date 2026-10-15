@@ -27,6 +27,13 @@ jobs:
         run: go test -run XXX -fuzz FuzzBoxMessage -fuzztime 30s ./internal/uplink
       - name: What a watch can post never panics the service
         run: go test -run XXX -fuzz FuzzOnceMessage -fuzztime 30s ./internal/appsession
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+      - name: The official MCP inspector lists and calls tools on /mcp
+        env:
+          MCP_INSPECTOR: npx -y @modelcontextprotocol/inspector@2.3.0
+        run: go test -count=1 -run TestInspectorSmoke -v ./internal/mcp
       - name: Builds for the host
         run: |
           GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -o /dev/null ./cmd/ftwcloudd

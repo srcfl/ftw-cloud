@@ -144,7 +144,7 @@ func New(auth Authenticator, p *pool, log *slog.Logger) *Server {
 	if log == nil {
 		log = slog.Default()
 	}
-	return &Server{auth: auth, pool: p, tools: readTools(), log: log, inflight: make(chan struct{}, maxInflight)}
+	return &Server{auth: auth, pool: p, tools: append(readTools(), controlTools()...), log: log, inflight: make(chan struct{}, maxInflight)}
 }
 
 // Path is where the server answers.
