@@ -153,14 +153,35 @@ func TestRestoreTakesOnlyThisShardsHomes(t *testing.T) {
 	}
 }
 
+// stall makes home's box hang on every write while holding its write lock,
+// as a socket the box stopped reading does once the kernel's buffers are
+// full, until the test ends.
+func stall(t *testing.T, s *service, home string) {
+	t.Helper()
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	s.up.mu.Lock()
+	defer s.up.mu.Unlock()
+	c := s.up.conns[home]
+	if c == nil {
+		t.Fatal("no box to stall")
+	}
+	c.write = func([]byte) error {
+		c.writeMu.Lock()
+		defer c.writeMu.Unlock()
+		<-release
+		return errors.New("stalled")
+	}
+}
+
 // A box that stops reading holds up only its own home: a phone of another
-// home reaches its box at once while writes to the stuck one wait for
-// their deadline.
+// home reaches its box at once while writes to the stuck one hang.
 func TestAStuckBoxDoesNotHoldUpAnotherHome(t *testing.T) {
 	s := newService(t)
-	stuck := tunConnect(t, s) // never reads again
+	stuck := tunConnect(t, s)
 	live := tunConnect(t, s)
 	wait(t, "both boxes are their homes'", func() bool { return s.up.Boxes() == 2 })
+	stall(t, s, stuck.home)
 	got := make(chan struct{}, 64)
 	go func() {
 		for {
@@ -170,22 +191,16 @@ func TestAStuckBoxDoesNotHoldUpAnotherHome(t *testing.T) {
 			got <- struct{}{}
 		}
 	}()
-	// Fill the stuck box's socket from a few phones at once; each send
-	// waits on its write, up to the deadline.
-	big := make([]byte, cloudwire.TunDataMax)
-	var done atomic.Int64
+	// A few phones of the stuck home, each hanging in its write.
+	var blocked atomic.Int64
 	for range 4 {
 		go func() {
-			for range 64 {
-				s.up.Tun(stuck.home, cloudwire.Tun{Dev: "owner", Sid: 1, D: big})
-				done.Add(1)
-			}
+			blocked.Add(1)
+			s.up.Tun(stuck.home, cloudwire.Tun{Dev: "owner", Sid: 1, D: []byte{1}})
+			blocked.Add(-1)
 		}()
 	}
-	time.Sleep(300 * time.Millisecond)
-	if done.Load() == 4*64 {
-		t.Fatal("the stuck box took every write; the test proves nothing")
-	}
+	wait(t, "the stuck home's phones hang", func() bool { return blocked.Load() == 4 })
 	for i := range 10 {
 		start := time.Now()
 		if !s.up.Tun(live.home, cloudwire.Tun{Dev: "owner", Sid: 2, D: []byte{byte(i)}}) {
@@ -200,33 +215,35 @@ func TestAStuckBoxDoesNotHoldUpAnotherHome(t *testing.T) {
 			t.Fatalf("a tun for another home took %s", d)
 		}
 	}
+	if blocked.Load() != 4 {
+		t.Fatal("the stuck home's writes did not hang; the test proves nothing")
+	}
 }
 
-// One box whose socket is stuck does not hold up the drain of the others.
+// One box whose writes hang does not hold up the drain of the others: the
+// close does not wait for the write lock.
 func TestAStuckBoxDoesNotHoldUpTheDrain(t *testing.T) {
 	s := newService(t)
-	stuck := tunConnect(t, s) // never reads again
+	stuck := tunConnect(t, s)
 	live := newBox(t)
 	if _, err := live.connect(s, nil); err != nil {
 		t.Fatal(err)
 	}
 	wait(t, "both boxes are their homes'", func() bool { return s.up.Boxes() == 2 })
-	big := make([]byte, cloudwire.TunDataMax)
-	for range 4 {
-		go func() {
-			for range 64 {
-				s.up.Tun(stuck.home, cloudwire.Tun{Dev: "owner", Sid: 1, D: big})
-			}
-		}()
-	}
-	time.Sleep(300 * time.Millisecond)
+	stall(t, s, stuck.home)
+	go s.up.Tun(stuck.home, cloudwire.Tun{Dev: "owner", Sid: 1, D: []byte{1}})
+	time.Sleep(50 * time.Millisecond)
 	start := time.Now()
 	s.up.Drain("1000")
-	if d := time.Since(start); d > drainWait+500*time.Millisecond {
+	if d := time.Since(start); d > time.Second {
 		t.Fatalf("the drain took %s", d)
 	}
 	_, _, err := live.conn.ReadMessage()
 	if code, _ := closeCode(err); code != cloudwire.CloseRestart {
 		t.Fatalf("the live box heard %v", err)
+	}
+	_, _, err = stuck.conn.ReadMessage()
+	if code, _ := closeCode(err); code != cloudwire.CloseRestart {
+		t.Fatalf("the stuck box heard %v", err)
 	}
 }
