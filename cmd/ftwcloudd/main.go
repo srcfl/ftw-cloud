@@ -33,6 +33,8 @@ import (
 
 	"github.com/srcfl/ftw-cloud/internal/apns"
 	"github.com/srcfl/ftw-cloud/internal/appsession"
+	"github.com/srcfl/ftw-cloud/internal/keys"
+	"github.com/srcfl/ftw-cloud/internal/oauth"
 	"github.com/srcfl/ftw-cloud/internal/push"
 	"github.com/srcfl/ftw-cloud/internal/registry"
 	"github.com/srcfl/ftw-cloud/internal/server"
@@ -73,6 +75,7 @@ func serve(args []string) error {
 	apnsWatch := fs.String("apns-watch-topic", "energy.ftw.app.watchkitapp", "the watch app's bundle id")
 	devPush := fs.String("dev-push-listen", "", "loopback address for registering a token by hand (development builds only)")
 	devCapture := fs.String("dev-apns-capture", "", "write each alert to this directory instead of sending it to Apple (development builds only)")
+	keysSocket := fs.String("keys-socket", "/run/ftw-cloud-keys/keys.sock", "ftwkeysd's socket; assistants can connect only while it answers")
 	_ = fs.Parse(args)
 
 	harden()
@@ -110,6 +113,16 @@ func serve(args []string) error {
 	tokens := token.New(st, reg, log)
 	srv := &server.Server{Store: st, Registry: reg, Uplink: up, Tokens: tokens, Log: log}
 
+	// Assistants: the authorization server, with agent keys in ftwkeysd.
+	agentKeys := keys.Dial(*keysSocket)
+	defer agentKeys.Close()
+	auth, err := oauth.New(filepath.Join(*stateDir, "oauth.db"), agentKeys, log)
+	if err != nil {
+		return err
+	}
+	defer auth.Close()
+	srv.OAuth = auth
+
 	// Alerts: the box's signed events to its phones through Apple, and
 	// box.unreachable when a box is away. Widgets: a push with no data when
 	// prices or a car change. Without a key the service keeps registrations
@@ -133,6 +146,7 @@ func serve(args []string) error {
 	up.OnRoster = func(home string, r *cloudwire.Roster) {
 		pushSvc.Roster(home, r)
 		tokens.Roster(home, r)
+		auth.Roster(home, r)
 	}
 	up.OnGone = pushSvc.BoxGone
 
@@ -188,6 +202,7 @@ func serve(args []string) error {
 	defer stop()
 	go srv.Upkeep(ctx, time.Minute)
 	go pushSvc.Run(ctx)
+	go auth.Run(ctx)
 	if err := pushSvc.Resume(); err != nil {
 		log.Warn("could not restart the dead man's switch", "err", err)
 	}

@@ -124,6 +124,28 @@ to it yet.
   sessions. [deploy/keys.md](deploy/keys.md) has the shape and how to turn
   it on.
 
+- **Assistants sign in with OAuth, and the owner approves at home.** The
+  authorization server follows the MCP authorization spec, revision
+  2026-07-28: OAuth 2.1 with PKCE S256 only, metadata at
+  `/.well-known/oauth-authorization-server` with `iss` in every
+  authorization response (RFC 9207), protected resource metadata for
+  `https://cloud.ftw.energy/mcp` (RFC 9728), and tokens bound to that
+  resource (RFC 8707). A client names itself by a client ID metadata
+  document, fetched behind a fence (https on 443 to a public address checked
+  as the socket connects, no redirects, no proxy, 16 KiB, 5 s, cached), or
+  registers at `/oauth/register` (RFC 7591), kept for ChatGPT and older
+  clients. There is no account and no password: `/oauth/authorize` asks
+  `ftwkeysd` for a new agent key, then shows the client's name, where the
+  browser goes back, the rights asked for, a short code, a QR and the link
+  `https://app.ftw.energy/a/<request>`. The owner approves in the app or on
+  the box's page; the box lists the agent's key in the roster it signs, and
+  when that roster arrives the page, waiting on a server-sent event, returns
+  to the client with a code. Only the browser that started the request gets
+  it. Access tokens last 10 minutes; refresh tokens rotate, and a reused one
+  revokes its family. The service keeps hashes, never tokens. A token is
+  bound to one agent of one home; a roster without the agent, or the end the
+  box set for it, ends its tokens and its key.
+
 Not built yet:
 
 | Step | What | Where |

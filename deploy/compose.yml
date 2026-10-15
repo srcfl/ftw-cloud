@@ -21,6 +21,7 @@ services:
       - -service-key=/run/secrets/ftw-cloud-service.key
       - -acme-email=${FTW_CLOUD_ACME_EMAIL:-}
       - -noise-key=/run/secrets/noise/noise.key
+      - -keys-socket=/run/ftw-cloud-keys/keys.sock
     environment:
       # /source publishes it, so anyone can compare it with what CI built.
       FTW_CLOUD_IMAGE: ${FTW_CLOUD_IMAGE}

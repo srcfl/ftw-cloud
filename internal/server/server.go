@@ -7,6 +7,7 @@
 //	/v1/now   a widget's token read (package token)
 //	/source   the source of the running service, as AGPL-3.0 asks
 //	/healthz  liveness, and nothing about any home
+//	/oauth/*, /.well-known/oauth-*  the authorization server for assistants (package oauth)
 //
 // There is no route for staff. Reading a home needs its box's key, a phone in
 // its roster, or a token bound to one.
@@ -21,6 +22,7 @@ import (
 	"time"
 
 	"github.com/srcfl/ftw-cloud/internal/appsession"
+	"github.com/srcfl/ftw-cloud/internal/oauth"
 	"github.com/srcfl/ftw-cloud/internal/registry"
 	"github.com/srcfl/ftw-cloud/internal/store"
 	"github.com/srcfl/ftw-cloud/internal/token"
@@ -31,7 +33,7 @@ import (
 const SourceArchive = "/usr/share/ftw-cloud/source.tar.gz"
 
 // Routes are every path the service answers.
-var Routes = []string{"/v1/box", "/v1/app", "/v1/app/once", "/v1/now", "/source", "/healthz"}
+var Routes = append([]string{"/v1/box", "/v1/app", "/v1/app/once", "/v1/now", "/source", "/healthz"}, oauth.Routes...)
 
 // devRoutes adds a local inspection route in binaries built with
 // -tags ftwclouddev. It is nil in every other build.
@@ -48,7 +50,9 @@ type Server struct {
 	// Tokens answers /v1/now. Tokens come only over the app session, so
 	// without a Noise key every token read is refused.
 	Tokens *token.Service
-	Log    *slog.Logger
+	// OAuth is the authorization server for assistants. Nil serves none.
+	OAuth *oauth.Server
+	Log   *slog.Logger
 }
 
 // Handler is the whole HTTP surface.
@@ -66,6 +70,9 @@ func (s *Server) Handler() http.Handler {
 		mux.Handle("/v1/now", s.Tokens)
 	} else {
 		mux.HandleFunc("/v1/now", notYet)
+	}
+	if s.OAuth != nil {
+		s.OAuth.Mount(mux)
 	}
 	mux.HandleFunc("/source", source)
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
