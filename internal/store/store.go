@@ -237,13 +237,14 @@ func byKey(key []byte) func(cloudwire.Device) bool {
 }
 
 // admit is access for a kind of principal: an agent row only as Agent,
-// before its end; a phone, a watch or a token never by an agent row.
+// before its end; a phone, a watch or a token never by an agent's,
+// support's or the release check's row.
 func (s *Store) admit(k Kind, id string, h *home, match func(cloudwire.Device) bool) (cloudwire.Device, []string, bool) {
 	dev, scopes, ok := s.access(id, h, match)
-	if !ok || (dev.Agent != nil) != (k == Agent) {
+	if !ok || phoneRow(dev) == (k == Agent) {
 		return cloudwire.Device{}, nil, false
 	}
-	if k == Agent && !s.now().Before(time.UnixMilli(dev.Agent.ExpiresAtMs)) {
+	if k == Agent && (dev.Agent == nil || !s.now().Before(time.UnixMilli(dev.Agent.ExpiresAtMs))) {
 		return cloudwire.Device{}, nil, false
 	}
 	return dev, scopes, true
@@ -260,11 +261,6 @@ func (s *Store) access(id string, h *home, match func(cloudwire.Device) bool) (c
 	for _, d := range r.Devices {
 		if !match(d) {
 			continue
-		}
-		// An agent's, support's or the release check's row reaches a home
-		// only through the keys part, never as a phone, a watch or a token.
-		if !phoneRow(d) {
-			return cloudwire.Device{}, nil, false
 		}
 		if s.suspended != nil && s.suspended(id, d.ID, d.Epoch) {
 			return cloudwire.Device{}, nil, false

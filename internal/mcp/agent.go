@@ -7,6 +7,7 @@ import (
 	"errors"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/fxamacker/cbor/v2"
@@ -58,9 +59,10 @@ type Pool struct {
 	// PaceBurst and PacePerSecond are each home's budget of calls.
 	PaceBurst, PacePerSecond float64
 
-	mu    sync.Mutex
-	conns map[connKey]*agentConn
-	paces map[string]*pacer
+	mu       sync.Mutex
+	conns    map[connKey]*agentConn
+	paces    map[string]*pacer
+	draining atomic.Bool
 }
 
 type connKey struct{ home, agent string }
@@ -143,6 +145,29 @@ func (p *Pool) Drop(home, agent string) {
 	}
 }
 
+// Sockets is how many agent sessions are warm. Each is a session through a
+// box's uplink that a restart ends and the agent's next call opens again on
+// the next instance, so it counts in the restart's spread.
+func (p *Pool) Sockets() int { return p.Warm() }
+
+// Drain closes every warm session, the box hearing each end, and turns away
+// every call after it, for a restart. A command whose answer the drain cut
+// off is reported as unknown, never failed.
+func (p *Pool) Drain(string) {
+	p.mu.Lock()
+	p.draining.Store(true)
+	all := p.conns
+	p.conns = map[connKey]*agentConn{}
+	p.mu.Unlock()
+	for _, c := range all {
+		c.close(errRestarting)
+	}
+}
+
+// WaitClosed returns how many sessions are still open. Closing one waits
+// for no client, so after Drain there are none.
+func (p *Pool) WaitClosed(time.Duration) int { return p.Warm() }
+
 // Warm is how many sessions are open, for tests and the log.
 func (p *Pool) Warm() int {
 	p.mu.Lock()
@@ -154,6 +179,10 @@ func (p *Pool) Warm() int {
 func (p *Pool) get(ctx context.Context, sub oauth.Subject) (*agentConn, error) {
 	k := connKey{sub.Home, sub.Agent}
 	p.mu.Lock()
+	if p.draining.Load() {
+		p.mu.Unlock()
+		return nil, errRestarting
+	}
 	c := p.conns[k]
 	if c != nil && !c.ended() {
 		p.mu.Unlock()
@@ -213,16 +242,17 @@ func (p *Pool) evictLocked() {
 
 // Errors a tool turns into words for the model.
 var (
-	errNoAgents = userError("This box does not take assistants yet; it needs a newer FTW version.")
-	errDenied   = userError("The box no longer lets this assistant in. Its owner may have removed it.")
-	errBusy     = userError("This home is busy with other calls. Try again in a moment.")
-	errOffline  = userError("The box is offline right now.")
-	errNoAnswer = userError("The box did not answer. It may be offline, or its owner removed this assistant.")
-	errTimeout  = userError("The box took too long to answer.")
-	errEnded    = userError("The box ended the session. Try again.")
-	errRevoked  = userError("The owner removed this assistant.")
-	errExpired  = userError("This assistant's access ran out. The owner can renew it in the FTW app.")
-	errIdle     = errors.New("mcp: idle")
+	errNoAgents   = userError("This box does not take assistants yet; it needs a newer FTW version.")
+	errDenied     = userError("The box no longer lets this assistant in. Its owner may have removed it.")
+	errBusy       = userError("This home is busy with other calls. Try again in a moment.")
+	errOffline    = userError("The box is offline right now.")
+	errNoAnswer   = userError("The box did not answer. It may be offline, or its owner removed this assistant.")
+	errTimeout    = userError("The box took too long to answer.")
+	errEnded      = userError("The box ended the session. Try again.")
+	errRevoked    = userError("The owner removed this assistant.")
+	errExpired    = userError("This assistant's access ran out. The owner can renew it in the FTW app.")
+	errRestarting = userError("FTW Cloud is restarting. Try again in a few seconds.")
+	errIdle       = errors.New("mcp: idle")
 )
 
 // agentConn is one agent's session with its box.

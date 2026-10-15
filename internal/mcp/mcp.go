@@ -77,6 +77,8 @@ const maxBody = 64 << 10
 // Authenticator checks a bearer token: package oauth.
 type Authenticator interface {
 	Authenticate(r *http.Request) (*oauth.Grant, *oauth.AuthError)
+	// TokenHome opens a token's route, without the store.
+	TokenHome(tok string) (string, bool)
 }
 
 // Server is the MCP endpoint.
@@ -85,10 +87,11 @@ type Server struct {
 	pool  *pool
 	tools []*tool
 	log   *slog.Logger
-	// Ours reports whether this instance holds a home (shard.Directory).
-	// A token for a home held elsewhere gets 421, so a router can send it
-	// on. Nil holds every home.
-	Ours func(home string) bool
+	// Elsewhere is where a request for a home another instance holds goes
+	// (shard.Directory): the whole request, sent on inside FTW Cloud, since
+	// an assistant's client does not follow a wrong-shard answer. Nil, or a
+	// nil handler, serves the home here.
+	Elsewhere func(home string) http.Handler
 	// inflight bounds tool calls in this process.
 	inflight chan struct{}
 	// limit bounds the requests of each agent, tools/list included.
@@ -158,6 +161,18 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "POST only", http.StatusMethodNotAllowed)
 		return
 	}
+	// A token routes itself: its home's instance holds its hash, so the
+	// request goes there before anything here reads it.
+	if s.Elsewhere != nil {
+		if _, tok, ok := strings.Cut(r.Header.Get("Authorization"), " "); ok {
+			if home, ok := s.auth.TokenHome(strings.TrimSpace(tok)); ok {
+				if h := s.Elsewhere(home); h != nil {
+					h.ServeHTTP(w, r)
+					return
+				}
+			}
+		}
+	}
 	_ = http.NewResponseController(w).SetReadDeadline(time.Now().Add(10 * time.Second))
 	grant, aerr := s.auth.Authenticate(r)
 	if aerr != nil {
@@ -167,10 +182,6 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if !s.limit.allow(grant.Subject.Home+"/"+grant.Subject.Agent, time.Now()) {
 		w.Header().Set("Retry-After", "1")
 		writeRPCError(w, http.StatusTooManyRequests, nil, codeInternal, "too many requests; slow down", nil)
-		return
-	}
-	if s.Ours != nil && !s.Ours(grant.Subject.Home) {
-		http.Error(w, "this home lives on another shard", http.StatusMisdirectedRequest)
 		return
 	}
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxBody+1))

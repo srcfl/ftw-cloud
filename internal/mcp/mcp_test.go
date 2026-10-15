@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -634,5 +635,69 @@ func TestUnsupportedVersionsAndTheRateLimit(t *testing.T) {
 	}
 	if !limited {
 		t.Fatal("an agent's requests are not limited")
+	}
+}
+
+// A request for a home another instance holds goes there whole, before this
+// instance reads it or asks its own store: an assistant's client follows no
+// wrong-shard answer.
+func TestARequestForAnotherShardGoesThereWhole(t *testing.T) {
+	var elsewhere atomic.Value
+	elsewhere.Store("")
+	var got atomic.Int32
+	w := newWorld(t, func(w *world) {
+		w.mcp.Elsewhere = func(home string) http.Handler {
+			if home != elsewhere.Load().(string) {
+				return nil
+			}
+			return http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+				got.Add(1)
+				body, _ := io.ReadAll(r.Body)
+				if !bytes.Contains(body, []byte(`"tools/list"`)) || !strings.HasPrefix(r.Header.Get("Authorization"), "Bearer ftwat_") {
+					t.Errorf("forwarded %q without its body or token", body)
+				}
+				rw.WriteHeader(299)
+			})
+		}
+	})
+	b := w.connectBox()
+	a := w.connect(b, "")
+	if r := a.rpc("tools/list", nil, true); r.Status != http.StatusOK {
+		t.Fatalf("served here: %d", r.Status)
+	}
+	elsewhere.Store(b.home)
+	if r := a.rpc("tools/list", nil, true); r.Status != 299 || got.Load() != 1 {
+		t.Fatalf("not sent on: %d", r.Status)
+	}
+	// A route this instance cannot open is checked here, as any token is.
+	a.token = "ftwat_" + strings.Repeat("A", 60) + "." + strings.Repeat("b", 43)
+	if r := a.rpc("tools/list", nil, true); r.Status != http.StatusUnauthorized || got.Load() != 1 {
+		t.Fatalf("a token with a made-up route: %d", r.Status)
+	}
+}
+
+// A restart drains the agent sessions with the phones': each closes, the
+// box hears it end, it counts in the spread, and calls after it are turned
+// away in words.
+func TestARestartDrainsAgentSessions(t *testing.T) {
+	w := newWorld(t)
+	b := w.connectBox()
+	a := w.connect(b, "")
+	if _, isErr, text := a.call("status", nil); isErr {
+		t.Fatal(text)
+	}
+	if w.pool.Sockets() != 1 {
+		t.Fatalf("sockets %d", w.pool.Sockets())
+	}
+	w.pool.Drain("1500")
+	if left := w.pool.WaitClosed(time.Second); left != 0 {
+		t.Fatalf("%d sessions left", left)
+	}
+	waitFor(t, func() bool { _, ends, _ := b.counts(); return ends == 1 })
+	if _, isErr, text := a.call("status", nil); !isErr || !strings.Contains(text, "restarting") {
+		t.Fatalf("a call after the drain: %v %s", isErr, text)
+	}
+	if hs, _, _ := b.counts(); hs != 1 {
+		t.Fatalf("a drained instance opened a session: %d handshakes", hs)
 	}
 }
