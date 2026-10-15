@@ -149,6 +149,8 @@ func serve(args []string) error {
 		auth.Roster(home, r)
 	}
 	up.OnGone = pushSvc.BoxGone
+	// A purged home's agents, their tokens and keys, and its consents go.
+	up.OnPurge = auth.DropHome
 
 	// Phones register their tokens over their app session, so without a
 	// Noise key only the development route registers one.

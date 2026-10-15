@@ -1,46 +1,127 @@
 package oauth
 
 import (
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
+	"errors"
 	"fmt"
-	"github.com/srcfl/ftw/go/protocol"
+	"io/fs"
 	"net/http"
+	"os"
 	"regexp"
 	"slices"
 	"strings"
 	"time"
+
+	"github.com/srcfl/ftw/go/protocol"
 )
 
 var verifierRE = regexp.MustCompile(`^[A-Za-z0-9._~-]{43,128}$`)
 
 // Token prefixes, so a leaked token is recognisable for what it is. After
-// the prefix comes the home, then a dot and the secret, so any instance can
-// tell which shard holds a token's home without a lookup.
+// the prefix comes the token's route, then a dot and the secret. The route
+// is the home, sealed with a fresh nonce under the service's route key: any
+// instance can tell which shard holds a token's home without a lookup, and
+// a client sees no id that is the same in two of its tokens, so it cannot
+// link one connection to another by it.
 const (
 	accessPrefix  = "ftwat_"
 	refreshPrefix = "ftwrt_"
 )
 
-// tokenShape is a token as this server makes one: the prefix, a home id, a
-// dot and 43 characters of base64url. Anything else is refused before the
-// store is asked.
+// routeKey seals a home into a token's route. Every instance that routes
+// tokens holds the same one.
+type routeKey struct{ aead cipher.AEAD }
+
+// loadRouteKey reads the route key, making it on first start.
+func loadRouteKey(path string) (routeKey, error) {
+	key, err := os.ReadFile(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		key = make([]byte, 32)
+		if _, err := rand.Read(key); err != nil {
+			return routeKey{}, err
+		}
+		f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+		if err != nil {
+			return routeKey{}, err
+		}
+		if _, err := f.Write(key); err != nil {
+			_ = f.Close()
+			return routeKey{}, err
+		}
+		if err := f.Close(); err != nil {
+			return routeKey{}, err
+		}
+	} else if err != nil {
+		return routeKey{}, err
+	}
+	if len(key) != 32 {
+		return routeKey{}, fmt.Errorf("oauth: %s holds %d bytes, want 32", path, len(key))
+	}
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return routeKey{}, err
+	}
+	aead, err := cipher.NewGCM(block)
+	if err != nil {
+		return routeKey{}, err
+	}
+	return routeKey{aead: aead}, nil
+}
+
+// newToken is prefix, the home sealed with a fresh nonce, a dot and 32
+// random bytes.
+func (k routeKey) newToken(prefix, home string) string {
+	nonce := make([]byte, k.aead.NonceSize())
+	if _, err := rand.Read(nonce); err != nil {
+		panic(err)
+	}
+	route := k.aead.Seal(nonce, nonce, []byte(home), []byte(prefix))
+	return prefix + base64.RawURLEncoding.EncodeToString(route) + "." + randomToken(32)
+}
+
+// home opens a token's route.
+func (k routeKey) home(tok string) (string, bool) {
+	for _, p := range []string{accessPrefix, refreshPrefix} {
+		if !tokenShape(tok, p) {
+			continue
+		}
+		route, _, _ := strings.Cut(strings.TrimPrefix(tok, p), ".")
+		raw, err := base64.RawURLEncoding.DecodeString(route)
+		n := k.aead.NonceSize()
+		if err != nil || len(raw) < n+k.aead.Overhead() {
+			return "", false
+		}
+		home, err := k.aead.Open(nil, raw[:n], raw[n:], []byte(p))
+		if err != nil {
+			return "", false
+		}
+		return string(home), true
+	}
+	return "", false
+}
+
+// tokenShape is a token as this server makes one: the prefix, a route of
+// base64url, a dot and 43 characters of base64url. Anything else is refused
+// before the store is asked.
 func tokenShape(tok, prefix string) bool {
 	rest, ok := strings.CutPrefix(tok, prefix)
 	if !ok {
 		return false
 	}
-	home, secret, ok := strings.Cut(rest, ".")
-	if !ok || len(home) == 0 || len(home) > 64 || len(secret) != 43 {
+	route, secret, ok := strings.Cut(rest, ".")
+	if !ok || len(route) < 40 || len(route) > 160 || len(secret) != 43 {
 		return false
 	}
-	for _, c := range home {
-		if !(c >= 'a' && c <= 'z' || c >= '0' && c <= '9') {
-			return false
-		}
-	}
-	for _, c := range secret {
+	return base64URL(route) && base64URL(secret)
+}
+
+func base64URL(s string) bool {
+	for _, c := range s {
 		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '-' || c == '_') {
 			return false
 		}
@@ -48,18 +129,9 @@ func tokenShape(tok, prefix string) bool {
 	return true
 }
 
-// TokenHome is the home a token names, or "" for something else. It
-// proves nothing: only the stored hash does.
-func TokenHome(tok string) string {
-	for _, p := range []string{accessPrefix, refreshPrefix} {
-		if rest, ok := strings.CutPrefix(tok, p); ok {
-			if home, _, ok := strings.Cut(rest, "."); ok {
-				return home
-			}
-		}
-	}
-	return ""
-}
+// TokenHome is the home a token is routed to, for a router that sends it to
+// the home's shard. It proves nothing: only the stored hash does.
+func (s *Server) TokenHome(tok string) (string, bool) { return s.route.home(tok) }
 
 func (s *Server) serveToken(w http.ResponseWriter, r *http.Request) {
 	readDeadline(w)
@@ -114,8 +186,11 @@ func (s *Server) exchangeCode(w http.ResponseWriter, r *http.Request, cl client)
 		return
 	}
 	sum := sha256.Sum256([]byte(verifier))
+	// A redirect_uri the authorize request named must be named again, the
+	// same; one it left out may be named only as the one it used.
+	redirect := f.Get("redirect_uri")
 	if c.ClientID != cl.ID || subtle.ConstantTimeCompare([]byte(base64.RawURLEncoding.EncodeToString(sum[:])), []byte(c.Challenge)) != 1 ||
-		(f.Get("redirect_uri") != "" && f.Get("redirect_uri") != c.RedirectURI) {
+		(c.RedirectGiven || redirect != "") && redirect != c.RedirectURI {
 		tokenError(w, http.StatusBadRequest, "invalid_grant", "the code is not valid")
 		return
 	}
@@ -134,7 +209,7 @@ func (s *Server) refresh(w http.ResponseWriter, r *http.Request, cl client) {
 		tokenError(w, http.StatusBadRequest, "invalid_grant", "the refresh token is not valid")
 		return
 	}
-	fresh, err := s.st.rotate(tok)
+	fresh, err := s.st.rotate(tok, s.now())
 	if err != nil {
 		tokenError(w, http.StatusInternalServerError, "server_error", "could not refresh")
 		return
@@ -175,7 +250,7 @@ func (s *Server) issue(w http.ResponseWriter, family []byte, clientID string, a 
 	if accessEnd.After(refreshEnd) {
 		accessEnd = refreshEnd
 	}
-	access, refresh := accessPrefix+a.Home+"."+randomToken(32), refreshPrefix+a.Home+"."+randomToken(32)
+	access, refresh := s.route.newToken(accessPrefix, a.Home), s.route.newToken(refreshPrefix, a.Home)
 	base := tokenRow{Family: family, ClientID: clientID, Home: a.Home, Agent: a.Agent, Scope: scope, Resource: Resource}
 	at, rt := base, base
 	at.Kind, at.Expires = kindAccess, accessEnd

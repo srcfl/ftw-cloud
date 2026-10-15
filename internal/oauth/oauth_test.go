@@ -9,7 +9,9 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"github.com/fxamacker/cbor/v2"
+	"html"
 	"io"
 	"log/slog"
 	"net"
@@ -22,6 +24,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -95,10 +98,15 @@ func newRig(t *testing.T) *rig {
 		return nil, errors.New("no such host")
 	}
 	g.s.fetch.public = func(a netip.Addr) bool { return a == netip.MustParseAddr("127.0.0.1") || publicAddr(a) }
+	// Every test client lives on example.com.
+	g.s.fetch.hostBurst, g.s.fetch.hostRate = 1e4, 1e4
 	g.s.fetch.dial = func(ctx context.Context, network, _ string) (net.Conn, error) {
 		var d net.Dialer
 		return d.DialContext(ctx, network, g.cimd.Listener.Addr().String())
 	}
+	// One test client is one address: its own limits are looser than a
+	// stranger's, and TestLimitsPerAddress checks those.
+	g.s.authorizeByIP, g.s.registerByIP, g.s.lookupByIP = newIPLimiter(1e4, 1e4), newIPLimiter(1e4, 1e4), newIPLimiter(1e4, 1e4)
 	mux := http.NewServeMux()
 	g.s.Mount(mux)
 	g.srv = httptest.NewServer(mux)
@@ -269,13 +277,22 @@ func next(t *testing.T, ch <-chan event) event {
 // after checking the box's signature.
 func (g *rig) roster(h string, devs ...cloudwire.Device) {
 	g.s.Roster(h, &cloudwire.Roster{RosterSeq: 1, TTLS: 86400, Devices: devs})
-	// Run applies it on its own goroutine; a request on the store after
-	// this waits for it by draining the queue.
+	g.settle()
+}
+
+// settle waits until Run has applied what is pending.
+func (g *rig) settle() {
 	deadline := time.Now().Add(2 * time.Second)
-	for len(g.s.roster) > 0 && time.Now().Before(deadline) {
+	for time.Now().Before(deadline) {
+		g.s.pmu.Lock()
+		n := len(g.s.pending)
+		g.s.pmu.Unlock()
+		if n == 0 && g.s.busy.Load() == 0 {
+			break
+		}
 		time.Sleep(time.Millisecond)
 	}
-	time.Sleep(20 * time.Millisecond)
+	time.Sleep(10 * time.Millisecond)
 }
 
 // agentDevice is an agent row as the box lists it in its roster, for the
@@ -454,6 +471,7 @@ func TestTheFullFlowWithAMetadataDocument(t *testing.T) {
 	if _, aerr := g.bearer(tk2.Access); aerr != nil {
 		t.Fatal("the refreshed token was refused")
 	}
+	g.advance(refreshGrace + time.Second)
 	status, _ = g.token(url.Values{"grant_type": {grantRefresh}, "refresh_token": {tk.Refresh}, "client_id": {cimdID}})
 	if status != http.StatusBadRequest {
 		t.Fatalf("a spent refresh token: %d", status)
@@ -476,7 +494,8 @@ func TestACodeWorksOnce(t *testing.T) {
 	next(t, ch)
 	g.roster(home, agentDevice(f.agentKey(t), ScopeLiveRead))
 	code := redirectOf(t, next(t, ch)).Query().Get("code")
-	form := url.Values{"grant_type": {grantCode}, "code": {code}, "client_id": {cimdID}, "code_verifier": {f.verifier}}
+	form := url.Values{"grant_type": {grantCode}, "code": {code}, "client_id": {cimdID}, "code_verifier": {f.verifier},
+		"redirect_uri": {cimdBack}}
 	status, tk := g.token(form)
 	if status != http.StatusOK {
 		t.Fatalf("first use: %d", status)
@@ -505,9 +524,8 @@ func TestPKCEIsRequired(t *testing.T) {
 		}
 		change(qq)
 		resp, _ := noFollow.Get(g.srv.URL + "/oauth/authorize?" + qq.Encode())
-		loc, _ := url.Parse(resp.Header.Get("Location"))
-		if resp.StatusCode != http.StatusFound || loc.Query().Get("error") != "invalid_request" || loc.Query().Get("iss") != Issuer {
-			t.Fatalf("without S256 PKCE: %d %s", resp.StatusCode, loc)
+		if back := backLink(t, resp); back.Query().Get("error") != "invalid_request" || back.Query().Get("iss") != Issuer {
+			t.Fatalf("without S256 PKCE: %s", back)
 		}
 	}
 
@@ -518,13 +536,31 @@ func TestPKCEIsRequired(t *testing.T) {
 	g.roster(home, agentDevice(f.agentKey(t), ScopeLiveRead))
 	code := redirectOf(t, next(t, ch)).Query().Get("code")
 	wrong, _ := pkce()
-	if status, _ := g.token(url.Values{"grant_type": {grantCode}, "code": {code}, "client_id": {cimdID}, "code_verifier": {wrong}}); status != http.StatusBadRequest {
+	if status, _ := g.token(url.Values{"grant_type": {grantCode}, "code": {code}, "client_id": {cimdID}, "code_verifier": {wrong},
+		"redirect_uri": {cimdBack}}); status != http.StatusBadRequest {
 		t.Fatalf("a wrong verifier: %d", status)
 	}
 }
 
-// Before client and redirect URI check out, nothing redirects; after, every
-// error goes back with iss.
+// backLink is the link an error page offers back to the client, with no
+// redirect of its own.
+func backLink(t *testing.T, resp *http.Response) *url.URL {
+	t.Helper()
+	body, _ := io.ReadAll(resp.Body)
+	m := regexp.MustCompile(`<a class="button" href="([^"]+)">Go back to `).FindSubmatch(body)
+	if resp.StatusCode != http.StatusBadRequest || resp.Header.Get("Location") != "" || m == nil {
+		t.Fatalf("not an error page with a link back: %d %q", resp.StatusCode, resp.Header.Get("Location"))
+	}
+	u, err := url.Parse(html.UnescapeString(string(m[1])))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return u
+}
+
+// Before client and redirect URI check out, nothing redirects. After, an
+// error goes back with iss: at once for a client FTW Cloud knows, and by a
+// link the person follows for any other (RFC 9700, 4.11.2).
 func TestBadRequestsNeverRedirectSomewhereUnchecked(t *testing.T) {
 	g := newRig(t)
 	for _, q := range []url.Values{
@@ -541,16 +577,24 @@ func TestBadRequestsNeverRedirectSomewhereUnchecked(t *testing.T) {
 	q, _ := g.authorizeParams(cimdID, cimdBack, "")
 	q.Set("resource", "https://cloud.ftw.energy/other")
 	resp, _ := noFollow.Get(g.srv.URL + "/oauth/authorize?" + q.Encode())
-	loc, _ := url.Parse(resp.Header.Get("Location"))
-	if loc.Query().Get("error") != "invalid_target" || loc.Query().Get("iss") != Issuer || loc.Host != "example.com" {
-		t.Fatalf("another resource: %s", loc)
+	back := backLink(t, resp)
+	if back.Query().Get("error") != "invalid_target" || back.Query().Get("iss") != Issuer || back.Host != "example.com" {
+		t.Fatalf("another resource: %s", back)
 	}
 	q.Set("resource", Resource)
 	q.Set("scope", "ftw.live.read admin")
 	resp, _ = noFollow.Get(g.srv.URL + "/oauth/authorize?" + q.Encode())
-	loc, _ = url.Parse(resp.Header.Get("Location"))
-	if loc.Query().Get("error") != "invalid_scope" {
-		t.Fatalf("an unknown scope: %s", loc)
+	if back := backLink(t, resp); back.Query().Get("error") != "invalid_scope" {
+		t.Fatalf("an unknown scope: %s", back)
+	}
+	// A client FTW Cloud knows goes back at once.
+	old := verifiedClients
+	verifiedClients = append(slices.Clone(old), cimdID)
+	t.Cleanup(func() { verifiedClients = old })
+	resp, _ = noFollow.Get(g.srv.URL + "/oauth/authorize?" + q.Encode())
+	loc, _ := url.Parse(resp.Header.Get("Location"))
+	if resp.StatusCode != http.StatusFound || loc.Query().Get("error") != "invalid_scope" || loc.Query().Get("iss") != Issuer {
+		t.Fatalf("a known client's error: %d %s", resp.StatusCode, loc)
 	}
 	// A loopback redirect may take any port.
 	q2, _ := g.authorizeParams(cimdID, "http://127.0.0.1:53121/cb", "")
@@ -601,7 +645,8 @@ func TestTheFullFlowWithDynamicRegistration(t *testing.T) {
 	g.roster(home, agentFor(f.agentKey(t), id, time.Now().Add(time.Hour), ScopeLiveRead))
 	code := redirectOf(t, next(t, ch)).Query().Get("code")
 	stop()
-	if status, tk := g.token(url.Values{"grant_type": {grantCode}, "code": {code}, "client_id": {id}, "code_verifier": {f.verifier}}); status != http.StatusOK {
+	if status, tk := g.token(url.Values{"grant_type": {grantCode}, "code": {code}, "client_id": {id}, "code_verifier": {f.verifier},
+		"redirect_uri": {"https://grok.example/cb"}}); status != http.StatusOK {
 		t.Fatalf("public client token: %d %+v", status, tk)
 	}
 
@@ -616,7 +661,8 @@ func TestTheFullFlowWithDynamicRegistration(t *testing.T) {
 	next(t, ch)
 	g.roster(home, agentFor(f.agentKey(t), cid, time.Now().Add(time.Hour), ScopeLiveRead))
 	code = redirectOf(t, next(t, ch)).Query().Get("code")
-	form := url.Values{"grant_type": {grantCode}, "code": {code}, "client_id": {cid}, "code_verifier": {f.verifier}}
+	form := url.Values{"grant_type": {grantCode}, "code": {code}, "client_id": {cid}, "code_verifier": {f.verifier},
+		"redirect_uri": {"https://chatgpt.com/connector_platform_oauth_redirect"}}
 	if status, _ := g.token(form); status != http.StatusUnauthorized {
 		t.Fatalf("no secret: %d", status)
 	}
@@ -632,7 +678,7 @@ func TestTheFullFlowWithDynamicRegistration(t *testing.T) {
 
 // The page finishes only when the box's roster lists the very key this
 // request made, as a device that may open a session; and only the browser
-// that started it gets the code.
+// that started it gets the code, or keeps a stream open.
 func TestConsentCompletesOnlyWhenTheRosterListsTheAgent(t *testing.T) {
 	g := newRig(t)
 	f := g.start(cimdID, cimdBack, "")
@@ -642,6 +688,9 @@ func TestConsentCompletesOnlyWhenTheRosterListsTheAgent(t *testing.T) {
 	defer stop2()
 	if next(t, browser).name != "pending" || next(t, stranger).name != "pending" {
 		t.Fatal("not pending at first")
+	}
+	if _, open := <-stranger; open {
+		t.Fatal("a stranger's stream stayed open")
 	}
 	// Another key; the right key under another id, for another client,
 	// past its end, as support, or as a phone: none of them approves.
@@ -668,6 +717,8 @@ func TestConsentCompletesOnlyWhenTheRosterListsTheAgent(t *testing.T) {
 	}
 
 	g.roster(home, agentDevice(key, ScopeLiveRead))
+	stranger, stop3 := g.events(f, false)
+	defer stop3()
 	if ev := next(t, stranger); ev.name != "approved" || strings.Contains(ev.data, "code") {
 		t.Fatalf("a stranger's stream got %q %s", ev.name, ev.data)
 	}
@@ -760,7 +811,8 @@ func TestAnExpiredAgentFails(t *testing.T) {
 	next(t, ch)
 	g.roster(home, agentFor(f.agentKey(t), cimdID, g.now().Add(2*time.Hour), ScopeLiveRead))
 	code := redirectOf(t, next(t, ch)).Query().Get("code")
-	_, tk := g.token(url.Values{"grant_type": {grantCode}, "code": {code}, "client_id": {cimdID}, "code_verifier": {f.verifier}})
+	_, tk := g.token(url.Values{"grant_type": {grantCode}, "code": {code}, "client_id": {cimdID}, "code_verifier": {f.verifier},
+		"redirect_uri": {cimdBack}})
 	if _, aerr := g.bearer(tk.Access); aerr != nil {
 		t.Fatal(aerr)
 	}
@@ -890,23 +942,83 @@ func TestTheConsentPage(t *testing.T) {
 }
 
 // Requests for keys are bounded: the authorize endpoint is rate limited
-// for everyone together, since each request makes a key.
+// for everyone together, since each request makes a key, and the limit
+// comes before the client's document is fetched.
 func TestAuthorizeIsRateLimited(t *testing.T) {
 	g := newRig(t)
+	var hits atomic.Int32
+	inner := g.cimd.Config.Handler
+	g.cimd.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		inner.ServeHTTP(w, r)
+	})
 	limited := false
-	for range 40 {
-		q, _ := g.authorizeParams(cimdID, cimdBack, "")
+	for i := range 40 {
+		// A new document each time, so the cache does not hide a fetch.
+		id := fmt.Sprintf("https://example.com/oauth/c%d.json", i)
+		g.docsMu.Lock()
+		g.docs[fmt.Sprintf("/oauth/c%d.json", i)] = `{"client_id":"` + id + `","client_name":"C","redirect_uris":["` + cimdBack + `"]}`
+		g.docsMu.Unlock()
+		q, _ := g.authorizeParams(id, cimdBack, "")
+		before := hits.Load()
 		resp, _ := noFollow.Get(g.srv.URL + "/oauth/authorize?" + q.Encode())
-		if resp.StatusCode == http.StatusFound {
-			loc, _ := url.Parse(resp.Header.Get("Location"))
-			if loc.Query().Get("error") == "temporarily_unavailable" {
-				limited = true
-				break
+		if resp.StatusCode == http.StatusTooManyRequests {
+			if hits.Load() != before {
+				t.Fatal("a limited request fetched a document")
 			}
+			limited = true
+			break
 		}
 	}
 	if !limited {
 		t.Fatal("authorize is not limited")
+	}
+}
+
+// One address cannot spend everyone's bucket: authorize, registration and
+// code lookups each have one per address, an IPv6 address by its /64.
+func TestLimitsPerAddress(t *testing.T) {
+	g := newRig(t)
+	g.s.authorizeByIP, g.s.registerByIP, g.s.lookupByIP = newIPLimiter(3, 0.001), newIPLimiter(2, 0.001), newIPLimiter(5, 0.001)
+	mux := http.NewServeMux()
+	g.s.Mount(mux)
+	do := func(addr, target string) int {
+		method := http.MethodGet
+		if strings.HasPrefix(target, "/oauth/register") {
+			method = http.MethodPost
+		}
+		r := httptest.NewRequest(method, target, strings.NewReader(`{"redirect_uris":["https://x.example/cb"]}`))
+		r.RemoteAddr = addr
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, r)
+		return w.Code
+	}
+	q, _ := g.authorizeParams(cimdID, cimdBack, "")
+	for name, c := range map[string]struct {
+		target string
+		n      int
+	}{
+		"authorize": {"/oauth/authorize?" + q.Encode(), 3},
+		"register":  {"/oauth/register", 2},
+		"lookup":    {"/oauth/requests?code=AAAA-AAAA", 5},
+	} {
+		for i := range c.n {
+			if code := do("198.51.100.7:4000", c.target); code == http.StatusTooManyRequests {
+				t.Fatalf("%s: limited after %d", name, i)
+			}
+		}
+		if code := do("198.51.100.7:4001", c.target); code != http.StatusTooManyRequests {
+			t.Fatalf("%s: not limited per address: %d", name, code)
+		}
+		if code := do("[2001:db8:1:2::9]:4000", c.target); code == http.StatusTooManyRequests {
+			t.Fatalf("%s: another address was limited", name)
+		}
+		for range c.n - 1 {
+			do("[2001:db8:1:2::a]:4000", c.target)
+		}
+		if code := do("[2001:db8:1:2:ffff::1]:4000", c.target); code != http.StatusTooManyRequests {
+			t.Fatalf("%s: one /64 counts as many callers: %d", name, code)
+		}
 	}
 }
 
@@ -984,8 +1096,8 @@ func TestTheOfferIsSignedAndCarriesTheConsent(t *testing.T) {
 	q, _ := g.authorizeParams(cimdID, cimdBack, "")
 	resp, _ := noFollow.Get(g.srv.URL + "/oauth/authorize?" + q.Encode())
 	page, _ := io.ReadAll(resp.Body)
-	if !regexp.MustCompile(`href="https://app\.ftw\.energy/a/[A-Za-z0-9_-]{22}#[A-Za-z0-9_-]{200,}"`).Match(page) {
-		t.Fatal("the app link does not carry the offer in its fragment")
+	if !regexp.MustCompile(`href="https://app\.ftw\.energy/a#[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{200,}"`).Match(page) {
+		t.Fatal("the app link does not carry the request and the offer in its fragment")
 	}
 	// A registered client is shown by its redirect URI's host.
 	resp2, _ := http.Post(g.srv.URL+"/oauth/register", "application/json", strings.NewReader(`{"client_name":"X","redirect_uris":["https://x.example/cb"]}`))
@@ -1011,18 +1123,33 @@ func TestTheOfferKeyIsPublished(t *testing.T) {
 	}
 }
 
-// A token names its home, so any instance can tell where it belongs; the
-// name proves nothing by itself.
-func TestTokensNameTheirHome(t *testing.T) {
+// A token is routed to its home, so any instance can tell where it belongs,
+// but it shows no id a client could link across tokens: the home is sealed
+// with a fresh nonce each time. The route proves nothing by itself.
+func TestTokensRouteToTheirHomeWithoutNamingIt(t *testing.T) {
 	g := newRig(t)
 	f := g.start(cimdID, cimdBack, "")
 	tk := g.approve(f, cimdID)
-	if TokenHome(tk.Access) != home || TokenHome(tk.Refresh) != home || !strings.HasPrefix(tk.Access, accessPrefix+home+".") {
-		t.Fatalf("tokens %s %s", tk.Access, tk.Refresh)
+	for _, tok := range []string{tk.Access, tk.Refresh} {
+		if h, ok := g.s.TokenHome(tok); !ok || h != home {
+			t.Fatalf("token %s routes to %q", tok, h)
+		}
+		if strings.Contains(tok, home) {
+			t.Fatalf("token %s names its home", tok)
+		}
 	}
-	forged := accessPrefix + home + "." + randomToken(32)
+	route := func(tok string) string { r, _, _ := strings.Cut(tok[len(accessPrefix):], "."); return r }
+	if route(tk.Access) == route(tk.Refresh) {
+		t.Fatal("two tokens share a route")
+	}
+	// A route made with another key, or edited, does not open.
+	other, _ := loadRouteKey(filepath.Join(t.TempDir(), "k"))
+	if _, ok := g.s.TokenHome(other.newToken(accessPrefix, home)); ok {
+		t.Fatal("a route under another key opened")
+	}
+	forged := g.s.route.newToken(accessPrefix, home)
 	if _, aerr := g.bearer(forged); aerr == nil {
-		t.Fatal("a token with the right home and a made-up secret was accepted")
+		t.Fatal("a token with a good route and a made-up secret was accepted")
 	}
 }
 
@@ -1068,24 +1195,35 @@ func TestARefreshCanNarrow(t *testing.T) {
 }
 
 func TestTokenShape(t *testing.T) {
-	good := accessPrefix + home + "." + randomToken(32)
+	k, _ := loadRouteKey(filepath.Join(t.TempDir(), "k"))
+	good := k.newToken(accessPrefix, home)
 	if !tokenShape(good, accessPrefix) {
 		t.Fatal("a token this server makes")
 	}
-	for _, bad := range []string{"", good + "x", strings.Replace(good, ".", "", 1), refreshPrefix + home + "." + randomToken(32),
-		accessPrefix + "HOME." + randomToken(32), accessPrefix + home + "." + strings.Repeat("!", 43), "ftwat_" + strings.Repeat("a", 5000)} {
+	for _, bad := range []string{"", good + "x", strings.Replace(good, ".", "", 1), k.newToken(refreshPrefix, home),
+		accessPrefix + home + "." + randomToken(32), strings.Replace(good, ".", "!.", 1),
+		accessPrefix + strings.Repeat("a", 60) + "." + strings.Repeat("!", 43), "ftwat_" + strings.Repeat("a", 5000)} {
 		if tokenShape(bad, accessPrefix) {
 			t.Errorf("%q passed", bad)
 		}
 	}
 }
 
-// Only clients FTW Cloud knows, by their document's host, are verified.
-func TestVerifiedHosts(t *testing.T) {
-	for host, want := range map[string]bool{"claude.ai": true, "www.claude.ai": true, "chatgpt.com": true, "grok.com": true,
-		"evilclaude.ai": false, "claude.ai.evil.example": false, "example.com": false} {
-		if verifiedHost(host) != want {
-			t.Errorf("%s: %v", host, !want)
+// Only clients FTW Cloud knows, by the exact URL of their document, are
+// verified: not another document on the same host, and not a host that
+// merely ends like it.
+func TestVerifiedClients(t *testing.T) {
+	for id, want := range map[string]bool{
+		"https://claude.ai/oauth/mcp-oauth-client-metadata":              true,
+		"https://claude.ai/oauth/mcp-oauth-client-metadata/":             false,
+		"https://claude.ai/other":                                        false,
+		"https://www.claude.ai/oauth/mcp-oauth-client-metadata":          false,
+		"https://evilclaude.ai/oauth/mcp-oauth-client-metadata":          false,
+		"https://claude.ai.evil.example/oauth/mcp-oauth-client-metadata": false,
+		"https://chatgpt.com/oauth/client.json":                          false,
+	} {
+		if verifiedClient(id) != want {
+			t.Errorf("%s: %v", id, !want)
 		}
 	}
 }

@@ -94,6 +94,10 @@ type Uplink struct {
 	OnHeld   func(home, class string, envelope []byte)
 	OnRoster func(home string, r *cloudwire.Roster)
 	OnGone   func(home, why string, conn uint64)
+	// OnPurge hears that a box purged its home, each time it asks, so what
+	// other parts keep for the home goes with it. It runs on the box's
+	// goroutine and must not block. Set before serving.
+	OnPurge func(home string)
 }
 
 // New builds the handler. key is the service key that signs hello_ok and
@@ -639,6 +643,9 @@ func (c *boxConn) purge() error {
 		c.u.log.Info("home purged at its box's request")
 	} else if grantID == nil {
 		grantID = c.u.registry.TombstoneGrant(c.home)
+	}
+	if c.u.OnPurge != nil {
+		c.u.OnPurge(c.home)
 	}
 	return c.send(purged{AtMs: now.UnixMilli(), What: cloudwire.PurgedHome, GrantID: grantID})
 }

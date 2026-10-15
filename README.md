@@ -140,22 +140,31 @@ to it yet.
   client, the host it is known by and whether FTW Cloud knows it, the
   scopes, ops and caps asked for, the page's code, and an end ten minutes
   out, with no home, since the owner picks it. The page shows the client's name, where the browser goes back, the
-  rights, the code, a QR and `https://app.ftw.energy/a/<request>#<offer>`;
+  rights, the code, a QR and `https://app.ftw.energy/a#<request>.<offer>`;
   the app checks the offer against the offer key it pins by kid, which
   `/.well-known/ftw-offer-key` serves. The box's page or an owner who types
-  the code finds the offer once at `/oauth/requests?code=`. The owner
+  the eight-character code finds the offer once at `/oauth/requests?code=`.
+  A client FTW Cloud knows by the exact URL of its document is shown as
+  verified, and an error goes back to it at once; any other gets a page
+  with a link back. Each endpoint a stranger can call is limited per
+  address and for everyone, before anything is fetched. The owner
   approves in the app or on the box's page; the box lists the agent's key,
   for that client, in the roster it signs (an agent row, with no tunnel of
   its own), and when that roster arrives the
   page, waiting on a server-sent event, returns to the client with a code.
   Only the browser that started the request gets it. Access tokens last 10
-  minutes; refresh tokens rotate, and a reused one revokes its family. A
-  token names its home (`ftwat_<home>.<secret>`) so any instance can route
-  it; the service keeps hashes, never tokens. A token allows the scopes it
+  minutes; refresh tokens rotate, a retry within 5 s works once more, and a
+  later reuse revokes the family, as does a code used twice, even after its
+  consent is gone. A token carries its home sealed with a fresh nonce under
+  the route key (`oauth-route.key`, shared by every instance that routes),
+  so any instance can route it and no client sees an id that links its
+  tokens; the service keeps hashes, never tokens. A token allows the scopes it
   carries that the newest roster still grants, so an owner who narrows a
   grant narrows it at once, and it stops at the agent's end by the
   service's own clock. A roster without the agent ends
-  its tokens and its key.
+  its tokens and its key, and so does a second home listing the same key,
+  or the box purging its home; a key the keys part could not forget stays
+  queued until it has. Only each home's newest roster is applied.
 
 Not built yet:
 

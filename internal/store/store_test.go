@@ -346,3 +346,35 @@ func TestATokenReadsWithinItsDevicesScope(t *testing.T) {
 		t.Fatalf("a token without live read %q", snap.Envelopes)
 	}
 }
+
+// An agent's, support's or the release check's row is never a phone, a
+// watch or a token, whatever else it says: it reaches a home only through
+// the keys part.
+func TestAnAgentRowIsNoPhone(t *testing.T) {
+	c := &clock{t: time.Unix(1_791_820_800, 0)}
+	s := New(c.now)
+	box, _ := s.For(Principal{Kind: Box, Home: "h1"})
+	box.Connected()
+	r := roster(1, protocol.ScopeLiveRead)
+	keyOf := func(b byte) []byte { return bytes.Repeat([]byte{b}, 32) }
+	r.Devices = append(r.Devices,
+		cloudwire.Device{ID: "agent", Key: keyOf(3), Role: protocol.RoleAgent, Tun: true, Epoch: 1,
+			Agent: &cloudwire.Agent{ExpiresAtMs: c.t.Add(time.Hour).UnixMilli()}},
+		cloudwire.Device{ID: "support", Key: keyOf(4), Role: protocol.RoleSupport, Tun: true, Epoch: 1},
+		cloudwire.Device{ID: "release", Key: keyOf(5), Role: protocol.RoleRelease, Tun: true, Epoch: 1},
+		cloudwire.Device{ID: "agentish", Key: keyOf(6), Role: protocol.RoleOwner, Tun: true, Epoch: 1,
+			Agent: &cloudwire.Agent{ExpiresAtMs: c.t.Add(time.Hour).UnixMilli()}},
+	)
+	box.SetRoster(r)
+	for i, id := range []string{"agent", "support", "release", "agentish"} {
+		if _, err := s.For(Principal{Kind: Device, Home: "h1", DeviceKey: keyOf(byte(3 + i))}); !errors.Is(err, ErrDenied) {
+			t.Errorf("%s as a phone: %v", id, err)
+		}
+		if _, err := s.For(Principal{Kind: Token, Home: "h1", DeviceID: id, Epoch: 1}); !errors.Is(err, ErrDenied) {
+			t.Errorf("%s by a token: %v", id, err)
+		}
+	}
+	if _, err := s.For(Principal{Kind: Device, Home: "h1", DeviceKey: ownerKey}); err != nil {
+		t.Fatalf("the owner's phone: %v", err)
+	}
+}

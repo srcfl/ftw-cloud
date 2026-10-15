@@ -1,6 +1,7 @@
 package uplink
 
 import (
+	"sync"
 	"bytes"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -256,6 +257,9 @@ func TestARosterBeyondFTWCloudIsRefused(t *testing.T) {
 // service key, which a box whose first receipt was lost can ask for again.
 func TestPurgeDeletesTheHomeAndSignsAReceipt(t *testing.T) {
 	s := newService(t)
+	var mu sync.Mutex
+	var purged []string
+	s.up.OnPurge = func(home string) { mu.Lock(); purged = append(purged, home); mu.Unlock() }
 	b := newBox(t)
 	_, _ = b.connect(s, nil)
 	r := b.roster(protocol.ScopeLiveRead)
@@ -286,6 +290,12 @@ func TestPurgeDeletesTheHomeAndSignsAReceipt(t *testing.T) {
 	}
 	b.send(cloudwire.MsgBye, cloudwire.Bye{Header: b.header(), Why: cloudwire.ByeRevoked, Purge: true})
 	receipt()
+	// What other parts keep for the home goes too, each time the box asks.
+	mu.Lock()
+	if len(purged) != 2 || purged[0] != b.home || purged[1] != b.home {
+		t.Fatalf("OnPurge heard %v", purged)
+	}
+	mu.Unlock()
 
 	// A purged home's box may say only bye.
 	_ = b.conn.Close()

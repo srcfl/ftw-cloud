@@ -216,6 +216,11 @@ func (h *home) spendLocked(pair []byte, now time.Time) bool {
 }
 
 // byKey matches the roster entry with a device's Noise static key.
+// phoneRow is a roster row a phone, a watch or a token may use.
+func phoneRow(d cloudwire.Device) bool {
+	return d.Agent == nil && d.Role != protocol.RoleAgent && d.Role != protocol.RoleSupport && d.Role != protocol.RoleRelease
+}
+
 func byKey(key []byte) func(cloudwire.Device) bool {
 	return func(d cloudwire.Device) bool { return len(key) == 32 && bytes.Equal(d.Key, key) }
 }
@@ -231,6 +236,11 @@ func (s *Store) access(id string, h *home, match func(cloudwire.Device) bool) (c
 	for _, d := range r.Devices {
 		if !match(d) {
 			continue
+		}
+		// An agent's, support's or the release check's row reaches a home
+		// only through the keys part, never as a phone, a watch or a token.
+		if !phoneRow(d) {
+			return cloudwire.Device{}, nil, false
 		}
 		if s.suspended != nil && s.suspended(id, d.ID, d.Epoch) {
 			return cloudwire.Device{}, nil, false

@@ -18,9 +18,9 @@ import (
 // codeAlphabet makes the short code: no 0/O, 1/I or L to misread.
 const codeAlphabet = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
 
-// codeLen gives about 29 bits. A code finds a request for the box's page and
-// proves nothing: the owner still approves on their own box.
-const codeLen = 6
+// codeLen gives about 39 bits. A code finds a request for the box's page
+// once, and proves nothing: the owner still approves on their own box.
+const codeLen = 8
 
 var challengeRE = regexp.MustCompile(`^[A-Za-z0-9_-]{43}$`)
 
@@ -42,6 +42,14 @@ func (s *Server) serveAuthorize(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	// The limits come before anything is fetched or made: each request may
+	// fetch a client's document and makes a key.
+	if s.limited(&s.authorizeLimit, s.authorizeByIP, r) {
+		w.Header().Set("Retry-After", "10")
+		s.authorizePage(w, http.StatusTooManyRequests, pageError{Title: "Too many requests",
+			Text: "FTW Cloud is busy connecting assistants. Try again in a little while."})
+		return
+	}
 	ctx, cancel := context.WithTimeout(r.Context(), 6*time.Second)
 	defer cancel()
 
@@ -54,6 +62,7 @@ func (s *Server) serveAuthorize(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	redirect := q.Get("redirect_uri")
+	given := redirect != ""
 	if redirect == "" && len(c.RedirectURIs) == 1 {
 		redirect = c.RedirectURIs[0]
 	}
@@ -63,8 +72,19 @@ func (s *Server) serveAuthorize(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	req := authRequest{client: c, redirectURI: redirect, state: q.Get("state")}
+	// An error goes back to a client FTW Cloud knows at once. Any other
+	// client gets a page with a link back to its host, and the person
+	// decides: no stranger's URL can bounce a browser through here before
+	// the owner acts (RFC 9700, 4.11.2).
 	fail := func(code, desc string) {
-		http.Redirect(w, r, authorizationError(redirect, code, desc, req.state), http.StatusFound)
+		back := authorizationError(redirect, code, desc, req.state)
+		if c.Verified {
+			http.Redirect(w, r, back, http.StatusFound)
+			return
+		}
+		u, _ := url.Parse(redirect)
+		s.authorizePage(w, http.StatusBadRequest, pageError{Title: "This request cannot go on",
+			Text: "FTW Cloud cannot connect this assistant: " + desc + ".", Back: back, BackHost: u.Host})
 	}
 	if len(req.state) > 1024 {
 		fail("invalid_request", "state is too long")
@@ -99,10 +119,6 @@ func (s *Server) serveAuthorize(w http.ResponseWriter, r *http.Request) {
 	if len(req.scope) == 0 {
 		req.scope = slices.Clone(ReadScopes)
 	}
-	if !s.authorizeLimit.allow(s.now()) {
-		fail("temporarily_unavailable", "too many requests; try again shortly")
-		return
-	}
 
 	// The agent's key pair comes first; only its public half leaves the
 	// keys part, to be shown to the owner and listed by the box.
@@ -124,11 +140,11 @@ func (s *Server) serveAuthorize(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	con := consent{ClientID: c.ID, ClientName: c.Name, ClientHost: host, Verified: c.Verified, RedirectURI: redirect,
-		State: req.state, Challenge: req.challenge, Scope: strings.Join(req.scope, " "), Resource: Resource,
-		Kid: kid, AgentKey: pub, Created: now, Expires: now.Add(RequestTTL), Status: statusPending}
+		RedirectGiven: given, State: req.state, Challenge: req.challenge, Scope: strings.Join(req.scope, " "),
+		Resource: Resource, Kid: kid, AgentKey: pub, Created: now, Expires: now.Add(RequestTTL), Status: statusPending}
 	for try := 0; ; try++ {
 		con.Code = shortCode()
-		if con.Offer, err = s.signOffer(ctx, buildOffer(con)); err != nil {
+		if con.Offer, err = s.signOffer(ctx, kid, buildOffer(con)); err != nil {
 			s.log.Warn("the keys part could not sign an offer", "err", err)
 			break
 		}
@@ -138,7 +154,8 @@ func (s *Server) serveAuthorize(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if err != nil {
-		_ = s.keys.Forget(ctx, kid)
+		_ = s.st.queueForget(kid, now)
+		s.forget(ctx, kid)
 		fail("server_error", "could not start the request")
 		return
 	}
@@ -163,16 +180,27 @@ func validScope(sc string) bool { return slices.Contains(AllScopes, sc) }
 
 func cookieName(rid string) string { return "__Host-ftw-consent-" + rid[:8] }
 
+// shortCode draws codeLen characters evenly from codeAlphabet: a byte at or
+// above the last whole multiple of the alphabet's size is drawn again.
 func shortCode() string {
-	b := make([]byte, codeLen)
-	if _, err := rand.Read(b); err != nil {
-		panic(err)
+	const limit = 256 - 256%len(codeAlphabet)
+	out := make([]byte, 0, codeLen)
+	b := make([]byte, 2*codeLen)
+	for len(out) < codeLen {
+		if _, err := rand.Read(b); err != nil {
+			panic(err)
+		}
+		for _, x := range b {
+			if int(x) < limit && len(out) < codeLen {
+				out = append(out, codeAlphabet[int(x)%len(codeAlphabet)])
+			}
+		}
 	}
-	for i := range b {
-		b[i] = codeAlphabet[int(b[i])%len(codeAlphabet)]
-	}
-	return string(b)
+	return string(out)
 }
+
+// showCode is the code as the page shows it, in two halves.
+func showCode(code string) string { return code[:codeLen/2] + "-" + code[codeLen/2:] }
 
 // normalizeCode reads a code as an owner may type it.
 func normalizeCode(s string) string {
@@ -269,11 +297,12 @@ func (s *Server) serveRequest(w http.ResponseWriter, r *http.Request) {
 
 // serveRequestByCode finds a request by the code an owner typed on the box's
 // page or in the app, once: a short code cannot carry the agent's key, so
-// it fetches the signed offer. Lookups are rate limited for everyone
-// together, and a code works once: it lasts ten minutes and has about 29
-// bits, and finding one shows only an offer the owner must still approve.
+// it fetches the signed offer. Lookups are rate limited per address and for
+// everyone together, and a code works once: it lasts ten minutes and has
+// about 39 bits, and finding one shows only an offer the owner must still
+// approve.
 func (s *Server) serveRequestByCode(w http.ResponseWriter, r *http.Request) {
-	if !s.lookupLimit.allow(s.now()) {
+	if s.limited(&s.lookupLimit, s.lookupByIP, r) {
 		w.Header().Set("Retry-After", "1")
 		http.Error(w, "too many lookups", http.StatusTooManyRequests)
 		return
@@ -305,13 +334,13 @@ func allowApp(w http.ResponseWriter, r *http.Request) {
 // the person at the computer cancelled.
 func (s *Server) serveDeny(w http.ResponseWriter, r *http.Request) {
 	rid := r.PathValue("rid")
-	c, ok, err := s.st.deny(rid)
+	c, ok, err := s.st.deny(rid, s.now())
 	if err != nil {
 		http.Error(w, "could not deny", http.StatusInternalServerError)
 		return
 	}
 	if ok {
-		_ = s.keys.Forget(r.Context(), c.Kid)
+		s.forget(r.Context(), c.Kid)
 		s.hub.notify(string(hash(rid)))
 	}
 	allowApp(w, r)
@@ -328,7 +357,8 @@ const keepAlive = 20 * time.Second
 
 func (s *Server) serveEvents(w http.ResponseWriter, r *http.Request) {
 	rid := r.PathValue("rid")
-	if _, ok, err := s.st.consentByRID(rid); err != nil || !ok {
+	c, ok, err := s.st.consentByRID(rid)
+	if err != nil || !ok {
 		http.NotFound(w, r)
 		return
 	}
@@ -337,18 +367,35 @@ func (s *Server) serveEvents(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
 		return
 	}
-	// Only the browser that started the request gets the code.
+	// Only the browser that started the request gets the code, and keeps a
+	// stream open: anyone else gets the state once.
 	var browser string
 	if ck, err := r.Cookie(cookieName(rid)); err == nil && s.st.browserMatches(rid, ck.Value) {
 		browser = ck.Value
 	}
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-store")
-	w.Header().Set("X-Accel-Buffering", "no")
-	w.WriteHeader(http.StatusOK)
-
-	wake, done := s.hub.subscribe(string(hash(rid)))
+	head := func() {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("X-Accel-Buffering", "no")
+		w.WriteHeader(http.StatusOK)
+	}
+	if browser == "" {
+		head()
+		s.event(w, rid, "", c)
+		flusher.Flush()
+		return
+	}
+	done, ok := s.streams.open(rid)
+	if !ok {
+		w.Header().Set("Retry-After", "5")
+		http.Error(w, "too many streams", http.StatusTooManyRequests)
+		return
+	}
 	defer done()
+	head()
+
+	wake, unsubscribe := s.hub.subscribe(string(hash(rid)))
+	defer unsubscribe()
 	tick := time.NewTicker(keepAlive)
 	defer tick.Stop()
 	// A pending request's end does not move; once it changes state the

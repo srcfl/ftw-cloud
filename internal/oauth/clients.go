@@ -9,7 +9,10 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
+
+	"github.com/srcfl/ftw/go/protocol"
 )
 
 // client is a client as the authorize and token endpoints see it, from a
@@ -21,8 +24,8 @@ type client struct {
 	// document's URL, which vouches for it, or the client_uri a registration
 	// claimed, which does not.
 	Host string
-	// Verified is a client FTW Cloud knows: a metadata document on one of
-	// verifiedHosts.
+	// Verified is a client FTW Cloud knows: a metadata document at one of
+	// verifiedClients.
 	Verified     bool
 	RedirectURIs []string
 	AuthMethod   string
@@ -33,13 +36,18 @@ var errUnknownClient = errors.New("unknown client")
 
 // resolveClient finds the client a client_id names.
 func (s *Server) resolveClient(ctx context.Context, id string) (client, error) {
+	if id == protocol.SupportClientID {
+		// Support's offers come from its own tooling, never through this
+		// page: the box and the app trust that client id for support.
+		return client{}, errUnknownClient
+	}
 	if isCIMD(id) {
 		md, err := s.fetch.get(ctx, id)
 		if err != nil {
 			return client{}, err
 		}
 		u, _ := url.Parse(id)
-		return client{ID: id, Name: md.ClientName, Host: u.Hostname(), Verified: verifiedHost(u.Hostname()), RedirectURIs: md.RedirectURIs,
+		return client{ID: id, Name: md.ClientName, Host: u.Hostname(), Verified: verifiedClient(id), RedirectURIs: md.RedirectURIs,
 			AuthMethod: authNone}, nil
 	}
 	c, ok, err := s.st.client(id)
@@ -121,7 +129,7 @@ type registration struct {
 }
 
 func (s *Server) serveRegister(w http.ResponseWriter, r *http.Request) {
-	if !s.registerLimit.allow(s.now()) {
+	if s.limited(&s.registerLimit, s.registerByIP, r) {
 		w.Header().Set("Retry-After", "10")
 		registerError(w, http.StatusTooManyRequests, "invalid_client_metadata", "too many registrations; try again shortly")
 		return
@@ -151,12 +159,14 @@ func (s *Server) serveRegister(w http.ResponseWriter, r *http.Request) {
 		registerError(w, http.StatusBadRequest, "invalid_client_metadata", "token_endpoint_auth_method must be none, client_secret_post or client_secret_basic")
 		return
 	}
-	grants := reg.GrantTypes
-	if len(grants) == 0 {
+	// Grants this server does not offer are left out of what it registers
+	// (RFC 7591 lets it replace them), as for a metadata document.
+	grants := intersect(reg.GrantTypes, []string{grantCode, grantRefresh})
+	if len(reg.GrantTypes) == 0 {
 		grants = []string{grantCode}
 	}
-	if !subset(grants, []string{grantCode, grantRefresh}) || !subset(reg.ResponseTypes, []string{"code"}) {
-		registerError(w, http.StatusBadRequest, "invalid_client_metadata", "only authorization_code and refresh_token, with response type code")
+	if !slices.Contains(grants, grantCode) || len(reg.ResponseTypes) > 0 && !slices.Contains(reg.ResponseTypes, "code") {
+		registerError(w, http.StatusBadRequest, "invalid_client_metadata", "the authorization_code grant, with response type code, is required")
 		return
 	}
 	for _, sc := range splitScope(reg.Scope) {

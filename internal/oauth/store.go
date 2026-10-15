@@ -14,7 +14,8 @@ import (
 
 // The authorization server's disk state, in a SQLite file of its own:
 // clients that registered dynamically, consents in progress, the agents
-// owners approved, and the hashes of tokens. No token, code or request id is
+// owners approved, the hashes of tokens and of spent codes, and the keys the
+// keys part has yet to forget. No token, code or request id is
 // stored as itself: each is a random secret held by its bearer, and the file
 // keeps its SHA-256. Deleted rows are overwritten (secure_delete).
 
@@ -48,6 +49,7 @@ CREATE TABLE IF NOT EXISTS requests (
 	client_host TEXT NOT NULL,
 	verified INTEGER NOT NULL,
 	redirect_uri TEXT NOT NULL,
+	redirect_given INTEGER NOT NULL DEFAULT 1,
 	state TEXT NOT NULL,
 	challenge TEXT NOT NULL,
 	scope TEXT NOT NULL,
@@ -81,6 +83,7 @@ CREATE TABLE IF NOT EXISTS agents (
 	created_ms INTEGER NOT NULL,
 	PRIMARY KEY (home, agent)
 );
+CREATE UNIQUE INDEX IF NOT EXISTS agents_key ON agents(agent_key);
 CREATE TABLE IF NOT EXISTS tokens (
 	hash BLOB PRIMARY KEY,
 	kind TEXT NOT NULL,
@@ -92,10 +95,20 @@ CREATE TABLE IF NOT EXISTS tokens (
 	resource TEXT NOT NULL,
 	expires_ms INTEGER NOT NULL,
 	used INTEGER NOT NULL DEFAULT 0,
+	used_ms INTEGER NOT NULL DEFAULT 0,
 	FOREIGN KEY (home, agent) REFERENCES agents(home, agent) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS tokens_family ON tokens(family);
-CREATE INDEX IF NOT EXISTS tokens_agent ON tokens(home, agent);`)
+CREATE INDEX IF NOT EXISTS tokens_agent ON tokens(home, agent);
+CREATE TABLE IF NOT EXISTS spent_codes (
+	hash BLOB PRIMARY KEY,
+	family BLOB NOT NULL,
+	expires_ms INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS forgets (
+	kid TEXT PRIMARY KEY,
+	at_ms INTEGER NOT NULL
+);`)
 	if err != nil {
 		_ = db.Close()
 		return nil, err
@@ -174,48 +187,56 @@ type consent struct {
 	ClientID    string
 	ClientName  string
 	ClientHost  string
-	Verified    bool // a client FTW Cloud knows (verifiedHosts)
+	Verified    bool // a client FTW Cloud knows (verifiedClients)
 	RedirectURI string
-	State       string
-	Challenge   string
-	Scope       string
-	Resource    string
-	Kid         string
-	AgentKey    []byte
-	Created     time.Time
-	Expires     time.Time
-	Status      string
-	Home        string
-	Agent       string
-	Granted     string
-	Shard       string
+	// RedirectGiven is a redirect_uri the authorize request named, which
+	// the token request must then name too.
+	RedirectGiven bool
+	State         string
+	Challenge     string
+	Scope         string
+	Resource      string
+	Kid           string
+	AgentKey      []byte
+	Created       time.Time
+	Expires       time.Time
+	Status        string
+	Home          string
+	Agent         string
+	Granted       string
+	Shard         string
 	// Offer is the signed grant offer, base64url, as the link carries it.
 	Offer string
 }
 
-const consentCols = `code, client_id, client_name, client_host, verified, redirect_uri, state, challenge, scope, resource,
-	kid, agent_key, created_ms, expires_ms, status, home, agent, granted, shard, offer`
+const consentCols = `code, client_id, client_name, client_host, verified, redirect_uri, redirect_given, state, challenge, scope,
+	resource, kid, agent_key, created_ms, expires_ms, status, home, agent, granted, shard, offer`
 
-func scanConsent(row interface{ Scan(...any) error }) (consent, error) {
+func scanConsent(row interface{ Scan(...any) error }, extra ...any) (consent, error) {
 	var c consent
-	var verified int
+	var verified, given int
 	var created, expires int64
-	err := row.Scan(&c.Code, &c.ClientID, &c.ClientName, &c.ClientHost, &verified, &c.RedirectURI, &c.State, &c.Challenge,
-		&c.Scope, &c.Resource, &c.Kid, &c.AgentKey, &created, &expires, &c.Status, &c.Home, &c.Agent, &c.Granted, &c.Shard, &c.Offer)
-	c.Verified, c.Created, c.Expires = verified == 1, time.UnixMilli(created), time.UnixMilli(expires)
+	dest := append(extra, &c.Code, &c.ClientID, &c.ClientName, &c.ClientHost, &verified, &c.RedirectURI, &given, &c.State,
+		&c.Challenge, &c.Scope, &c.Resource, &c.Kid, &c.AgentKey, &created, &expires, &c.Status, &c.Home, &c.Agent, &c.Granted,
+		&c.Shard, &c.Offer)
+	err := row.Scan(dest...)
+	c.Verified, c.RedirectGiven, c.Created, c.Expires = verified == 1, given == 1, time.UnixMilli(created), time.UnixMilli(expires)
 	return c, err
 }
 
-func (s *store) putConsent(rid, browser string, c consent) error {
-	verified := 0
-	if c.Verified {
-		verified = 1
+func boolInt(b bool) int {
+	if b {
+		return 1
 	}
+	return 0
+}
+
+func (s *store) putConsent(rid, browser string, c consent) error {
 	_, err := s.db.Exec(`INSERT INTO requests (rid, browser, `+consentCols+`)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		hash(rid), hash(browser), c.Code, c.ClientID, c.ClientName, c.ClientHost, verified, c.RedirectURI, c.State,
-		c.Challenge, c.Scope, c.Resource, c.Kid, c.AgentKey, c.Created.UnixMilli(), c.Expires.UnixMilli(), c.Status,
-		c.Home, c.Agent, c.Granted, c.Shard, c.Offer)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		hash(rid), hash(browser), c.Code, c.ClientID, c.ClientName, c.ClientHost, boolInt(c.Verified), c.RedirectURI,
+		boolInt(c.RedirectGiven), c.State, c.Challenge, c.Scope, c.Resource, c.Kid, c.AgentKey, c.Created.UnixMilli(),
+		c.Expires.UnixMilli(), c.Status, c.Home, c.Agent, c.Granted, c.Shard, c.Offer)
 	return err
 }
 
@@ -257,14 +278,10 @@ func (s *store) browserMatches(rid, browser string) bool {
 func (s *store) pendingByKey(key []byte, now time.Time) (ridHash []byte, c consent, ok bool, err error) {
 	row := s.db.QueryRow(`SELECT rid, `+consentCols+` FROM requests WHERE agent_key = ? AND status = ? AND expires_ms > ?`,
 		key, statusPending, now.UnixMilli())
-	var verified int
-	var created, expires int64
-	err = row.Scan(&ridHash, &c.Code, &c.ClientID, &c.ClientName, &c.ClientHost, &verified, &c.RedirectURI, &c.State, &c.Challenge,
-		&c.Scope, &c.Resource, &c.Kid, &c.AgentKey, &created, &expires, &c.Status, &c.Home, &c.Agent, &c.Granted, &c.Shard, &c.Offer)
+	c, err = scanConsent(row, &ridHash)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, c, false, nil
 	}
-	c.Verified, c.Created, c.Expires = verified == 1, time.UnixMilli(created), time.UnixMilli(expires)
 	return ridHash, c, err == nil, err
 }
 
@@ -295,11 +312,10 @@ func (s *store) approve(ridHash []byte, c consent, g agentGrant, now time.Time) 
 	if n, _ := res.RowsAffected(); n != 1 {
 		return errGone
 	}
+	// An agent is its key: a row is never taken over by another key, even
+	// one whose 48-bit id is the same.
 	if _, err := tx.Exec(`INSERT INTO agents (home, agent, agent_key, kid, client_id, scope, ops, caps, shard, expires_ms, created_ms)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-		ON CONFLICT (home, agent) DO UPDATE SET agent_key = excluded.agent_key, kid = excluded.kid,
-			client_id = excluded.client_id, scope = excluded.scope, ops = excluded.ops, caps = excluded.caps,
-			shard = excluded.shard, expires_ms = excluded.expires_ms`,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		c.Home, c.Agent, c.AgentKey, c.Kid, c.ClientID, strings.Join(g.Scopes, " "), strings.Join(g.Ops, " "), string(caps),
 		c.Shard, g.Expires.UnixMilli(), now.UnixMilli()); err != nil {
 		return err
@@ -307,17 +323,28 @@ func (s *store) approve(ridHash []byte, c consent, g agentGrant, now time.Time) 
 	return tx.Commit()
 }
 
-func (s *store) deny(rid string) (consent, bool, error) {
+// deny ends a pending consent and queues its key to be forgotten.
+func (s *store) deny(rid string, now time.Time) (consent, bool, error) {
 	c, ok, err := s.consentByRID(rid)
 	if err != nil || !ok || c.Status != statusPending {
 		return c, false, err
 	}
-	res, err := s.db.Exec(`UPDATE requests SET status = ? WHERE rid = ? AND status = ?`, statusDenied, hash(rid), statusPending)
+	tx, err := s.db.Begin()
 	if err != nil {
 		return c, false, err
 	}
-	n, _ := res.RowsAffected()
-	return c, n == 1, nil
+	defer tx.Rollback()
+	res, err := tx.Exec(`UPDATE requests SET status = ? WHERE rid = ? AND status = ?`, statusDenied, hash(rid), statusPending)
+	if err != nil {
+		return c, false, err
+	}
+	if n, _ := res.RowsAffected(); n != 1 {
+		return c, false, nil
+	}
+	if err := queueForget(tx, c.Kid, now); err != nil {
+		return c, false, err
+	}
+	return c, true, tx.Commit()
 }
 
 // issueCode gives an approved consent a new authorization code, in place of
@@ -335,7 +362,9 @@ func (s *store) issueCode(rid, code string, expires time.Time) error {
 }
 
 // redeem spends an authorization code once. A code presented a second time
-// is reported as reused, and the caller revokes what the first use got.
+// is reported as reused, and the caller revokes what the first use got:
+// the spent code's hash outlives its consent for as long as those tokens
+// may live.
 func (s *store) redeem(code string, now time.Time) (c consent, ridHash []byte, reused bool, err error) {
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -344,19 +373,18 @@ func (s *store) redeem(code string, now time.Time) (c consent, ridHash []byte, r
 	defer tx.Rollback()
 	var used int
 	var ms int64
-	row := tx.QueryRow(`SELECT rid, authz_used, authz_ms, `+consentCols+` FROM requests WHERE authz = ?`, hash(code))
-	var verified int
-	var created, expires int64
-	err = row.Scan(&ridHash, &used, &ms, &c.Code, &c.ClientID, &c.ClientName, &c.ClientHost, &verified, &c.RedirectURI,
-		&c.State, &c.Challenge, &c.Scope, &c.Resource, &c.Kid, &c.AgentKey, &created, &expires, &c.Status, &c.Home,
-		&c.Agent, &c.Granted, &c.Shard, &c.Offer)
+	c, err = scanConsent(tx.QueryRow(`SELECT rid, authz_used, authz_ms, `+consentCols+` FROM requests WHERE authz = ?`,
+		hash(code)), &ridHash, &used, &ms)
 	if errors.Is(err, sql.ErrNoRows) {
+		var family []byte
+		if tx.QueryRow(`SELECT family FROM spent_codes WHERE hash = ?`, hash(code)).Scan(&family) == nil {
+			return c, family, true, errGone
+		}
 		return c, nil, false, errGone
 	}
 	if err != nil {
 		return c, nil, false, err
 	}
-	c.Verified, c.Created, c.Expires = verified == 1, time.UnixMilli(created), time.UnixMilli(expires)
 	if used != 0 {
 		return c, ridHash, true, errGone
 	}
@@ -364,6 +392,10 @@ func (s *store) redeem(code string, now time.Time) (c consent, ridHash []byte, r
 		return c, ridHash, false, errGone
 	}
 	if _, err := tx.Exec(`UPDATE requests SET authz_used = 1 WHERE authz = ?`, hash(code)); err != nil {
+		return c, nil, false, err
+	}
+	if _, err := tx.Exec(`INSERT OR REPLACE INTO spent_codes (hash, family, expires_ms) VALUES (?, ?, ?)`,
+		hash(code), ridHash, now.Add(RefreshTTL).UnixMilli()); err != nil {
 		return c, nil, false, err
 	}
 	return c, ridHash, false, tx.Commit()
@@ -410,6 +442,15 @@ func (s *store) agent(home, agent string) (agentRow, bool, error) {
 	return a, err == nil, err
 }
 
+// agentByKey finds the agent a key was approved as, in whatever home.
+func (s *store) agentByKey(key []byte) (agentRow, bool, error) {
+	a, err := scanAgent(s.db.QueryRow(`SELECT `+agentCols+` FROM agents WHERE agent_key = ?`, key))
+	if errors.Is(err, sql.ErrNoRows) {
+		return a, false, nil
+	}
+	return a, err == nil, err
+}
+
 func (s *store) agentsOf(home string) ([]agentRow, error) {
 	rows, err := s.db.Query(`SELECT `+agentCols+` FROM agents WHERE home = ?`, home)
 	if err != nil {
@@ -435,9 +476,68 @@ func (s *store) setGrant(home, agent string, g agentGrant) error {
 	return err
 }
 
-// dropAgent deletes an agent and, by the foreign key, every token it holds.
-func (s *store) dropAgent(home, agent string) error {
-	_, err := s.db.Exec(`DELETE FROM agents WHERE home = ? AND agent = ?`, home, agent)
+// dropAgent deletes an agent and, by the foreign key, every token it holds,
+// and queues its key to be forgotten, in one transaction.
+func (s *store) dropAgent(home, agent, kid string) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`DELETE FROM agents WHERE home = ? AND agent = ?`, home, agent); err != nil {
+		return err
+	}
+	if err := queueForget(tx, kid, time.Now()); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// dropRequests deletes the consents that ended in a home.
+func (s *store) dropRequests(home string) error {
+	_, err := s.db.Exec(`DELETE FROM requests WHERE home = ?`, home)
+	return err
+}
+
+// --------------------------------------------------------------------------
+// Keys to forget
+// --------------------------------------------------------------------------
+
+type execer interface {
+	Exec(query string, args ...any) (sql.Result, error)
+}
+
+// queueForget records a key the keys part must delete. It stays queued
+// until the keys part has done it.
+func queueForget(x execer, kid string, now time.Time) error {
+	if kid == "" {
+		return nil
+	}
+	_, err := x.Exec(`INSERT OR IGNORE INTO forgets (kid, at_ms) VALUES (?, ?)`, kid, now.UnixMilli())
+	return err
+}
+
+func (s *store) queueForget(kid string, now time.Time) error { return queueForget(s.db, kid, now) }
+
+func (s *store) toForget() ([]string, error) {
+	rows, err := s.db.Query(`SELECT kid FROM forgets ORDER BY at_ms LIMIT 1000`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var kids []string
+	for rows.Next() {
+		var kid string
+		if err := rows.Scan(&kid); err != nil {
+			return nil, err
+		}
+		kids = append(kids, kid)
+	}
+	return kids, rows.Err()
+}
+
+func (s *store) forgotten(kid string) error {
+	_, err := s.db.Exec(`DELETE FROM forgets WHERE kid = ?`, kid)
 	return err
 }
 
@@ -496,11 +596,24 @@ func (s *store) token(tok string) (tokenRow, bool, error) {
 	return t, err == nil, err
 }
 
-// rotate spends a refresh token. False means it was spent before: a second
-// use of one refresh token is theft or a bug, and the caller revokes its
-// family.
-func (s *store) rotate(tok string) (bool, error) {
-	res, err := s.db.Exec(`UPDATE tokens SET used = 1 WHERE hash = ? AND kind = ? AND used = 0`, hash(tok), kindRefresh)
+// refreshGrace is how long a spent refresh token works once more: a client
+// whose answer was lost on the way may try again.
+const refreshGrace = 5 * time.Second
+
+// rotate spends a refresh token. False means it was spent before, outside
+// the grace: a second use of one refresh token is theft or a bug, and the
+// caller revokes its family.
+func (s *store) rotate(tok string, now time.Time) (bool, error) {
+	res, err := s.db.Exec(`UPDATE tokens SET used = 1, used_ms = ? WHERE hash = ? AND kind = ? AND used = 0`,
+		now.UnixMilli(), hash(tok), kindRefresh)
+	if err != nil {
+		return false, err
+	}
+	if n, _ := res.RowsAffected(); n == 1 {
+		return true, nil
+	}
+	res, err = s.db.Exec(`UPDATE tokens SET used = 2 WHERE hash = ? AND kind = ? AND used = 1 AND used_ms > ?`,
+		hash(tok), kindRefresh, now.Add(-refreshGrace).UnixMilli())
 	if err != nil {
 		return false, err
 	}
@@ -525,27 +638,40 @@ func (s *store) revokeToken(tok string) error {
 	return err
 }
 
-// sweep deletes what has run out: tokens, and consents a while after they
-// ended. It returns the key ids of consents that ended without approval,
-// for the keys part to forget.
-func (s *store) sweep(now time.Time) ([]string, error) {
-	if _, err := s.db.Exec(`DELETE FROM tokens WHERE expires_ms <= ?`, now.UnixMilli()); err != nil {
-		return nil, err
-	}
-	rows, err := s.db.Query(`SELECT kid FROM requests WHERE status != ? AND expires_ms <= ?`, statusApproved, now.UnixMilli())
+// clientIdle is how long a registered client is kept without an agent.
+const clientIdle = 24 * time.Hour
+
+// sweep deletes what has run out: tokens, spent codes, consents a while
+// after they ended, and registered clients that never got an agent. The
+// keys of consents that ended without approval are queued to be forgotten.
+func (s *store) sweep(now time.Time) error {
+	ms := now.UnixMilli()
+	tx, err := s.db.Begin()
 	if err != nil {
-		return nil, err
+		return err
 	}
-	var kids []string
-	for rows.Next() {
-		var kid string
-		if rows.Scan(&kid) == nil {
-			kids = append(kids, kid)
+	defer tx.Rollback()
+	for _, q := range []string{
+		`DELETE FROM tokens WHERE expires_ms <= ?`,
+		`DELETE FROM spent_codes WHERE expires_ms <= ?`,
+	} {
+		if _, err := tx.Exec(q, ms); err != nil {
+			return err
 		}
 	}
-	_ = rows.Close()
-	_, err = s.db.Exec(`DELETE FROM requests WHERE expires_ms <= ?`, now.UnixMilli())
-	return kids, err
+	if _, err := tx.Exec(`INSERT OR IGNORE INTO forgets (kid, at_ms)
+		SELECT kid, ? FROM requests WHERE status != ? AND expires_ms <= ?`, ms, statusApproved, ms); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM requests WHERE expires_ms <= ?`, ms); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM clients WHERE created_ms <= ?
+		AND client_id NOT IN (SELECT client_id FROM agents) AND client_id NOT IN (SELECT client_id FROM requests)`,
+		now.Add(-clientIdle).UnixMilli()); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // splitScope reads a space-separated scope parameter.

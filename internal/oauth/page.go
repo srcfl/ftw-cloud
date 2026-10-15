@@ -35,13 +35,17 @@ type pageError struct {
 	Nonce string
 	Title string
 	Text  string
+	// Back is the client's error response, as a link the person may follow
+	// to BackHost.
+	Back     string
+	BackHost string
 }
 
 func (s *Server) consentPage(w http.ResponseWriter, rid string, c consent) {
 	u, _ := url.Parse(c.RedirectURI)
 	d := pageData{Nonce: randomToken(16), RID: rid, Name: c.ClientName, Host: c.ClientHost, Verified: c.Verified, FromDocument: isCIMD(c.ClientID),
 		RedirectHost: u.Host, Local: u.Scheme == "http" && isLoopback(u.Hostname()),
-		Code: c.Code[:3] + "-" + c.Code[3:], Link: appLink(rid, c.Offer)}
+		Code: showCode(c.Code), Link: appLink(rid, c.Offer)}
 	for _, sc := range splitScope(c.Scope) {
 		d.Scopes = append(d.Scopes, scopeWords[sc])
 		if !slices.Contains(ReadScopes, sc) {
@@ -70,6 +74,7 @@ func pageHeaders(w http.ResponseWriter, nonce string) {
 	h.Set("X-Frame-Options", "DENY")
 	h.Set("Referrer-Policy", "no-referrer")
 	h.Set("X-Content-Type-Options", "nosniff")
+	h.Set("Strict-Transport-Security", "max-age=31536000")
 }
 
 // qrSVG draws text as a QR code, dark on light whatever the page's theme,
@@ -113,7 +118,7 @@ button{font:inherit;background:none;border:1px solid var(--line);color:var(--fg)
 var consentTmpl = template.Must(template.New("consent").Parse(`<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Connect an assistant · FTW Cloud</title><style nonce="{{.Nonce}}">` + pageStyle + `</style></head>
-<body><main id="main" data-rid="{{.RID}}">
+<body><main id="main" data-rid="{{.RID}}" data-verified="{{.Verified}}">
 <h1>Let {{.Name}} into your home?</h1>
 <p class="muted">{{if .Verified}}A client FTW Cloud knows, from {{.Host}}.{{else if .FromDocument}}From {{.Host}}. FTW Cloud does not know this client: check the name and the address.{{else}}This name is what the assistant registered with. FTW Cloud has not checked it.{{end}}</p>
 <div class="card">
@@ -132,17 +137,22 @@ var consentTmpl = template.Must(template.New("consent").Parse(`<!doctype html>
 </div>
 </div>
 <p id="status" role="status">Waiting for your approval…</p>
+<p><a id="back" class="button" hidden>Go back to {{.RedirectHost}}</a></p>
 <p><button id="cancel" type="button">Cancel</button></p>
 <noscript><p class="warn">This page needs JavaScript to hear your approval.</p></noscript>
 </main>
 <script nonce="{{.Nonce}}">
 (function(){
-  var rid=document.getElementById('main').dataset.rid, status=document.getElementById('status');
+  var main=document.getElementById('main'), rid=main.dataset.rid, verified=main.dataset.verified==='true';
+  var status=document.getElementById('status'), back=document.getElementById('back');
   var es=new EventSource('/oauth/requests/'+encodeURIComponent(rid)+'/events');
-  function go(e,text){var d={};try{d=JSON.parse(e.data)}catch(_){}es.close();status.textContent=text;if(d.redirect){location.replace(d.redirect)}}
-  es.addEventListener('approved',function(e){go(e,'Approved. Going back…')});
-  es.addEventListener('denied',function(e){go(e,'Not approved.')});
-  es.addEventListener('expired',function(e){go(e,'This request ran out. Connect again from the assistant.')});
+  // follow: after the owner acted, go back at once; otherwise a client
+  // FTW Cloud does not know gets a link, and the person decides.
+  function go(e,text,follow){var d={};try{d=JSON.parse(e.data)}catch(_){}es.close();status.textContent=text;
+    if(!d.redirect){return}if(follow||verified){location.replace(d.redirect)}else{back.href=d.redirect;back.hidden=false}}
+  es.addEventListener('approved',function(e){go(e,'Approved. Going back…',true)});
+  es.addEventListener('denied',function(e){go(e,'Not approved.',true)});
+  es.addEventListener('expired',function(e){go(e,'This request ran out. Connect again from the assistant.',false)});
   document.getElementById('cancel').addEventListener('click',function(){
     fetch('/oauth/requests/'+encodeURIComponent(rid)+'/deny',{method:'POST'});
   });
@@ -153,4 +163,5 @@ var consentTmpl = template.Must(template.New("consent").Parse(`<!doctype html>
 var errorTmpl = template.Must(template.New("error").Parse(`<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Connect an assistant · FTW Cloud</title><style nonce="{{.Nonce}}">` + pageStyle + `</style></head>
-<body><main><h1>{{.Title}}</h1><p>{{.Text}}</p></main></body></html>`))
+<body><main><h1>{{.Title}}</h1><p>{{.Text}}</p>
+{{if .Back}}<p><a class="button" href="{{.Back}}">Go back to {{.BackHost}}</a></p>{{end}}</main></body></html>`))

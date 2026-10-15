@@ -3,6 +3,7 @@ package oauth
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"net/netip"
@@ -47,6 +48,7 @@ func TestPublicAddresses(t *testing.T) {
 		"127.0.0.1", "10.1.2.3", "172.16.0.1", "192.168.1.40", "169.254.169.254", "100.64.0.1", "0.0.0.0",
 		"224.0.0.1", "255.255.255.255", "198.18.0.1", "192.0.2.1", "::1", "::", "fe80::1", "fd00::1", "fc00::1",
 		"::ffff:10.0.0.1", "::ffff:169.254.169.254", "64:ff9b::a00:1", "2002:a00:1::", "2001:db8::1", "ff02::1",
+		"::a00:1", "::a9fe:a9fe", "::1.1.1.1",
 	} {
 		if publicAddr(netip.MustParseAddr(s)) {
 			t.Errorf("%s counts as public", s)
@@ -193,7 +195,7 @@ func TestCIMDServerMisbehaviour(t *testing.T) {
 func TestCacheFor(t *testing.T) {
 	for cc, want := range map[string]time.Duration{
 		"":                     cimdCacheNone,
-		"no-store":             0,
+		"no-store":             cimdCacheMin,
 		"max-age=0":            cimdCacheMin,
 		"public, max-age=3600": time.Hour,
 		"max-age=999999999":    cimdCacheMax,
@@ -211,5 +213,78 @@ func TestCIMDIgnoresProxies(t *testing.T) {
 	f := newFetcher(nil)
 	if f.client.Transport.(*http.Transport).Proxy != nil {
 		t.Fatal("the fetcher reads a proxy")
+	}
+}
+
+// Fetches are capped per host, so one host cannot make the service fetch
+// for it again and again; a refusal of that kind is not cached.
+func TestCIMDFetchesPerHostAreCapped(t *testing.T) {
+	g := newRig(t)
+	g.s.fetch.hostBurst, g.s.fetch.hostRate = 2, 0.0001
+	var errs []error
+	for i := range 3 {
+		_, err := g.s.fetch.get(context.Background(), fmt.Sprintf("https://example.com/c%d.json", i))
+		errs = append(errs, err)
+	}
+	if errs[2] == nil || !strings.Contains(errs[2].Error(), "too many fetches") {
+		t.Fatalf("the third fetch from one host: %v", errs)
+	}
+	// A cached document needs no fetch.
+	if _, err := g.s.fetch.get(context.Background(), "https://example.com/c0.json"); err == nil ||
+		strings.Contains(err.Error(), "too many fetches") {
+		t.Fatalf("a cached failure was fetched again: %v", err)
+	}
+}
+
+// Failures have a small cache of their own: many of them do not push a
+// good document out, and the good one is not fetched again.
+func TestFailuresDoNotPushOutDocuments(t *testing.T) {
+	g := newRig(t)
+	var hits atomic.Int32
+	inner := g.cimd.Config.Handler
+	g.cimd.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		inner.ServeHTTP(w, r)
+	})
+	if _, err := g.s.fetch.get(context.Background(), cimdID); err != nil {
+		t.Fatal(err)
+	}
+	for i := range cimdFailedSize * 2 {
+		_, _ = g.s.fetch.get(context.Background(), fmt.Sprintf("https://example.com/missing%d.json", i))
+	}
+	before := hits.Load()
+	if _, err := g.s.fetch.get(context.Background(), cimdID); err != nil || hits.Load() != before {
+		t.Fatalf("the good document was pushed out: %v, %d fetches", err, hits.Load()-before)
+	}
+	g.s.fetch.mu.Lock()
+	n := len(g.s.fetch.failed)
+	g.s.fetch.mu.Unlock()
+	if n > cimdFailedSize {
+		t.Fatalf("%d failures kept", n)
+	}
+}
+
+// Claude's own document, as it was served on 15 Oct 2026, lists a grant
+// this server does not offer. It is accepted; the client gets the code and
+// refresh grants.
+func TestClaudesDocumentIsAccepted(t *testing.T) {
+	const id = "https://claude.ai/oauth/mcp-oauth-client-metadata"
+	doc := `{"client_id":"https://claude.ai/oauth/mcp-oauth-client-metadata","client_name":"Claude","client_uri":"https://claude.ai",` +
+		`"redirect_uris":["https://claude.ai/api/mcp/auth_callback"],"grant_types":["authorization_code","refresh_token",` +
+		`"urn:ietf:params:oauth:grant-type:jwt-bearer"],"response_types":["code"],"token_endpoint_auth_method":"none"}`
+	md, err := parseMetadata([]byte(doc), id)
+	if err != nil || md.ClientName != "Claude" || md.RedirectURIs[0] != "https://claude.ai/api/mcp/auth_callback" {
+		t.Fatalf("%+v %v", md, err)
+	}
+	if !verifiedClient(id) {
+		t.Fatal("Claude is not on the list")
+	}
+	for _, bad := range []string{
+		`{"client_id":"` + id + `","client_name":"X","redirect_uris":["https://x.example/cb"],"grant_types":["client_credentials"]}`,
+		`{"client_id":"` + id + `","client_name":"X","redirect_uris":["https://x.example/cb"],"response_types":["token"]}`,
+	} {
+		if _, err := parseMetadata([]byte(bad), id); err == nil {
+			t.Errorf("accepted %s", bad)
+		}
 	}
 }

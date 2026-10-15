@@ -5,7 +5,6 @@ import (
 	"encoding/base64"
 	"net/http"
 	"slices"
-	"strings"
 	"sync"
 
 	"github.com/fxamacker/cbor/v2"
@@ -57,7 +56,7 @@ func buildOffer(c consent) protocol.GrantOffer {
 
 // signOffer encodes and signs an offer as the contract's SignedOffer
 // {o, kid, sig}, base64url, for the link's fragment and the code lookup.
-func (s *Server) signOffer(ctx context.Context, o protocol.GrantOffer) (string, error) {
+func (s *Server) signOffer(ctx context.Context, kid string, o protocol.GrantOffer) (string, error) {
 	pub, err := s.offerPub(ctx)
 	if err != nil {
 		return "", err
@@ -66,7 +65,7 @@ func (s *Server) signOffer(ctx context.Context, o protocol.GrantOffer) (string, 
 	if err != nil {
 		return "", err
 	}
-	sig, err := s.keys.SignOffer(ctx, raw)
+	sig, err := s.keys.SignOffer(ctx, kid, raw)
 	if err != nil {
 		return "", err
 	}
@@ -95,25 +94,20 @@ func (s *Server) offerPub(ctx context.Context) ([]byte, error) {
 	return pub, nil
 }
 
-// appLink is the universal link the QR and the button carry: the request
-// id in the path, for the app's answer, and the signed offer in the
-// fragment, which no server sees.
-func appLink(rid, offer string) string { return AppLink + rid + "#" + offer }
+// appLink is the universal link the QR and the button carry. Its fragment,
+// which no server sees, holds the request id, a dot, and the signed offer;
+// neither is base64url's alphabet's dot.
+func appLink(rid, offer string) string { return AppLink + "#" + rid + "." + offer }
 
-// verifiedHosts are clients FTW Cloud knows by the host of their metadata
-// document. A client from one of them is shown as verified; any other is
-// shown by its host and the name it gives itself.
-var verifiedHosts = []string{"claude.ai", "claude.com", "anthropic.com", "chatgpt.com", "openai.com", "grok.com", "x.ai"}
-
-func verifiedHost(host string) bool {
-	host = strings.ToLower(host)
-	for _, h := range verifiedHosts {
-		if host == h || strings.HasSuffix(host, "."+h) {
-			return true
-		}
-	}
-	return false
+// verifiedClients are clients FTW Cloud knows, by the exact URL of their
+// metadata document. A client on the list is shown as verified; any other
+// is shown by its host and the name it gives itself. An entry is added only
+// once its document has been read at that URL and names it.
+var verifiedClients = []string{
+	"https://claude.ai/oauth/mcp-oauth-client-metadata", // read 15 Oct 2026
 }
+
+func verifiedClient(id string) bool { return slices.Contains(verifiedClients, id) }
 
 // offerKey serves the offer key's public half, so anyone can check what the
 // app pins.
