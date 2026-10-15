@@ -23,6 +23,31 @@ const (
 	refreshPrefix = "ftwrt_"
 )
 
+// tokenShape is a token as this server makes one: the prefix, a home id, a
+// dot and 43 characters of base64url. Anything else is refused before the
+// store is asked.
+func tokenShape(tok, prefix string) bool {
+	rest, ok := strings.CutPrefix(tok, prefix)
+	if !ok {
+		return false
+	}
+	home, secret, ok := strings.Cut(rest, ".")
+	if !ok || len(home) == 0 || len(home) > 64 || len(secret) != 43 {
+		return false
+	}
+	for _, c := range home {
+		if !(c >= 'a' && c <= 'z' || c >= '0' && c <= '9') {
+			return false
+		}
+	}
+	for _, c := range secret {
+		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '-' || c == '_') {
+			return false
+		}
+	}
+	return true
+}
+
 // TokenHome is the home a token names, or "" for something else. It
 // proves nothing: only the stored hash does.
 func TokenHome(tok string) string {
@@ -37,6 +62,7 @@ func TokenHome(tok string) string {
 }
 
 func (s *Server) serveToken(w http.ResponseWriter, r *http.Request) {
+	readDeadline(w)
 	r.Body = http.MaxBytesReader(w, r.Body, 16<<10)
 	if err := r.ParseForm(); err != nil {
 		tokenError(w, http.StatusBadRequest, "invalid_request", "the body is not a form")
@@ -184,6 +210,7 @@ func tokenError(w http.ResponseWriter, status int, code, desc string) {
 // serveRevoke is RFC 7009: revoking a refresh token revokes its family. It
 // answers 200 whether or not the token was known.
 func (s *Server) serveRevoke(w http.ResponseWriter, r *http.Request) {
+	readDeadline(w)
 	r.Body = http.MaxBytesReader(w, r.Body, 16<<10)
 	if err := r.ParseForm(); err != nil {
 		tokenError(w, http.StatusBadRequest, "invalid_request", "the body is not a form")
@@ -226,9 +253,11 @@ type Subject struct {
 // SubjectAgent is a personal agent an owner approved.
 const SubjectAgent = "agent"
 
-// Grant is what one valid access token allows: the rights the box grants
-// its agent now, as the newest roster lists them. An owner who narrows the
-// grant narrows the token at once; one who widens it widens the token too.
+// Grant is what one valid access token allows: the scopes the token
+// carries that the box still grants its agent, as the newest roster lists
+// them. An owner who narrows the grant narrows the token at once; wider
+// rights need a new consent, so a token never holds more than its client
+// was given.
 type Grant struct {
 	Subject  Subject
 	ClientID string
@@ -263,7 +292,11 @@ func (s *Server) Authenticate(r *http.Request) (*Grant, *AuthError) {
 		return nil, &AuthError{Status: http.StatusUnauthorized, Scope: strings.Join(ReadScopes, " ")}
 	}
 	invalid := &AuthError{Status: http.StatusUnauthorized, Code: "invalid_token", Desc: "the access token is not valid"}
-	t, ok, err := s.st.token(strings.TrimSpace(tok))
+	tok = strings.TrimSpace(tok)
+	if !tokenShape(tok, accessPrefix) {
+		return nil, invalid
+	}
+	t, ok, err := s.st.token(tok)
 	if err != nil || !ok || t.Kind != kindAccess || !s.now().Before(t.Expires) {
 		return nil, invalid
 	}
@@ -279,7 +312,8 @@ func (s *Server) Authenticate(r *http.Request) (*Grant, *AuthError) {
 	}
 	return &Grant{
 		Subject:  Subject{Kind: SubjectAgent, Shard: a.Shard, Home: a.Home, Agent: a.Agent, Key: a.Key, Kid: a.Kid},
-		ClientID: t.ClientID, Scopes: a.Scopes, Ops: a.Ops, Caps: a.Caps, Expires: t.Expires, AgentExpires: a.Expires,
+		ClientID: t.ClientID, Scopes: intersect(splitScope(t.Scope), a.Scopes), Ops: a.Ops, Caps: a.Caps,
+		Expires: t.Expires, AgentExpires: a.Expires,
 	}, nil
 }
 
@@ -308,4 +342,11 @@ func Challenge(w http.ResponseWriter, e *AuthError) {
 func InsufficientScope(scopes ...string) *AuthError {
 	return &AuthError{Status: http.StatusForbidden, Code: "insufficient_scope",
 		Desc: "this needs more rights; ask the owner to approve them", Scope: strings.Join(scopes, " ")}
+}
+
+// readDeadline bounds how long a client may take to send its request's
+// body. The server sets no ReadTimeout of its own, since its WebSockets set
+// their own deadlines.
+func readDeadline(w http.ResponseWriter) {
+	_ = http.NewResponseController(w).SetReadDeadline(time.Now().Add(10 * time.Second))
 }

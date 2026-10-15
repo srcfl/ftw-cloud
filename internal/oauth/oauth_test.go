@@ -1026,9 +1026,10 @@ func TestTokensNameTheirHome(t *testing.T) {
 	}
 }
 
-// The grant is what the newest roster lists: an owner who narrows it
-// narrows the token at once, one who renews it extends it, and an end
-// reached by the service's own clock stops the agent without a roster.
+// The grant is what the token carries and the newest roster still lists:
+// an owner who narrows it narrows the token at once, wider rights need a new
+// consent, a renewal extends the agent, and an end reached by the service's
+// own clock stops it without a roster.
 func TestTheGrantFollowsTheRoster(t *testing.T) {
 	g := newRig(t)
 	f := g.start(cimdID, cimdBack, ScopeLiveRead+" "+ScopePlanRead)
@@ -1041,12 +1042,41 @@ func TestTheGrantFollowsTheRoster(t *testing.T) {
 	}
 	g.roster(home, agentFor(key, cimdID, g.now().Add(3*time.Hour), ScopeLiveRead, ScopePlanRead, ScopeDispatchHold))
 	grant, _ = g.bearer(tk.Access)
-	if !grant.Has(ScopeDispatchHold) || !slices.Contains(grant.Ops, "loadpoint.hold") || grant.AgentExpires.Before(g.now().Add(2*time.Hour)) {
+	if grant.Has(ScopeDispatchHold) || !grant.Has(ScopePlanRead) || !slices.Contains(grant.Ops, "loadpoint.hold") ||
+		grant.AgentExpires.Before(g.now().Add(2*time.Hour)) {
 		t.Fatalf("after widening and renewing: %+v", grant)
 	}
 	g.advance(3*time.Hour + time.Second)
 	if _, aerr := g.bearer(tk.Access); aerr == nil {
 		t.Fatal("an agent past its end was admitted")
+	}
+}
+
+// A refresh that narrows the scope narrows what the new token allows.
+func TestARefreshCanNarrow(t *testing.T) {
+	g := newRig(t)
+	f := g.start(cimdID, cimdBack, ScopeLiveRead+" "+ScopePlanRead)
+	tk := g.approve(f, cimdID, ScopeLiveRead, ScopePlanRead)
+	status, tk2 := g.token(url.Values{"grant_type": {grantRefresh}, "refresh_token": {tk.Refresh}, "client_id": {cimdID}, "scope": {ScopeLiveRead}})
+	if status != http.StatusOK {
+		t.Fatalf("refresh: %d", status)
+	}
+	grant, aerr := g.bearer(tk2.Access)
+	if aerr != nil || grant.Has(ScopePlanRead) || !grant.Has(ScopeLiveRead) {
+		t.Fatalf("a narrowed token: %+v %v", grant, aerr)
+	}
+}
+
+func TestTokenShape(t *testing.T) {
+	good := accessPrefix + home + "." + randomToken(32)
+	if !tokenShape(good, accessPrefix) {
+		t.Fatal("a token this server makes")
+	}
+	for _, bad := range []string{"", good + "x", strings.Replace(good, ".", "", 1), refreshPrefix + home + "." + randomToken(32),
+		accessPrefix + "HOME." + randomToken(32), accessPrefix + home + "." + strings.Repeat("!", 43), "ftwat_" + strings.Repeat("a", 5000)} {
+		if tokenShape(bad, accessPrefix) {
+			t.Errorf("%q passed", bad)
+		}
 	}
 }
 

@@ -126,6 +126,7 @@ func (s *Server) serveRegister(w http.ResponseWriter, r *http.Request) {
 		registerError(w, http.StatusTooManyRequests, "invalid_client_metadata", "too many registrations; try again shortly")
 		return
 	}
+	readDeadline(w)
 	var reg registration
 	body, err := io.ReadAll(io.LimitReader(r.Body, 16<<10))
 	if err != nil || json.Unmarshal(body, &reg) != nil {

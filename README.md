@@ -151,9 +151,10 @@ to it yet.
   Only the browser that started the request gets it. Access tokens last 10
   minutes; refresh tokens rotate, and a reused one revokes its family. A
   token names its home (`ftwat_<home>.<secret>`) so any instance can route
-  it; the service keeps hashes, never tokens. A token carries the grant the
-  newest roster lists, narrowed or widened at once, and stops at the
-  agent's end by the service's own clock. A roster without the agent ends
+  it; the service keeps hashes, never tokens. A token allows the scopes it
+  carries that the newest roster still grants, so an owner who narrows a
+  grant narrows it at once, and it stops at the agent's end by the
+  service's own clock. A roster without the agent ends
   its tokens and its key.
 
 Not built yet:
