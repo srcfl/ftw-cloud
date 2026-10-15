@@ -29,6 +29,8 @@ import (
 	"net/url"
 	"slices"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/srcfl/ftw-cloud/internal/oauth"
 )
@@ -89,6 +91,46 @@ type Server struct {
 	Ours func(home string) bool
 	// inflight bounds tool calls in this process.
 	inflight chan struct{}
+	// limit bounds the requests of each agent, tools/list included.
+	limit rateLimit
+}
+
+// rateLimit is a token bucket per agent: 30 requests, then 10 a second.
+type rateLimit struct {
+	mu      sync.Mutex
+	buckets map[string]*callBucket
+}
+
+type callBucket struct {
+	tokens float64
+	at     time.Time
+}
+
+const (
+	agentBurst     = 30
+	agentPerSecond = 10
+	limitKept      = 10_000
+)
+
+func (l *rateLimit) allow(key string, now time.Time) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.buckets == nil || len(l.buckets) >= limitKept {
+		// Forgetting every bucket at once only ever lets a burst through.
+		l.buckets = map[string]*callBucket{}
+	}
+	b := l.buckets[key]
+	if b == nil {
+		b = &callBucket{tokens: agentBurst, at: now}
+		l.buckets[key] = b
+	}
+	b.tokens = min(agentBurst, b.tokens+now.Sub(b.at).Seconds()*agentPerSecond)
+	b.at = now
+	if b.tokens < 1 {
+		return false
+	}
+	b.tokens--
+	return true
 }
 
 // maxInflight bounds the tool calls one process runs at once.
@@ -116,9 +158,15 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "POST only", http.StatusMethodNotAllowed)
 		return
 	}
+	_ = http.NewResponseController(w).SetReadDeadline(time.Now().Add(10 * time.Second))
 	grant, aerr := s.auth.Authenticate(r)
 	if aerr != nil {
 		oauth.Challenge(w, aerr)
+		return
+	}
+	if !s.limit.allow(grant.Subject.Home+"/"+grant.Subject.Agent, time.Now()) {
+		w.Header().Set("Retry-After", "1")
+		writeRPCError(w, http.StatusTooManyRequests, nil, codeInternal, "too many requests; slow down", nil)
 		return
 	}
 	if s.Ours != nil && !s.Ours(grant.Subject.Home) {
@@ -238,6 +286,14 @@ func headerValue(h string) (string, bool) {
 // --------------------------------------------------------------------------
 
 func (s *Server) legacy(w http.ResponseWriter, r *http.Request, req *rpcRequest, g *oauth.Grant) {
+	// From 2025-06-18 on, a client names its version in a header; one this
+	// server does not speak is refused. Without the header the client is
+	// older than that header, or has not initialized yet.
+	if v := r.Header.Get("MCP-Protocol-Version"); v != "" && !slices.Contains(legacyVersions, v) {
+		writeRPCError(w, http.StatusBadRequest, req.ID, codeInvalidRequest,
+			"Unsupported MCP-Protocol-Version "+clean(v)+"; this server speaks "+strings.Join(append([]string{Modern}, legacyVersions...), ", "), nil)
+		return
+	}
 	if len(req.ID) == 0 {
 		// notifications/initialized and the like: nothing to answer.
 		w.WriteHeader(http.StatusAccepted)

@@ -149,6 +149,10 @@ type stubBox struct {
 	// noNoise is a box from before the agent contract: its roster names no
 	// Noise key.
 	noNoise bool
+	// noClock is a box whose clock is not set: it refuses agents.
+	noClock bool
+	// slowHandshake holds message 2 back.
+	slowHandshake time.Duration
 	closed  chan struct{}
 }
 
@@ -384,6 +388,10 @@ func (b *stubBox) inner(t cloudwire.Tun) {
 		// A refused handshake gets no reply, as on the box.
 		return
 	}
+	b.mu.Lock()
+	slow := b.slowHandshake
+	b.mu.Unlock()
+	time.Sleep(slow)
 	reply, _ := hs.WriteMessage(nil)
 	split, _ := hs.Split()
 	b.mu.Lock()
@@ -420,6 +428,14 @@ func (b *stubBox) handle(s *boxSession, env appwire.Envelope) {
 		}
 		b.reply(s, protocol.MsgError, env.ID, protocol.ErrorBody{Code: code})
 		b.reply(s, protocol.MsgSessionTerminate, nil, protocol.SessionTerminate{Reason: reason})
+		return
+	}
+	b.mu.Lock()
+	noClock := b.noClock
+	b.mu.Unlock()
+	if noClock {
+		// No clock, no agents: every call, hello included, is refused.
+		b.reply(s, protocol.MsgError, env.ID, protocol.ErrorBody{Code: protocol.ErrUnavailable, Args: map[string]any{"subsystem": "clock"}})
 		return
 	}
 	// Each read needs the scope the registry names for it.

@@ -61,7 +61,7 @@ func TestManyCallsLoseNothing(t *testing.T) {
 	start := time.Now()
 	const n = 13
 	for i := range n {
-		if _, isErr, text := a.call("health.get", nil); isErr {
+		if _, isErr, text := a.call("health_get", nil); isErr {
 			t.Fatalf("call %d: %s", i, text)
 		}
 	}

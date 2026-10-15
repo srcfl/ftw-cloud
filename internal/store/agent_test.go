@@ -100,3 +100,35 @@ func TestAnAgentNeedsNoCopyAndNoTunnel(t *testing.T) {
 		t.Fatalf("a phone with neither tunnel nor copy: %v", err)
 	}
 }
+
+// Agents' sessions have a budget of their own: a home full of phones still
+// takes its assistant, and assistants never take a phone's place.
+func TestAgentsHaveTheirOwnSessionBudget(t *testing.T) {
+	s, box, c := filled(t)
+	r := rosterWithAgent(2, c.t.Add(time.Hour))
+	var phones [][]byte
+	for i := range MaxSessionsPerHome {
+		k := bytes.Repeat([]byte{byte(100 + i)}, 32)
+		phones = append(phones, k)
+		r.Devices = append(r.Devices, cloudwire.Device{ID: cloudwire.DeviceID(k), Key: k, Role: "viewer", Scopes: []string{}, Epoch: 1, Tun: true})
+	}
+	box.SetRoster(r)
+	for _, k := range phones {
+		h, err := s.For(Principal{Kind: Device, Home: "h1", DeviceKey: k})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := h.Open(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	h, _ := s.For(Principal{Kind: Agent, Home: "h1", DeviceKey: agentKey})
+	if _, _, err := h.Open(); err != nil {
+		t.Fatalf("an agent at a home full of phones: %v", err)
+	}
+	// And the phones are still full: the agent took no phone's place.
+	h, _ = s.For(Principal{Kind: Device, Home: "h1", DeviceKey: ownerKey})
+	if _, _, err := h.Open(); !errors.Is(err, ErrBusy) {
+		t.Fatalf("a seventeenth phone: %v", err)
+	}
+}

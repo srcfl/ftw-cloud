@@ -177,6 +177,10 @@ func (p *Pool) get(ctx context.Context, sub oauth.Subject) (*agentConn, error) {
 	p.mu.Unlock()
 
 	c.openErr = c.open(ctx, sub)
+	if c.openErr == nil && c.ended() {
+		// Dropped or evicted while it opened.
+		c.openErr = c.closeErr
+	}
 	close(c.ready)
 	if c.openErr != nil {
 		p.mu.Lock()
@@ -225,35 +229,53 @@ var (
 type agentConn struct {
 	p           *Pool
 	home, agent string
-	dev         string
-	handle      *store.Handle
-	sess        *store.Session
-	ksess       string
-	sid         uint32
 
 	ready   chan struct{}
 	openErr error
 	// turn is held by the one call on the session.
-	turn     chan struct{}
-	queued   int
-	done     chan struct{}
-	closeErr error
-	once     sync.Once
-	msg2     chan []byte
-	// opened closes when the handshake is done.
+	turn chan struct{}
+	done chan struct{}
+	msg2 chan []byte
+	// opened closes when the handshake is done; the fields open sets
+	// happen before it.
 	opened chan struct{}
 
-	mu      sync.Mutex
-	used    time.Time
-	nextID  uint32
-	waiting map[uint32]chan appwire.Envelope
-	byCmd   map[string]chan appwire.Envelope
-	hello   *protocol.HelloOK
-	helloAt time.Time
-	// helloReady closes when hello_ok arrives.
+	mu sync.Mutex
+	// What open acquires, set under mu and only while the session is not
+	// closing, so a close in the middle of an open releases what exists.
+	dev      string
+	sess     *store.Session
+	ksess    string
+	sid      uint32
+	closing  bool
+	closeErr error
+	queued   int
+	used     time.Time
+	nextID   uint32
+	waiting  map[uint32]chan appwire.Envelope
+	byCmd    map[string]chan appwire.Envelope
+	// hello is the box's answer to this session's hello, or helloErr its
+	// refusal (a box without a clock refuses agents); helloReady closes
+	// when either comes.
+	helloID    uint32
+	hello      *protocol.HelloOK
+	helloErr   error
+	helloAt    time.Time
 	helloReady chan struct{}
-	// rev is the controlRev the box last named.
+	// rev is the controlRev the box last named; 0 is not known yet.
 	rev uint64
+}
+
+// adopt records what open acquired, unless the session is already closing:
+// then the caller releases it.
+func (c *agentConn) adopt(set func()) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closing {
+		return false
+	}
+	set()
+	return true
 }
 
 func (c *agentConn) ended() bool {
@@ -293,23 +315,33 @@ func (c *agentConn) open(ctx context.Context, sub oauth.Subject) error {
 	if err != nil {
 		return errDenied
 	}
-	c.handle, c.sess, c.dev = h, sess, h.Device().ID
 	var b [4]byte
-	for c.sid == 0 {
+	var sid uint32
+	for sid == 0 {
 		_, _ = rand.Read(b[:])
-		c.sid = binary.BigEndian.Uint32(b[:])
+		sid = binary.BigEndian.Uint32(b[:])
 	}
-	sess.SetSid(c.sid)
+	sess.SetSid(sid)
+	dev := h.Device().ID
+	if !c.adopt(func() { c.sess, c.dev, c.sid = sess, dev, sid }) {
+		sess.Close()
+		return errEnded
+	}
 	c.msg2, c.opened = make(chan []byte, 1), make(chan struct{})
-	go c.read()
+	go c.read(sess, sid)
 
 	ksess, msg1, err := c.p.keys.Open(ctx, sub.Kid, boxStatic)
 	if err != nil {
 		c.p.log.Warn("the keys part could not open an agent session", "err", err)
 		return userError("FTW Cloud could not open a session for this assistant.")
 	}
-	c.ksess = ksess
-	if !c.p.door.Tun(sub.Home, cloudwire.Tun{Dev: c.dev, Sid: c.sid, D: msg1}) {
+	if !c.adopt(func() { c.ksess = ksess }) {
+		end, cancel := context.WithTimeout(context.Background(), time.Second)
+		_ = c.p.keys.End(end, ksess)
+		cancel()
+		return errEnded
+	}
+	if !c.p.door.Tun(sub.Home, cloudwire.Tun{Dev: dev, Sid: sid, D: msg1}) {
 		return errOffline
 	}
 	t := time.NewTimer(c.p.Handshake)
@@ -328,25 +360,40 @@ func (c *agentConn) open(ctx context.Context, sub oauth.Subject) error {
 		return errNoAnswer
 	}
 	close(c.opened)
+	// hello carries an id, so a refusal (no clock on the box) reaches the
+	// calls waiting for it rather than being dropped.
+	id := c.newID()
+	c.mu.Lock()
+	c.helloID = id
+	c.mu.Unlock()
 	hello := protocol.Hello{Proto: protocol.ProtoRange{Min: protocol.ProtoMin, Max: protocol.ProtoMax},
 		App: protocol.AppInfo{Build: "ftw-cloud-mcp/" + ServerVersion, UA: "FTW Cloud MCP"}, Locales: []string{"en"}}
-	return c.send(ctx, protocol.MsgHello, nil, hello)
+	return c.send(ctx, protocol.MsgHello, &id, hello)
+}
+
+// endHello records the box's answer to hello, once. The caller holds c.mu.
+func (c *agentConn) endHelloLocked(h *protocol.HelloOK, err error) {
+	if c.hello != nil || c.helloErr != nil {
+		return
+	}
+	c.hello, c.helloErr, c.helloAt = h, err, c.p.now()
+	close(c.helloReady)
 }
 
 // read takes the box's side of the session off the door, and the copy's
 // envelopes, which an agent session does not read.
-func (c *agentConn) read() {
+func (c *agentConn) read(sess *store.Session, sid uint32) {
 	handshook := false
 	for {
 		select {
 		case <-c.done:
 			return
-		case <-c.sess.Done():
+		case <-sess.Done():
 			c.close(errEnded)
 			return
-		case <-c.sess.C():
-		case t := <-c.sess.Tun():
-			if t.Sid != c.sid {
+		case <-sess.C():
+		case t := <-sess.Tun():
+			if t.Sid != sid {
 				continue
 			}
 			if len(t.D) == 0 {
@@ -386,19 +433,19 @@ func (c *agentConn) dispatch(env appwire.Envelope) {
 	switch env.T {
 	case protocol.MsgHelloOK:
 		var h protocol.HelloOK
-		if cbor.Unmarshal(env.B, &h) == nil && c.hello == nil {
-			c.hello, c.helloAt = &h, c.p.now()
-			close(c.helloReady)
+		if cbor.Unmarshal(env.B, &h) == nil {
+			c.endHelloLocked(&h, nil)
 		}
 		return
+	case protocol.MsgError:
+		if env.ID != nil && *env.ID == c.helloID {
+			c.endHelloLocked(nil, decodeBoxError(env.B))
+			return
+		}
 	case protocol.MsgSessionTerminate:
 		var st protocol.SessionTerminate
 		_ = cbor.Unmarshal(env.B, &st)
-		why := errRevoked
-		if st.Reason == protocol.TerminateExpired {
-			why = errExpired
-		}
-		go c.close(why)
+		go c.close(terminated(st.Reason))
 		return
 	case protocol.MsgCmdAck, protocol.MsgCmdResult:
 		var b struct {
@@ -446,12 +493,15 @@ func (c *agentConn) send(ctx context.Context, t string, id *uint32, body any) er
 	if err != nil {
 		return userError("The request is too large for the box.")
 	}
-	msg, err := c.p.keys.Seal(ctx, c.ksess, frame)
+	c.mu.Lock()
+	ksess, dev, sid := c.ksess, c.dev, c.sid
+	c.mu.Unlock()
+	msg, err := c.p.keys.Seal(ctx, ksess, frame)
 	if err != nil {
 		go c.close(errEnded)
 		return errEnded
 	}
-	if !c.p.door.Tun(c.home, cloudwire.Tun{Dev: c.dev, Sid: c.sid, D: msg}) {
+	if !c.p.door.Tun(c.home, cloudwire.Tun{Dev: dev, Sid: sid, D: msg}) {
 		go c.close(errOffline)
 		return errOffline
 	}
@@ -513,31 +563,55 @@ func (c *agentConn) newID() uint32 {
 }
 
 // close ends the session for good: the box hears it ended, the keys part
-// drops its keys, the store frees the slot.
+// drops its keys, the store frees the slot. It may run while open still
+// works: what open has acquired is released here, and what it acquires
+// later open releases itself.
 func (c *agentConn) close(why error) {
-	c.once.Do(func() {
-		c.closeErr = why
-		if c.closeErr == errIdle || c.closeErr == nil {
-			c.closeErr = errEnded
-		}
-		close(c.done)
-		if c.sid != 0 && why != errEnded {
-			c.p.door.Tun(c.home, cloudwire.Tun{Dev: c.dev, Sid: c.sid})
-		}
-		if c.ksess != "" {
-			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-			_ = c.p.keys.End(ctx, c.ksess)
-			cancel()
-		}
-		if c.sess != nil {
-			c.sess.Close()
-		}
-		c.p.mu.Lock()
-		if k := (connKey{c.home, c.agent}); c.p.conns[k] == c {
-			delete(c.p.conns, k)
-		}
-		c.p.mu.Unlock()
-	})
+	c.mu.Lock()
+	if c.closing {
+		c.mu.Unlock()
+		return
+	}
+	c.closing = true
+	tellBox := why != errEnded
+	if why == errIdle || why == nil {
+		why = errEnded
+	}
+	c.closeErr = why
+	sid, dev, ksess, sess := c.sid, c.dev, c.ksess, c.sess
+	c.mu.Unlock()
+	close(c.done)
+	if sid != 0 && tellBox {
+		c.p.door.Tun(c.home, cloudwire.Tun{Dev: dev, Sid: sid})
+	}
+	if ksess != "" {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		_ = c.p.keys.End(ctx, ksess)
+		cancel()
+	}
+	if sess != nil {
+		sess.Close()
+	}
+	c.p.mu.Lock()
+	if k := (connKey{c.home, c.agent}); c.p.conns[k] == c {
+		delete(c.p.conns, k)
+	}
+	c.p.mu.Unlock()
+}
+
+// terminated is why the box ended a session, in words.
+func terminated(reason string) error {
+	switch reason {
+	case protocol.TerminateRevoked:
+		return errRevoked
+	case protocol.TerminateExpired:
+		return errExpired
+	case protocol.TerminateSuperseded, "replaced":
+		return userError("Another session of this assistant took over. Try again.")
+	case protocol.TerminateBoxShutdown:
+		return userError("The box is restarting. Try again in a minute.")
+	}
+	return errEnded
 }
 
 // --------------------------------------------------------------------------
@@ -644,7 +718,7 @@ func (c *agentConn) helloOK(ctx context.Context) (*protocol.HelloOK, time.Time, 
 	case <-c.helloReady:
 		c.mu.Lock()
 		defer c.mu.Unlock()
-		return c.hello, c.helloAt, nil
+		return c.hello, c.helloAt, c.helloErr
 	case <-c.done:
 		return nil, time.Time{}, c.closeErr
 	case <-ctx.Done():

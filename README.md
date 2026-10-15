@@ -171,11 +171,11 @@ to it yet.
   `_meta`, mirrored in `MCP-Protocol-Version`, `Mcp-Method` and `Mcp-Name`,
   and a header that disagrees with the body is refused. It also answers
   clients of 2025-03-26 to 2025-11-25 that start with `initialize`, without
-  session ids or a GET stream. The read tools are `homes.list`, `status`,
-  `chargers.list`, `cars.list`, `plan.get`, `plan.explain`,
-  `history.query`, `health.get`, `events.list`, `logs.tail` (both with
-  before and after cursors), `drivers.status`, `config.get` and
-  `diag.run`, each with typed arguments, each one of the box's own reads for
+  session ids or a GET stream. The read tools are `homes_list`, `status`,
+  `chargers_list`, `cars_list`, `plan_get`, `plan_explain`,
+  `history_query`, `health_get`, `events_list`, `logs_tail` (both with
+  before and after cursors), `drivers_status`, `config_get` and
+  `diag_run` (names any model API accepts), each with typed arguments, each one of the box's own reads for
   agents (`live.get`, `loadpoints.get`, `cars.get`, `plan.get`, `price.get`,
   `hist.query`, `health.get`, `events.get`, `logs.get`, `config.get`,
   `diag.run`, `drivers.get`; srcfl/ftw `docs/agents.md`), under the scope
@@ -189,11 +189,14 @@ to it yet.
   the door carries it as `tun`, one forward to the box. The door admits an
   agent row only to these sessions, never on `/v1/app` or `/v1/app/once`,
   and only before its end. A session stays warm for 60 s and calls on one
-  home queue, four at most; a process runs 256 at once. Agents' calls on a
+  home queue, four at most; a process runs 256 at once, and each agent
+  may send 30 requests, then 10 a second. Agents' sessions have a budget
+  of their own at each home, so an assistant never takes a phone's place. Agents' calls on a
   home are paced under the box's 60 reads a minute and a quarter of the
   door's tun limits, which the home's phones share: 15 in a row, then 0.75
   a second. Results are data: each says it came from the box and is not
-  instructions, and control and formatting characters are removed. The
+  instructions, and characters that can hide text (controls, format and
+  private-use characters, variation selectors) are removed. The
   session goes to the Noise key the box names in the roster it signs
   (`noise`); a box that names none takes no assistants yet, and each such
   home says so.
