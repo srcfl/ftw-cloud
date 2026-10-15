@@ -10,8 +10,10 @@
 // the device may read goes out unchanged, one frame per Noise message.
 //
 // A phone may ask for faster updates, ask for its extension token, register
-// for alerts, and an owner may suspend a device. That is all it can do here:
-// commands go to the box over the relay, never through FTW Cloud.
+// for alerts, and an owner may suspend a device. Its own Noise session with
+// the box rides here as tun, which the service forwards under the device id
+// its handshake proved and can neither read nor forge. That is all it can
+// do here.
 package appsession
 
 import (
@@ -31,9 +33,12 @@ import (
 )
 
 const (
-	// maxPhoneMessage bounds one message from a phone. Message 1 with now is
-	// about 120 bytes and nothing a phone sends later is larger.
-	maxPhoneMessage = 4 << 10
+	// maxPhoneMessage bounds one message from a phone: a tun around the
+	// largest bulk frame. Every other message must fit maxPlainMessage.
+	maxPhoneMessage = cloudwire.MaxTunFrame + appwire.TransportOverhead
+	// maxPlainMessage bounds every phone message but tun. Message 1 with
+	// now is about 160 bytes.
+	maxPlainMessage = 4 << 10
 	// handshakeTimeout bounds message 1.
 	handshakeTimeout = 10 * time.Second
 	// The same ping, read and write deadlines as the uplink.
@@ -44,6 +49,11 @@ const (
 	// suspends a device. Past this burst at this rate the session closes.
 	rateBurst  = 20
 	ratePerSec = 2
+	// tun counts apart, against the home's limits at the uplink, which drop
+	// what is over. A phone that sends twice as fast as those pass is not a
+	// phone at work, and its session closes.
+	tunBurst  = 480
+	tunPerSec = 120
 	// maxNoiseMessage is the largest Noise message, handshake or transport.
 	maxNoiseMessage = 0xffff
 	// WatchRenew is how often the service asks the box again for one-second
@@ -61,6 +71,16 @@ const (
 type Watcher interface {
 	Watch(home string)
 }
+
+// Tunneler sends a phone's tun to its home's box. The uplink is one. False
+// means no box takes it now.
+type Tunneler interface {
+	Tun(home string, t cloudwire.Tun) bool
+}
+
+// WebOrigin is the one browser origin the service accepts on /v1/app: the
+// web app's. The phone and the box send no Origin.
+const WebOrigin = "https://app.ftw.energy"
 
 // Server is the /v1/app handler.
 type Server struct {
@@ -85,6 +105,9 @@ type Server struct {
 	// Tokens issues extension tokens. Nil ignores token.get. Set before
 	// serving.
 	Tokens Tokens
+	// Tunnel carries the phones' sessions to their boxes. Nil answers every
+	// tun with its end. Set before serving.
+	Tunnel Tunneler
 
 	mu      sync.Mutex
 	looking map[string]*look
@@ -127,9 +150,12 @@ func New(st *store.Store, reg *registry.Registry, w Watcher, key appwire.KeyPair
 
 var upgrader = websocket.Upgrader{
 	EnableCompression: false,
-	// The app sends no Origin. A browser always does, and has no business
-	// here.
-	CheckOrigin: func(r *http.Request) bool { return r.Header.Get("Origin") == "" },
+	// The app sends no Origin. A browser always does, and only the web app's
+	// has business here.
+	CheckOrigin: func(r *http.Request) bool {
+		o := r.Header.Get("Origin")
+		return o == "" || o == WebOrigin
+	},
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -166,7 +192,7 @@ func (s *Server) serve(conn *websocket.Conn, home string) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	if kind != websocket.BinaryMessage {
+	if kind != websocket.BinaryMessage || len(msg1) > maxPlainMessage {
 		return cloudwire.CloseProtocol, errProtocol
 	}
 	hs, err := appwire.NewResponder(appwire.HandshakeOptions{StaticKey: s.key, Prologue: cloudwire.AppPrologue(home)})
@@ -179,12 +205,13 @@ func (s *Server) serve(conn *websocket.Conn, home string) (int, error) {
 		// query. Neither says anything about the home.
 		return cloudwire.CloseDenied, err
 	}
-	hz, err := parseNow(payload)
+	now, err := parseNow(payload)
 	if err != nil {
 		return cloudwire.CloseProtocol, err
 	}
+	hz := now.Hz
 
-	dev, err := s.store.For(store.Principal{Kind: store.Device, Home: home, DeviceKey: hs.RemoteStatic()})
+	dev, err := s.store.For(store.Principal{Kind: store.Device, Home: home, DeviceKey: hs.RemoteStatic(), Pair: now.Pair})
 	if err != nil {
 		return cloudwire.CloseDenied, err
 	}
@@ -206,7 +233,14 @@ func (s *Server) serve(conn *websocket.Conn, home string) (int, error) {
 		return websocket.CloseInternalServerErr, err
 	}
 	c := &phoneConn{s: s, conn: conn, dev: dev, home: home, tokens: rateBurst, refilled: s.now(),
+		tunTokens: tunBurst, tunAt: s.now(), sess: sess,
 		replies: make(chan []byte, 1), quit: make(chan struct{})}
+	// The box session's message 1, when it rode in message 1, goes to the
+	// box before message 2 goes back: the box's answer then follows message
+	// 2 by one leg, and the session is up one round trip after TLS.
+	if now.Tun != nil {
+		c.tunEarly(*now.Tun)
+	}
 	if err := c.write(msg2); err != nil {
 		return 0, err
 	}
@@ -223,20 +257,21 @@ func (s *Server) serve(conn *websocket.Conn, home string) (int, error) {
 
 	c.setLooking(hz >= cloudwire.HzLooking)
 	defer c.stopLooking()
+	defer c.endTun()
 	return c.run(sess)
 }
 
 // parseNow reads message 1's payload.
-func parseNow(payload []byte) (int, error) {
+func parseNow(payload []byte) (cloudwire.Now, error) {
 	env, err := cloudwire.DecodeEnvelope(payload)
 	if err != nil || env.T != cloudwire.MsgNow {
-		return 0, errProtocol
+		return cloudwire.Now{}, errProtocol
 	}
 	var now cloudwire.Now
 	if err := cloudwire.Unmarshal(env.B, &now); err != nil {
-		return 0, errProtocol
+		return cloudwire.Now{}, errProtocol
 	}
-	return now.Hz, nil
+	return now, nil
 }
 
 // snapshotPayload is message 2. Envelopes that do not fit in a message 2 of
@@ -338,12 +373,23 @@ type phoneConn struct {
 
 	tokens   float64
 	refilled time.Time
+	// tunTokens is the tun bucket, refilled at tunAt.
+	tunTokens float64
+	tunAt     time.Time
 
 	// replies carries the service's answers from the read loop to the
 	// session's goroutine, the only one that writes; quit closes when that
 	// goroutine is done.
 	replies chan []byte
 	quit    chan struct{}
+
+	// sess is the store's session; tunSid the box session this phone ran
+	// last through the tunnel, when hasTun. Touched by the read loop and,
+	// once it is done, by the session's end.
+	sess   *store.Session
+	tunMu  sync.Mutex
+	tunSid uint32
+	hasTun bool
 }
 
 func (c *phoneConn) setLooking(on bool) {
@@ -418,6 +464,14 @@ func (c *phoneConn) run(sess *store.Session) (int, error) {
 			if err := c.forward(env); err != nil {
 				return 0, err
 			}
+		case t := <-sess.Tun():
+			env, err := cloudwire.Unsigned(cloudwire.MsgTun, t)
+			if err != nil {
+				return 0, err
+			}
+			if err := c.forward(env); err != nil {
+				return 0, err
+			}
 		case <-sess.Done():
 			return sess.Code(), nil
 		case r := <-read:
@@ -448,9 +502,6 @@ func (c *phoneConn) readLoop() (int, error) {
 			return 0, err
 		}
 		_ = c.conn.SetReadDeadline(time.Now().Add(readTimeout))
-		if !c.allow() {
-			return cloudwire.CloseProtocol, errProtocol
-		}
 		if kind != websocket.BinaryMessage {
 			return cloudwire.CloseProtocol, errProtocol
 		}
@@ -464,6 +515,59 @@ func (c *phoneConn) readLoop() (int, error) {
 	}
 }
 
+// tun forwards the phone's own session to its box, under the device id the
+// handshake proved. A device without tun in the roster sends nothing. When
+// no box takes it, the phone hears its session ended.
+func (c *phoneConn) tun(t cloudwire.AppTun) error {
+	dev := c.dev.Device()
+	if !dev.Tun || len(t.D) > cloudwire.TunDataMax {
+		return nil
+	}
+	c.tunMu.Lock()
+	c.tunSid, c.hasTun = t.Sid, len(t.D) > 0
+	c.tunMu.Unlock()
+	if c.sess != nil && len(t.D) > 0 {
+		c.sess.SetSid(t.Sid)
+	}
+	if c.s.Tunnel != nil && c.s.Tunnel.Tun(c.home, cloudwire.Tun{Dev: dev.ID, Sid: t.Sid, D: t.D}) {
+		return nil
+	}
+	if len(t.D) == 0 {
+		return nil
+	}
+	return c.say(cloudwire.MsgTun, cloudwire.AppTun{Sid: t.Sid})
+}
+
+// tunEarly forwards the box session's message 1 that rode in message 1. No
+// reply can go yet, so a box that cannot take it is heard about as the end
+// of the session, once the stream runs.
+func (c *phoneConn) tunEarly(t cloudwire.AppTun) {
+	dev := c.dev.Device()
+	if !dev.Tun || len(t.D) == 0 || len(t.D) > cloudwire.TunDataMax {
+		return
+	}
+	c.tunMu.Lock()
+	c.tunSid, c.hasTun = t.Sid, true
+	c.tunMu.Unlock()
+	c.sess.SetSid(t.Sid)
+	if c.s.Tunnel != nil && c.s.Tunnel.Tun(c.home, cloudwire.Tun{Dev: dev.ID, Sid: t.Sid, D: t.D}) {
+		return
+	}
+	c.sess.Ended(t.Sid)
+}
+
+// endTun tells the box that the phone's session through here is over, when
+// the app session ends.
+func (c *phoneConn) endTun() {
+	c.tunMu.Lock()
+	sid, had := c.tunSid, c.hasTun
+	c.hasTun = false
+	c.tunMu.Unlock()
+	if had && c.s.Tunnel != nil {
+		c.s.Tunnel.Tun(c.home, cloudwire.Tun{Dev: c.dev.Device().ID, Sid: sid})
+	}
+}
+
 // apply acts on one message from the phone. Types it does not know are
 // ignored, so a newer app works with an older service.
 func (c *phoneConn) apply(frame []byte) (int, error) {
@@ -474,6 +578,24 @@ func (c *phoneConn) apply(frame []byte) (int, error) {
 	env, err := cloudwire.DecodeEnvelope(payload)
 	if err != nil {
 		return cloudwire.CloseProtocol, err
+	}
+	if env.T == cloudwire.MsgTun {
+		now := c.s.now()
+		c.tunTokens = min(tunBurst, c.tunTokens+now.Sub(c.tunAt).Seconds()*tunPerSec)
+		c.tunAt = now
+		if c.tunTokens < 1 {
+			return cloudwire.CloseProtocol, errProtocol
+		}
+		c.tunTokens--
+		var t cloudwire.AppTun
+		if err := cloudwire.Unmarshal(env.B, &t); err != nil {
+			return cloudwire.CloseProtocol, err
+		}
+		return 0, c.tun(t)
+	}
+	// tun has limits of its own, per home; everything else counts here.
+	if len(frame) > maxPlainMessage || !c.allow() {
+		return cloudwire.CloseProtocol, errProtocol
 	}
 	switch env.T {
 	case cloudwire.MsgWatch:

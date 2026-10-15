@@ -11,12 +11,14 @@ package store
 
 import (
 	"bytes"
+	"encoding/hex"
 	"errors"
 	"slices"
 	"sort"
 	"sync"
 	"time"
 
+	"github.com/srcfl/ftw/go/protocol"
 	"github.com/srcfl/ftw/go/protocol/cloudwire"
 )
 
@@ -43,6 +45,9 @@ type Principal struct {
 	Home string
 	// DeviceKey is the phone's X25519 static key, for Device.
 	DeviceKey []byte
+	// Pair is the pairing hash a new phone proved in its handshake, for a
+	// Device the roster does not list yet. It admits one session, once.
+	Pair []byte
 	// DeviceID and Epoch are the roster entry a token is bound to, for
 	// Token.
 	DeviceID string
@@ -92,6 +97,11 @@ type home struct {
 	lastSeen time.Time
 	// sessions are the phones reading this home now.
 	sessions map[*Session]struct{}
+	// pending is each pairing hash the roster lists, by its hex, until it
+	// runs out; spent marks the ones a phone has used, so a roster sent
+	// again does not reopen them.
+	pending map[string]time.Time
+	spent   map[string]time.Time
 }
 
 // Held is one envelope as received.
@@ -111,6 +121,10 @@ type Handle struct {
 	// effective scope: its roster scopes intersected with the grant's.
 	device cloudwire.Device
 	scopes []string
+	// pairing is a new phone admitted by a pairing hash until its pairing
+	// runs out at pairedUntil, or the roster lists its key.
+	pairing     bool
+	pairedUntil time.Time
 }
 
 // For returns the principal's access to its home, or ErrDenied. A box may
@@ -121,7 +135,7 @@ func (s *Store) For(p Principal) (*Handle, error) {
 	s.mu.Lock()
 	h := s.homes[p.Home]
 	if h == nil && p.Kind == Box && p.Home != "" {
-		h = &home{latest: map[string]Held{}, sessions: map[*Session]struct{}{}}
+		h = newHome()
 		s.homes[p.Home] = h
 	}
 	s.mu.Unlock()
@@ -135,10 +149,14 @@ func (s *Store) For(p Principal) (*Handle, error) {
 		h.mu.Lock()
 		defer h.mu.Unlock()
 		dev, scopes, ok := s.access(p.Home, h, byKey(p.DeviceKey))
-		if !ok {
-			return nil, ErrDenied
+		if ok {
+			return &Handle{s: s, id: p.Home, h: h, kind: Device, device: dev, scopes: scopes}, nil
 		}
-		return &Handle{s: s, id: p.Home, h: h, kind: Device, device: dev, scopes: scopes}, nil
+		if until, ok := s.pair(h, p); ok {
+			return &Handle{s: s, id: p.Home, h: h, kind: Device, pairing: true, pairedUntil: until,
+				device: cloudwire.Device{ID: cloudwire.DeviceID(p.DeviceKey), Key: bytes.Clone(p.DeviceKey), Tun: true}}, nil
+		}
+		return nil, ErrDenied
 	case Token:
 		h.mu.Lock()
 		defer h.mu.Unlock()
@@ -153,13 +171,40 @@ func (s *Store) For(p Principal) (*Handle, error) {
 	return nil, ErrDenied
 }
 
+func newHome() *home {
+	return &home{latest: map[string]Held{}, sessions: map[*Session]struct{}{},
+		pending: map[string]time.Time{}, spent: map[string]time.Time{}}
+}
+
+// pair spends a pending pairing hash for a key the roster does not list. The
+// device it admits may only open a tunnel; the box decides inside it whether
+// the phone pairs. The caller holds h.mu.
+func (s *Store) pair(h *home, p Principal) (time.Time, bool) {
+	if len(p.Pair) != cloudwire.PairingHashBytes || len(p.DeviceKey) != 32 || h.roster == nil {
+		return time.Time{}, false
+	}
+	now := s.now()
+	if now.After(h.rosterAt.Add(time.Duration(h.roster.TTLS) * time.Second)) {
+		return time.Time{}, false
+	}
+	key := hex.EncodeToString(p.Pair)
+	until, ok := h.pending[key]
+	if !ok || !now.Before(until) {
+		return time.Time{}, false
+	}
+	delete(h.pending, key)
+	h.spent[key] = until
+	return until, true
+}
+
 // byKey matches the roster entry with a device's Noise static key.
 func byKey(key []byte) func(cloudwire.Device) bool {
 	return func(d cloudwire.Device) bool { return len(key) == 32 && bytes.Equal(d.Key, key) }
 }
 
 // access is the one admission rule for a device: a roster in force that
-// lists it, and no suspension. The caller holds h.mu.
+// lists it, no suspension, and something the device may do here: open a
+// tunnel, or read while the readable copy is on. The caller holds h.mu.
 func (s *Store) access(id string, h *home, match func(cloudwire.Device) bool) (cloudwire.Device, []string, bool) {
 	r := h.roster
 	if r == nil || s.now().After(h.rosterAt.Add(time.Duration(r.TTLS)*time.Second)) {
@@ -177,6 +222,9 @@ func (s *Store) access(id string, h *home, match func(cloudwire.Device) bool) (c
 			if slices.Contains(r.Grant.Scopes, sc) {
 				scopes = append(scopes, sc)
 			}
+		}
+		if !d.Tun && !slices.Contains(r.Grant.Purposes, protocol.CloudPurposeServe) {
+			return cloudwire.Device{}, nil, false
 		}
 		return d, scopes, true
 	}
@@ -205,7 +253,28 @@ func (x *Handle) Disconnected(conn uint64) {
 	if x.h.conn == conn {
 		x.h.online = false
 		x.h.lastSeen = x.s.now()
+		x.h.tunGoneLocked()
 	}
+}
+
+// Serving reports whether the roster in force has the readable copy on.
+// Without it the service holds no readings for the home.
+func (x *Handle) Serving() bool {
+	x.h.mu.Lock()
+	defer x.h.mu.Unlock()
+	r := x.h.roster
+	return r != nil && slices.Contains(r.Grant.Purposes, protocol.CloudPurposeServe)
+}
+
+// DropCopy forgets every reading the home holds, when its owner withdraws
+// the readable copy. The home, its roster and its tunnel stay.
+func (x *Handle) DropCopy() {
+	if x.kind != Box {
+		return
+	}
+	x.h.mu.Lock()
+	defer x.h.mu.Unlock()
+	x.h.latest, x.h.full = map[string]Held{}, nil
 }
 
 // Put keeps env as the newest of its class.
@@ -251,8 +320,33 @@ func (x *Handle) SetRoster(r *cloudwire.Roster) bool {
 		return false
 	}
 	x.h.roster, x.h.rosterAt = r, x.s.now()
+	x.h.setPendingLocked(r, x.h.rosterAt)
 	x.recheckLocked()
 	return true
+}
+
+// setPendingLocked takes the roster's pairing hashes, each until its ttlS
+// runs out from when the roster arrived, and forgets the ones gone from it.
+// A hash already spent stays spent. The caller holds h.mu.
+func (h *home) setPendingLocked(r *cloudwire.Roster, at time.Time) {
+	listed := map[string]bool{}
+	for _, p := range r.Pending {
+		key := hex.EncodeToString(p.Hash)
+		listed[key] = true
+		if _, spent := h.spent[key]; !spent && len(p.Hash) == cloudwire.PairingHashBytes && p.TTLS > 0 {
+			h.pending[key] = at.Add(time.Duration(p.TTLS) * time.Second)
+		}
+	}
+	for key := range h.pending {
+		if !listed[key] {
+			delete(h.pending, key)
+		}
+	}
+	for key, until := range h.spent {
+		if at.After(until) {
+			delete(h.spent, key)
+		}
+	}
 }
 
 // Recheck ends every session whose access is no longer what it was opened
@@ -268,6 +362,12 @@ func (x *Handle) recheckLocked() {
 	for sess := range x.h.sessions {
 		dev, scopes, ok := x.s.access(x.id, x.h, byKey(sess.x.device.Key))
 		switch {
+		case sess.x.pairing && ok:
+			// The box paired the phone: its session takes the roster's
+			// entry and stays open.
+			sess.x.device, sess.x.scopes, sess.x.pairing = dev, scopes, false
+		case sess.x.pairing && x.s.now().Before(sess.x.pairedUntil):
+			// Still pairing.
 		case !ok:
 			sess.endLocked(cloudwire.CloseDenied)
 		case dev.ID != sess.x.device.ID || dev.Epoch != sess.x.device.Epoch || dev.Role != sess.x.device.Role ||
@@ -389,8 +489,34 @@ func (s *Store) Sweep() {
 				sess.endLocked(cloudwire.CloseDenied)
 			}
 		}
+		// A pairing the box did not complete ends with its code.
+		for sess := range h.sessions {
+			if sess.x.pairing && !now.Before(sess.x.pairedUntil) {
+				sess.endLocked(cloudwire.CloseDenied)
+			}
+		}
 		h.mu.Unlock()
 	}
+}
+
+// Seed holds a roster the box signed before the service started, read back
+// from the registry, with the time it first arrived. It never replaces a
+// roster the box sent since. Upkeep at start calls it, never a request.
+func (s *Store) Seed(id string, r *cloudwire.Roster, at time.Time) {
+	s.mu.Lock()
+	h := s.homes[id]
+	if h == nil {
+		h = newHome()
+		s.homes[id] = h
+	}
+	s.mu.Unlock()
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.roster != nil {
+		return
+	}
+	h.roster, h.rosterAt, h.lastSeen = r, at, at
+	h.setPendingLocked(r, at)
 }
 
 // Forget drops a home the registry has deleted, as after 90 days without a

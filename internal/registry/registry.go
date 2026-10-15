@@ -71,6 +71,11 @@ CREATE TABLE IF NOT EXISTS suspensions (
 	epoch INTEGER NOT NULL,
 	since_ms INTEGER NOT NULL,
 	PRIMARY KEY (home, device_id)
+);
+CREATE TABLE IF NOT EXISTS away (
+	home TEXT PRIMARY KEY REFERENCES homes(home) ON DELETE CASCADE,
+	due_ms INTEGER NOT NULL,
+	told INTEGER NOT NULL DEFAULT 0
 );`)
 	if err != nil {
 		_ = db.Close()
@@ -126,6 +131,75 @@ func (r *Registry) Get(home string) (Home, bool, error) {
 		h.RosterAt = time.UnixMilli(rosterMs)
 	}
 	return h, true, nil
+}
+
+// Rosters returns every home that holds a signed roster, for the service to
+// admit phones by again after a restart. It is upkeep at start, never a
+// request.
+func (r *Registry) Rosters() ([]Home, error) {
+	rows, err := r.db.Query(`SELECT home, pk, created_ms, roster, roster_seq, roster_ms, grant_id FROM homes WHERE roster IS NOT NULL`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Home
+	for rows.Next() {
+		var h Home
+		var created, seq, rosterMs int64
+		if err := rows.Scan(&h.ID, &h.PK, &created, &h.Roster, &seq, &rosterMs, &h.GrantID); err != nil {
+			return nil, err
+		}
+		h.CreatedAt, h.RosterSeq, h.RosterAt = time.UnixMilli(created), uint64(seq), time.UnixMilli(rosterMs)
+		out = append(out, h)
+	}
+	return out, rows.Err()
+}
+
+// Away is a home whose box is gone, as the dead man's switch keeps it across
+// a restart: when box.unreachable is due, and whether it went.
+type Away struct {
+	Home string
+	Due  time.Time
+	Told bool
+}
+
+// AwaySet records that a home's box went and when box.unreachable is due.
+func (r *Registry) AwaySet(home string, due time.Time) error {
+	_, err := r.db.Exec(`INSERT INTO away (home, due_ms, told) SELECT ?, ?, 0 WHERE EXISTS (SELECT 1 FROM homes WHERE home = ?)
+		ON CONFLICT (home) DO UPDATE SET due_ms = excluded.due_ms, told = 0`, home, due.UnixMilli(), home)
+	return err
+}
+
+// AwayTold records that box.unreachable went.
+func (r *Registry) AwayTold(home string) error {
+	_, err := r.db.Exec(`UPDATE away SET told = 1 WHERE home = ?`, home)
+	return err
+}
+
+// AwayClear forgets a home's absence: its box is back, or the home is gone.
+func (r *Registry) AwayClear(home string) error {
+	_, err := r.db.Exec(`DELETE FROM away WHERE home = ?`, home)
+	return err
+}
+
+// AwayAll returns every home recorded as away.
+func (r *Registry) AwayAll() ([]Away, error) {
+	rows, err := r.db.Query(`SELECT home, due_ms, told FROM away`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Away
+	for rows.Next() {
+		var a Away
+		var due int64
+		if err := rows.Scan(&a.Home, &due, &a.Told); err != nil {
+			return nil, err
+		}
+		a.Due = time.UnixMilli(due)
+		out = append(out, a)
+	}
+	return out, rows.Err()
 }
 
 // SetRoster keeps the signed roster envelope.

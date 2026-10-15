@@ -1,11 +1,13 @@
-// Package uplink serves /v1/box, where each box that has turned FTW Cloud on
-// keeps one connection. docs/protocol-cloud.md in srcfl/ftw is the wire
-// format; go/protocol/cloudwire holds its bytes.
+// Package uplink serves /v1/box, where each linked box keeps one
+// connection. docs/protocol-cloud.md in srcfl/ftw is the wire format;
+// go/protocol/cloudwire holds its bytes.
 //
 // The service learns a home only from its box: the home id is a hash of the
 // key that signed hello on this TLS session, never a field anyone sends, and
-// every message after it must carry that key's signature. What the service
-// may say back is the closed set in downlink.go.
+// every message after it but tun must carry that key's signature. tun is a
+// phone's own Noise session with the box, which the service routes by device
+// and never reads. What the service may say back is the closed set in
+// downlink.go.
 package uplink
 
 import (
@@ -43,9 +45,21 @@ const (
 	// writeTimeout: a write blocked this long is a dead socket.
 	writeTimeout = 10 * time.Second
 	// A box sends a few messages a second at most. Past the burst at this
-	// rate the connection closes; one home cannot occupy the service.
+	// rate the connection closes; one home cannot occupy the service. tun
+	// is counted apart.
 	rateBurst  = 60
 	ratePerSec = 10
+	// tun per home and direction, as the relay allows one stream. Past it
+	// the service drops tun and counts the drop; Noise transport survives a
+	// lost message.
+	tunMsgBurst   = 240
+	tunMsgPerSec  = 60
+	tunByteBurst  = 4 << 20
+	tunBytePerSec = 512 << 10
+	// maxPending bounds the pairing codes one roster may list, and
+	// maxPendingTTL how long one may last.
+	maxPending    = 4
+	maxPendingTTL = 3600
 )
 
 // Uplink is the /v1/box handler.
@@ -62,6 +76,8 @@ type Uplink struct {
 	// Dropped counts box messages of a type this service does not know. A
 	// newer box works with an older service by this rule.
 	Dropped atomic.Int64
+	// TunDropped counts tun messages past a home's limits.
+	TunDropped atomic.Int64
 
 	// OnConnect runs after a box's hello_ok, so the app sessions can ask a
 	// box that just came back for one-second updates and push can stop
@@ -112,7 +128,10 @@ func (u *Uplink) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	defer conn.Close()
 	conn.SetReadLimit(maxBoxFrame)
-	c := &boxConn{u: u, conn: conn, ekm: ekm, tokens: rateBurst, refilled: u.now()}
+	now := u.now()
+	c := &boxConn{u: u, conn: conn, ekm: ekm, tokens: rateBurst, refilled: now,
+		upMsgs: newBucket(tunMsgBurst, tunMsgPerSec, now), upBytes: newBucket(tunByteBurst, tunBytePerSec, now),
+		downMsgs: newBucket(tunMsgBurst, tunMsgPerSec, now), downBytes: newBucket(tunByteBurst, tunBytePerSec, now)}
 	c.write = c.writeFrame
 	if err := c.run(); err != nil && !websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
 		u.log.Debug("box uplink closed", "err", err)
@@ -130,6 +149,58 @@ func (u *Uplink) Watch(home string) {
 	}
 }
 
+// Tun sends a phone's tun to its home's box. t.Dev is the device the app
+// session's own handshake matched, never one a phone named. False means no
+// box takes it now: none is connected, or it does not take tun. A message
+// past the home's limits is dropped and counted, and Tun still says true,
+// because the box is there.
+func (u *Uplink) Tun(home string, t cloudwire.Tun) bool {
+	u.mu.Lock()
+	c := u.conns[home]
+	u.mu.Unlock()
+	if c == nil || !c.tun {
+		return false
+	}
+	c.downMu.Lock()
+	ok := tunAllowed(&c.downMsgs, &c.downBytes, len(t.D), u.now())
+	c.downMu.Unlock()
+	if !ok {
+		u.TunDropped.Add(1)
+		return true
+	}
+	return c.send(tun(t)) == nil
+}
+
+// Restore holds each home's last signed roster again after a restart, read
+// back from the registry, so its phones are admitted before its box has
+// reconnected. A roster that does not verify with the home's key is left
+// out. The roster's time to live counts from when it first arrived.
+func (u *Uplink) Restore() (int, error) {
+	homes, err := u.registry.Rosters()
+	if err != nil {
+		return 0, err
+	}
+	n := 0
+	for _, h := range homes {
+		pub, err := cloudwire.ParsePublicKey(h.PK)
+		if err != nil || cloudwire.HomeID(h.PK) != h.ID {
+			continue
+		}
+		env, err := cloudwire.DecodeEnvelope(h.Roster)
+		if err != nil || env.T != cloudwire.MsgRoster || cloudwire.Verify(pub, h.ID, env) != nil {
+			u.log.Warn("a stored roster does not verify; its home waits for its box")
+			continue
+		}
+		var r cloudwire.Roster
+		if cloudwire.Unmarshal(env.B, &r) != nil {
+			continue
+		}
+		u.store.Seed(h.ID, &r, h.RosterAt)
+		n++
+	}
+	return n, nil
+}
+
 // boxConn is one box's connection.
 type boxConn struct {
 	u    *Uplink
@@ -143,11 +214,53 @@ type boxConn struct {
 	pub    *ecdsa.PublicKey
 	handle *store.Handle
 	purged bool
+	// tun is whether the box listed tun in hello.caps. An older box closes
+	// the uplink on a type it does not know, so it is sent none.
+	tun bool
 	// bye is the reason the box gave for leaving, if it gave one.
 	bye string
 
 	tokens   float64
 	refilled time.Time
+
+	// The tunnel's limits: up from the box, read on its goroutine; down
+	// from the home's phones, from theirs.
+	upMsgs, upBytes bucket
+	downMu          sync.Mutex
+	downMsgs        bucket
+	downBytes       bucket
+}
+
+// bucket is a token bucket.
+type bucket struct {
+	tokens, burst, rate float64
+	at                  time.Time
+}
+
+func newBucket(burst, rate float64, now time.Time) bucket {
+	return bucket{tokens: burst, burst: burst, rate: rate, at: now}
+}
+
+func (b *bucket) take(n float64, now time.Time) bool {
+	b.tokens = min(b.burst, b.tokens+now.Sub(b.at).Seconds()*b.rate)
+	b.at = now
+	if b.tokens < n {
+		return false
+	}
+	b.tokens -= n
+	return true
+}
+
+// tunAllowed takes one message of n bytes from a direction's two buckets.
+func tunAllowed(msgs, bytes *bucket, n int, now time.Time) bool {
+	if !msgs.take(1, now) {
+		return false
+	}
+	if !bytes.take(float64(n), now) {
+		msgs.tokens++
+		return false
+	}
+	return true
 }
 
 func (c *boxConn) writeFrame(frame []byte) error {
@@ -196,6 +309,14 @@ func (c *boxConn) run() error {
 		if c.handle, err = c.u.store.For(store.Principal{Kind: store.Box, Home: c.home}); err != nil {
 			return err
 		}
+	}
+	if err := c.send(helloOK{BoxNonce: hello.BoxNonce, EKM: c.ekm, Have: map[string]string{}, RosterSeq: c.rosterSeq()}); err != nil {
+		return err
+	}
+	// The connection becomes the home's only after hello_ok has gone, so a
+	// watch or a tun from a phone can never reach the box before it: the
+	// box closes on anything else while it waits for hello_ok.
+	if !c.purged {
 		gen := c.handle.Connected()
 		defer c.handle.Disconnected(gen)
 		c.u.mu.Lock()
@@ -216,13 +337,9 @@ func (c *boxConn) run() error {
 				c.u.OnGone(c.home, c.bye)
 			}
 		}()
-	}
-
-	if err := c.send(helloOK{BoxNonce: hello.BoxNonce, EKM: c.ekm, Have: map[string]string{}, RosterSeq: c.rosterSeq()}); err != nil {
-		return err
-	}
-	if !c.purged && c.u.OnConnect != nil {
-		go c.u.OnConnect(c.home)
+		if c.u.OnConnect != nil {
+			go c.u.OnConnect(c.home)
+		}
 	}
 
 	done := make(chan struct{})
@@ -238,12 +355,18 @@ func (c *boxConn) run() error {
 			return err
 		}
 		_ = c.conn.SetReadDeadline(time.Now().Add(readTimeout))
-		if !c.allow() {
-			return fmt.Errorf("%w: faster than %d messages a second", errProtocol, ratePerSec)
-		}
 		env, err := parseUplink(kind, msg)
 		if err != nil {
 			return err
+		}
+		if env.T == cloudwire.MsgTun && !c.purged {
+			if err := c.fromBox(env); err != nil {
+				return err
+			}
+			continue
+		}
+		if !c.allow() {
+			return fmt.Errorf("%w: faster than %d messages a second", errProtocol, ratePerSec)
 		}
 		stop, err := c.apply(env)
 		if err != nil || stop {
@@ -269,8 +392,26 @@ func (c *boxConn) hello(env cloudwire.Envelope, nonce []byte) (cloudwire.Hello, 
 	if !bytes.Equal(h.Nonce, nonce) || !bytes.Equal(h.EKM, c.ekm) || len(h.BoxNonce) != cloudwire.NonceBytes {
 		return h, fmt.Errorf("%w: hello is not bound to this challenge and TLS session", errProtocol)
 	}
-	c.home, c.pub = home, pub
+	c.home, c.pub, c.tun = home, pub, slices.Contains(h.Caps, cloudwire.CapTun)
 	return h, nil
+}
+
+// fromBox routes one tun from the box to the phone whose session it is. It
+// is not signed and never read: d is the phone's and the box's. A phone that
+// has gone gets its session ended at the box.
+func (c *boxConn) fromBox(env cloudwire.Envelope) error {
+	var t cloudwire.Tun
+	if len(env.Sig) != 0 || cloudwire.Unmarshal(env.B, &t) != nil || len(t.D) > cloudwire.TunDataMax || t.Dev == "" {
+		return fmt.Errorf("%w: a tun the service cannot route", errProtocol)
+	}
+	if !tunAllowed(&c.upMsgs, &c.upBytes, len(t.D), c.u.now()) {
+		c.u.TunDropped.Add(1)
+		return nil
+	}
+	if !c.handle.Tun(t) && !t.Ended() && c.tun {
+		return c.send(tun{Dev: t.Dev, Sid: t.Sid})
+	}
+	return nil
 }
 
 func (c *boxConn) rosterSeq() uint64 {
@@ -362,6 +503,10 @@ func (c *boxConn) apply(env cloudwire.Envelope) (stop bool, err error) {
 		c.u.Dropped.Add(1)
 		return false, nil
 	}
+	if !c.handle.Serving() {
+		// The readable copy is off: the service holds no readings.
+		return false, nil
+	}
 	raw, err := env.Encode()
 	if err != nil {
 		return true, err
@@ -398,8 +543,14 @@ func (c *boxConn) roster(env cloudwire.Envelope) error {
 		}
 		return true
 	}
-	if len(r.Grant.ID) != cloudwire.GrantIDBytes || r.Grant.Controller == "" || r.TTLS <= 0 ||
-		!within(r.Grant.Scopes, protocol.CloudScopes) || !within(r.Grant.Purposes, protocol.CloudPurposes) {
+	// A grant has three shapes: a copy with serve, a withdrawn one with its
+	// id alone, or none at all.
+	g := r.Grant
+	on := len(g.ID) == cloudwire.GrantIDBytes && slices.Contains(g.Purposes, protocol.CloudPurposeServe)
+	bare := len(g.Scopes) == 0 && len(g.Purposes) == 0
+	withdrawn := len(g.ID) == cloudwire.GrantIDBytes && bare
+	if !(on || withdrawn || (len(g.ID) == 0 && bare)) || g.Controller == "" || r.TTLS <= 0 ||
+		!within(g.Scopes, protocol.CloudScopes) || !within(g.Purposes, protocol.CloudPurposes) {
 		return fmt.Errorf("%w: a roster outside what FTW Cloud may hold", errProtocol)
 	}
 	for _, d := range r.Devices {
@@ -407,8 +558,21 @@ func (c *boxConn) roster(env cloudwire.Envelope) error {
 			return fmt.Errorf("%w: a roster device the service cannot use", errProtocol)
 		}
 	}
+	if len(r.Pending) > maxPending {
+		return fmt.Errorf("%w: %d pairing codes in one roster", errProtocol, len(r.Pending))
+	}
+	for _, p := range r.Pending {
+		if len(p.Hash) != cloudwire.PairingHashBytes || p.TTLS <= 0 || p.TTLS > maxPendingTTL {
+			return fmt.Errorf("%w: a pairing code the service cannot hold", errProtocol)
+		}
+	}
 	if !c.handle.SetRoster(&r) {
 		return nil // older than what is held: ignored
+	}
+	if withdrawn {
+		if err := c.dropCopy(g.ID); err != nil {
+			return err
+		}
 	}
 	if c.u.OnRoster != nil {
 		c.u.OnRoster(c.home, &r)
@@ -427,6 +591,19 @@ func (c *boxConn) roster(env cloudwire.Envelope) error {
 		epochs[d.ID] = d.Epoch
 	}
 	return c.u.registry.PruneSuspensions(c.home, epochs)
+}
+
+// dropCopy deletes what the service holds under a grant its owner withdrew,
+// the readings and the extension tokens that read them, and sends the signed
+// receipt. The home, its roster and its tunnel stay. A roster that names the
+// same withdrawn grant again gets the receipt again.
+func (c *boxConn) dropCopy(grantID []byte) error {
+	c.handle.DropCopy()
+	if err := c.u.registry.TokenPrune(c.home, func(string, uint64) bool { return false }); err != nil {
+		return err
+	}
+	c.u.log.Info("a home's readable copy deleted at its box's request")
+	return c.send(purged{AtMs: c.u.now().UnixMilli(), What: cloudwire.PurgedCopy, GrantID: grantID})
 }
 
 // purge deletes the home and sends the signed receipt. For a home already

@@ -26,7 +26,8 @@ func roster(seq uint64, grant ...string) *cloudwire.Roster {
 			{ID: "owner", Key: ownerKey, Role: "owner", Scopes: protocol.CloudScopes},
 			{ID: "viewer", Key: viewerKey, Role: "viewer", Scopes: []string{protocol.ScopeLiveRead}},
 		},
-		Grant: cloudwire.Grant{ID: make([]byte, 16), Scopes: grant, Controller: "sourceful"}}
+		Grant: cloudwire.Grant{ID: make([]byte, 16), Scopes: grant, Purposes: []string{protocol.CloudPurposeServe},
+			Controller: "sourceful"}}
 }
 
 func filled(t *testing.T) (*Store, *Handle, *clock) {

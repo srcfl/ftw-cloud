@@ -16,8 +16,8 @@ github.com/ncruces/go-strftime v1.0.0 h1:HMFp8mLCTPp341M/ZnA4qaf7ZlsbTc+miZjCLOF
 github.com/ncruces/go-strftime v1.0.0/go.mod h1:Fwc5htZGVVkseilnfgOVb9mKy6w1naJmn9CehxcKcls=
 github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec h1:W09IVJc94icq4NjY3clb7Lk8O1qJ8BdBEF8z0ibU0rE=
 github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec/go.mod h1:qqbHyh8v60DhA7CoWK5oRCqLrMHRGoxYCSS9EjAz6Eo=
-github.com/srcfl/ftw/go/protocol v0.0.0-20261014110822-7c72a5b33aa0 h1:4p9TFWdkIk5y2fK3/9FOeUV9AukTjIBd7jQZDLG8Qx8=
-github.com/srcfl/ftw/go/protocol v0.0.0-20261014110822-7c72a5b33aa0/go.mod h1:VEjr/o0yZijJ1nApuJK+nak6FxJ/fubAUBNOunqNrUU=
+github.com/srcfl/ftw/go/protocol v0.0.0-20261015144614-0a5e04691065 h1:tKaqxGV1K69ljIBH1szkDz3zxqeZKdu5eanSeDY9qNo=
+github.com/srcfl/ftw/go/protocol v0.0.0-20261015144614-0a5e04691065/go.mod h1:VEjr/o0yZijJ1nApuJK+nak6FxJ/fubAUBNOunqNrUU=
 github.com/x448/float16 v0.8.4 h1:qLwI1I70+NjRFUR3zs1JPUCgaCXSh3SW62uAKT1mSBM=
 github.com/x448/float16 v0.8.4/go.mod h1:14CWIYCyZA/cWjXOioeEpHeN/83MdbZDRQHoFcYsOfg=
 golang.org/x/crypto v0.57.0 h1:3ZVCjf8Ggz7zneR/EHRVx68Ctf+2pmIMP2UFhh9cC6M=

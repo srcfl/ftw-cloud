@@ -99,6 +99,14 @@ func serve(args []string) error {
 	st := store.New(nil)
 	st.UseSuspensions(reg.Suspended)
 	up := uplink.New(st, reg, key, log)
+	// A restart is a deploy, and commands ride through here: phones are
+	// admitted by the rosters their boxes signed before, without waiting
+	// for every box to reconnect.
+	if n, err := up.Restore(); err != nil {
+		return err
+	} else if n > 0 {
+		log.Info("rosters restored from the registry", "homes", n)
+	}
 	tokens := token.New(st, reg, log)
 	srv := &server.Server{Store: st, Registry: reg, Uplink: up, Tokens: tokens, Log: log}
 
@@ -134,6 +142,7 @@ func serve(args []string) error {
 		srv.App = appsession.New(st, reg, up, noise, log)
 		srv.App.Push = pushSvc
 		srv.App.Tokens = tokens
+		srv.App.Tunnel = up
 	}
 	app := srv.App
 	up.OnConnect = func(home string) {
@@ -179,6 +188,9 @@ func serve(args []string) error {
 	defer stop()
 	go srv.Upkeep(ctx, time.Minute)
 	go pushSvc.Run(ctx)
+	if err := pushSvc.Resume(); err != nil {
+		log.Warn("could not restart the dead man's switch", "err", err)
+	}
 	if *devPush != "" {
 		if err := serveDevPush(ctx, *devPush, reg, pushSvc, sender, log); err != nil {
 			return err
