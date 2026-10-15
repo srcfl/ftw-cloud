@@ -456,16 +456,29 @@ func TestTheWarmSessionClosesWhenIdle(t *testing.T) {
 	}
 }
 
-// A box that takes no agents yet says so in words.
-func TestABoxWithoutAgentsSaysSo(t *testing.T) {
+// A box from before the agent contract names no Noise key in its roster: it
+// takes no agents, and says so in words. Once its signed roster names one,
+// it does.
+func TestABoxWithoutANoiseKeyTakesNoAgents(t *testing.T) {
 	w := newWorld(t)
 	b := w.connectBox()
+	b.mu.Lock()
+	b.noNoise = true
+	b.mu.Unlock()
 	a := w.connect(b, "")
-	w.mu.Lock()
-	delete(w.boxes, b.home)
-	w.mu.Unlock()
 	if _, isErr, text := a.call("status", nil); !isErr || !strings.Contains(text, "newer FTW version") {
 		t.Fatalf("%v %s", isErr, text)
+	}
+	if h, _, _ := b.counts(); h != 0 {
+		t.Fatal("a session was opened to a box that named no key")
+	}
+	b.mu.Lock()
+	b.noNoise = false
+	b.mu.Unlock()
+	b.sendRoster()
+	waitFor(t, func() bool { _, ok := RosterBoxKey(w.reg)(b.home); return ok })
+	if _, isErr, text := a.call("status", nil); isErr {
+		t.Fatal(text)
 	}
 }
 

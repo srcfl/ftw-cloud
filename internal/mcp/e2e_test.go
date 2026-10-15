@@ -48,6 +48,7 @@ type world struct {
 	t     *testing.T
 	srv   *httptest.Server
 	st    *store.Store
+	reg   *registry.Registry
 	up    *uplink.Uplink
 	auth  *oauth.Server
 	keys  *keys.Server
@@ -66,6 +67,7 @@ func newWorld(t *testing.T, opts ...func(*world)) *world {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = reg.Close() })
+	w.reg = reg
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	w.st = store.New(nil)
 	w.st.UseSuspensions(reg.Suspended)
@@ -79,7 +81,7 @@ func newWorld(t *testing.T, opts ...func(*world)) *world {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = w.auth.Close() })
-	w.pool = NewPool(w.st, w.up, kc, w.boxKey, log)
+	w.pool = NewPool(w.st, w.up, kc, RosterBoxKey(reg), log)
 	w.pool.Handshake = 400 * time.Millisecond
 	w.mcp = New(w.auth, w.pool, log)
 	w.up.OnRoster = w.auth.Roster
@@ -102,18 +104,6 @@ func newWorld(t *testing.T, opts ...func(*world)) *world {
 	w.srv.StartTLS()
 	t.Cleanup(w.srv.Close)
 	return w
-}
-
-// boxKey is where the box's Noise key comes from until the contract says:
-// here, the stub boxes themselves.
-func (w *world) boxKey(home string) ([]byte, bool) {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	b := w.boxes[home]
-	if b == nil {
-		return nil, false
-	}
-	return b.static.Public(), true
 }
 
 // --------------------------------------------------------------------------
@@ -155,7 +145,10 @@ type stubBox struct {
 	cmds       []protocol.Cmd
 	cmdReply   func(protocol.Cmd) []any
 	requests   []protocol.AgentRequest
-	closed     chan struct{}
+	// noNoise is a box from before the agent contract: its roster names no
+	// Noise key.
+	noNoise bool
+	closed  chan struct{}
 }
 
 type boxSession struct {
@@ -302,8 +295,17 @@ func (b *stubBox) sendRoster() {
 			Tun: true, Agent: &cloudwire.Agent{Scopes: a.scopes, Ops: a.ops, Caps: a.caps, ExpiresAtMs: a.until.UnixMilli(),
 				Principal: protocol.Principal{Client: "Test assistant", ClientID: a.clientID}}})
 	}
+	noNoise := b.noNoise
 	b.mu.Unlock()
-	b.send(cloudwire.MsgRoster, r)
+	if noNoise {
+		b.send(cloudwire.MsgRoster, r)
+		return
+	}
+	// The box names its Noise key in the roster it signs.
+	b.send(cloudwire.MsgRoster, struct {
+		cloudwire.Roster
+		Noise []byte `cbor:"noise"`
+	}{r, b.static.Public()})
 }
 
 func (b *stubBox) serve() {
@@ -744,4 +746,17 @@ func (a *assistant) call(name string, args map[string]any) (result map[string]an
 	}
 	isError, _ = res["isError"].(bool)
 	return res, isError, text
+}
+
+// waitFor waits up to two seconds for cond, as a roster takes a moment to
+// reach the authorization server and the registry.
+func waitFor(t *testing.T, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatal("timed out")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }

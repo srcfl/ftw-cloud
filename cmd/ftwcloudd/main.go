@@ -123,10 +123,10 @@ func serve(args []string) error {
 	}
 	defer auth.Close()
 	srv.OAuth = auth
-	// Each agent's session goes to its box through the door, as tun. The
-	// box's Noise key comes from the box with the agent contract; until a
-	// box says it, its home takes no agents and the tools say so.
-	agents := mcp.NewPool(st, up, agentKeys, func(string) ([]byte, bool) { return nil, false }, log)
+	// Each agent's session goes to its box through the door, as tun, to the
+	// Noise key the box names in the roster it signs. A box that names none
+	// takes no agents yet, and the tools say so.
+	agents := mcp.NewPool(st, up, agentKeys, mcp.RosterBoxKey(reg), log)
 	auth.OnRevoke = agents.Drop
 	srv.MCP = mcp.New(auth, agents, log)
 

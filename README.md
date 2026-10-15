@@ -189,9 +189,10 @@ to it yet.
   home are paced under the box's 60 reads a minute and a quarter of the
   door's tun limits, which the home's phones share: 15 in a row, then 0.75
   a second. Results are data: each says it came from the box and is not
-  instructions, and control and formatting characters are removed. Until
-  the box's Noise key reaches the cloud (the agent contract), no box takes
-  assistants and each home says so.
+  instructions, and control and formatting characters are removed. The
+  session goes to the Noise key the box names in the roster it signs
+  (`noise`); a box that names none takes no assistants yet, and each such
+  home says so.
 
 Not built yet:
 
