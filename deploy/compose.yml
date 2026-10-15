@@ -24,6 +24,13 @@ services:
     environment:
       # /source publishes it, so anyone can compare it with what CI built.
       FTW_CLOUD_IMAGE: ${FTW_CLOUD_IMAGE}
+      # The host has 2 GiB. Near this the garbage collector works harder
+      # instead of letting the heap grow into the kernel's OOM killer.
+      GOMEMLIMIT: 1400MiB
+    # On SIGTERM the service closes every socket with 4503 and a spread,
+    # lets queued alerts go, and exits; give it the time (deploy/README.md,
+    # "Deploys").
+    stop_grace_period: 15s
     volumes:
       # The registry and certificates. No readings are ever written here.
       - ftw-cloud-state:/state

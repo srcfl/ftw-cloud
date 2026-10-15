@@ -116,8 +116,9 @@ cat > /usr/local/sbin/ftw-cloud-deploy <<'DEPLOY'
 #   ftw-cloud-deploy sha256:<64 hex>
 #
 # The Image workflow's run on main shows the digest. With no argument, it
-# runs the digest in /etc/ftw-cloud/compose.env again. Every box reconnects
-# within seconds; there is nothing to drain.
+# runs the digest in /etc/ftw-cloud/compose.env again. The old container
+# drains on SIGTERM: every box and phone hears 4503 and comes back within
+# the spread it names (deploy/README.md, "Deploys").
 set -euo pipefail
 export HOME=${HOME:-/root}
 repo=ghcr.io/srcfl/ftw-cloud

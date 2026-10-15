@@ -44,6 +44,16 @@ maintains it.
   so it cannot make data look fresher; keep it that way.
 - **Import only `go/protocol` from `srcfl/ftw`.** `scripts/check-imports.sh`
   fails on anything else.
+- **A home lives on one shard** (`internal/shard`). An instance that does not
+  hold a home names the host that does (4421, or 421 with `Ftw-Shard`)
+  before it reads message 1 or touches the registry. Nothing about a home
+  crosses between instances: no shared pub/sub, no shared storage. With no
+  `-shards` file one instance holds every home.
+- **Counts name nobody.** `/metrics` listens on loopback only, and it and
+  the minute's log line sum over all homes: no home id, device or address.
+- **A deploy drains.** On SIGTERM every box and phone hears 4503 with a
+  spread before the process exits, and no drained box starts
+  `box.unreachable`.
 
 ## Work
 
@@ -54,20 +64,24 @@ maintains it.
   and the service is over it. The one-door plan gives each part a budget of
   its own, and the numbers are Fredrik's call. Until he sets them, a PR that
   grows a part says by how much. Lines of Go without tests, at
-  srcfl/ftw-cloud#15:
+  srcfl/ftw-cloud#17 (#15 in brackets):
 
   | Part | Lines |
   |---|---|
-  | `internal/appsession` (app session, one-shot read) | 1,020 |
-  | `internal/store` | 807 |
-  | `internal/uplink` | 719 |
-  | `internal/registry` | 694 |
-  | `cmd/ftwcloudd` | 553 |
-  | `internal/push` | 542 |
-  | `internal/apns` | 299 |
-  | `internal/server` | 205 |
-  | `internal/token` | 170 |
-  | All | 5,009 |
+  | `internal/appsession` (app session, one-shot read) | 1,103 (1,020) |
+  | `internal/uplink` | 930 (719) |
+  | `internal/registry` | 884 (694) |
+  | `internal/push` | 877 (542) |
+  | `internal/store` | 854 (807) |
+  | `cmd/ftwcloudd` | 719 (553) |
+  | `internal/metrics` | 448 (new) |
+  | `internal/apns` | 299 (299) |
+  | `internal/token` | 214 (170) |
+  | `internal/server` | 199 (205) |
+  | `internal/shard` | 187 (new) |
+  | All | 6,714 (5,009) |
+
+  `cmd/ftwload`, the load harness, is a tool and not the service (1,938).
 - Nothing is deployed from here without the owner. `deploy/` describes the
   running host; it does not run itself.
 - Keep task breakdowns and agent notes out of the repository.

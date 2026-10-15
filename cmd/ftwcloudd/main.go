@@ -5,6 +5,7 @@
 //	ftwcloudd keygen -out service.key          make the service key; prints its public half
 //	ftwcloudd keygen -noise -out noise.key     make the Noise key phones dial; prints its public half
 //	ftwcloudd metrics                          print the running service's counts, from inside its container
+//	ftwcloudd move -shards f -shard s2 -to f   copy the registry rows of the homes the directory gives s2
 //	ftwcloudd [flags]                          serve
 package main
 
@@ -57,6 +58,13 @@ func main() {
 		}
 		return
 	}
+	if len(os.Args) > 1 && os.Args[1] == "move" {
+		if err := move(os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
 	if len(os.Args) > 1 && os.Args[1] == "metrics" {
 		if err := printMetrics(os.Args[2:]); err != nil {
 			fmt.Fprintln(os.Stderr, err)
@@ -88,6 +96,7 @@ func serve(args []string) error {
 	shardsPath := fs.String("shards", "", "shard directory, JSON; without it this instance holds every home")
 	metricsAddr := fs.String("metrics-listen", defaultMetricsAddr, "loopback address for /metrics; empty turns it off")
 	restartRate := fs.Int("restart-rate", defaultRestartRate, "sockets a second the next instance can take after a restart; sets the spread of the redial")
+	restartMin := fs.Duration("restart-spread-min", 5*time.Second, "the shortest spread: about how long the next instance takes to start")
 	_ = fs.Parse(args)
 
 	harden()
@@ -252,7 +261,7 @@ func serve(args []string) error {
 		if app != nil {
 			phones = app.Sockets()
 		}
-		spread := restartSpread(up.Boxes()+phones, *restartRate)
+		spread := restartSpread(up.Boxes()+phones, *restartRate, *restartMin)
 		reason := strconv.FormatInt(spread.Milliseconds(), 10)
 		boxes := up.Drain(reason)
 		if app != nil {
@@ -284,13 +293,14 @@ func serve(args []string) error {
 const defaultRestartRate = 500
 
 // restartSpread is how long sockets wait at most before they redial: their
-// number at rate a second, from 1 s to cloudwire.RestartSpreadMaxMs.
-func restartSpread(sockets, rate int) time.Duration {
+// number at rate a second, at least floor, which covers the next instance's
+// start, and at most cloudwire.RestartSpreadMaxMs.
+func restartSpread(sockets, rate int, floor time.Duration) time.Duration {
 	if rate <= 0 {
 		rate = defaultRestartRate
 	}
 	d := time.Duration(sockets) * time.Second / time.Duration(rate)
-	return min(max(d, time.Second), time.Duration(cloudwire.RestartSpreadMaxMs)*time.Millisecond)
+	return min(max(d, floor), time.Duration(cloudwire.RestartSpreadMaxMs)*time.Millisecond)
 }
 
 // defaultMetricsAddr is inside the container only; an operator reads it
@@ -316,6 +326,40 @@ func serveMetrics(ctx context.Context, addr string) error {
 		<-ctx.Done()
 		_ = m.Close()
 	}()
+	return nil
+}
+
+// move copies the registry rows of every home a directory gives one shard
+// into that shard's registry file, and with -drop deletes them here. See
+// deploy/README.md, "Shards".
+func move(args []string) error {
+	fs := flag.NewFlagSet("move", flag.ExitOnError)
+	from := fs.String("registry", "/state/registry.db", "this shard's registry")
+	to := fs.String("to", "", "the registry file of the shard the homes move to")
+	dir := fs.String("shards", "", "the directory that gives the homes their new shard")
+	name := fs.String("shard", "", "the shard the homes move to")
+	drop := fs.Bool("drop", false, "delete the moved homes here once copied; only after this shard has stopped holding them")
+	_ = fs.Parse(args)
+	if *to == "" || *dir == "" || *name == "" {
+		return errors.New("move: -to, -shards and -shard are required")
+	}
+	d, err := shard.Load(*dir)
+	if err != nil {
+		return err
+	}
+	if *drop && d.Self() == *name {
+		return fmt.Errorf("move: -drop deletes the homes from %s, the shard they move to", *name)
+	}
+	reg, err := registry.Open(*from)
+	if err != nil {
+		return err
+	}
+	defer reg.Close()
+	n, err := reg.MoveTo(*to, func(home string) bool { return d.Of(home) == *name }, *drop)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("moved %d homes to %s\n", n, *name)
 	return nil
 }
 

@@ -168,11 +168,16 @@ func (d *Directory) Shards() int { return len(d.hosts) }
 // Owner is the host of the shard that holds home, and whether that is this
 // instance.
 func (d *Directory) Owner(home string) (host string, ours bool) {
-	name, moved := d.homes[home]
-	if !moved {
-		name = d.buckets[Bucket(home)]
-	}
+	name := d.Of(home)
 	return d.hosts[name], name == d.self
+}
+
+// Of is the name of the shard that holds home.
+func (d *Directory) Of(home string) string {
+	if name, moved := d.homes[home]; moved {
+		return name
+	}
+	return d.buckets[Bucket(home)]
 }
 
 // Ours reports whether this instance holds home.
