@@ -261,15 +261,19 @@ type Away struct {
 
 // AwaySet records that a home's box went and when box.unreachable is due.
 func (r *Registry) AwaySet(home string, due time.Time) error {
-	_, err := r.db.Exec(`INSERT INTO away (home, due_ms, told) SELECT ?, ?, 0 WHERE EXISTS (SELECT 1 FROM homes WHERE home = ?)
-		ON CONFLICT (home) DO UPDATE SET due_ms = excluded.due_ms, told = 0`, home, due.UnixMilli(), home)
-	return err
+	return r.durably(func(ctx context.Context, c *sql.Conn) error {
+		_, err := c.ExecContext(ctx, `INSERT INTO away (home, due_ms, told) SELECT ?, ?, 0 WHERE EXISTS (SELECT 1 FROM homes WHERE home = ?)
+			ON CONFLICT (home) DO UPDATE SET due_ms = excluded.due_ms, told = 0`, home, due.UnixMilli(), home)
+		return err
+	})
 }
 
 // AwayTold records that box.unreachable went.
 func (r *Registry) AwayTold(home string) error {
-	_, err := r.db.Exec(`UPDATE away SET told = 1 WHERE home = ?`, home)
-	return err
+	return r.durably(func(ctx context.Context, c *sql.Conn) error {
+		_, err := c.ExecContext(ctx, `UPDATE away SET told = 1 WHERE home = ?`, home)
+		return err
+	})
 }
 
 // AwayClear forgets a home's absence: its box is back, or the home is gone.
@@ -445,7 +449,11 @@ func (r *Registry) PruneSuspensions(home string, epochs map[string]uint64) error
 	if err != nil {
 		return err
 	}
-	var gone []string
+	type entry struct {
+		id    string
+		epoch uint64
+	}
+	var gone []entry
 	for rows.Next() {
 		var id string
 		var epoch int64
@@ -454,14 +462,32 @@ func (r *Registry) PruneSuspensions(home string, epochs map[string]uint64) error
 			return err
 		}
 		if e, ok := epochs[id]; !ok || e != uint64(epoch) {
-			gone = append(gone, id)
+			gone = append(gone, entry{id, uint64(epoch)})
 		}
 	}
 	_ = rows.Close()
-	for _, id := range gone {
-		if err := r.Unsuspend(home, id); err != nil {
+	for _, g := range gone {
+		if err := r.unsuspendAt(home, g.id, g.epoch); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+// unsuspendAt lifts a suspension only if it is still at epoch: an owner who
+// suspended the device again, at its new epoch, while a roster was being
+// pruned keeps that suspension.
+// The file goes first and memory after, each only at epoch, so whichever
+// order a new suspension lands in, it stays; and admission, which reads
+// memory under a home's lock, never waits for the file.
+func (r *Registry) unsuspendAt(home, deviceID string, epoch uint64) error {
+	if _, err := r.db.Exec(`DELETE FROM suspensions WHERE home = ? AND device_id = ? AND epoch = ?`, home, deviceID, int64(epoch)); err != nil {
+		return err
+	}
+	r.susMu.Lock()
+	defer r.susMu.Unlock()
+	if held, ok := r.suspended[suspendKey{home, deviceID}]; ok && held == epoch {
+		delete(r.suspended, suspendKey{home, deviceID})
 	}
 	return nil
 }

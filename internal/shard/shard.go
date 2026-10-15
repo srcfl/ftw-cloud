@@ -74,8 +74,8 @@ type File struct {
 	Homes   map[string]string   `json:"homes"`
 }
 
-// Load reads a directory file. Every host must be the default shard's host
-// or one label under it, as clients check before they follow.
+// Load reads a directory file. Every host must be cloudwire.DefaultHost or
+// one label under it, as clients check before they follow.
 func Load(path string) (*Directory, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
@@ -94,15 +94,16 @@ func Load(path string) (*Directory, error) {
 	return d, nil
 }
 
-// Directory checks the file and builds the directory from it.
+// Directory checks the file and builds the directory from it. Clients
+// follow a host only if it is cloudwire.DefaultHost or one label under it,
+// so a directory that names any other is refused.
 func (f File) Directory() (*Directory, error) {
-	base, ok := f.Shards[f.Default]
-	if !ok {
+	if _, ok := f.Shards[f.Default]; !ok {
 		return nil, fmt.Errorf("default shard %q has no host", f.Default)
 	}
 	for name, host := range f.Shards {
-		if name == "" || !cloudwire.ShardHostOK(base, host) {
-			return nil, fmt.Errorf("shard %q at %q: a host must be %s or one label under it", name, host, base)
+		if name == "" || !cloudwire.ShardHostOK(cloudwire.DefaultHost, host) {
+			return nil, fmt.Errorf("shard %q at %q: a host must be %s or one label under it", name, host, cloudwire.DefaultHost)
 		}
 	}
 	if _, ok := f.Shards[f.Self]; !ok {

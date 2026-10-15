@@ -29,9 +29,11 @@
 package push
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"log/slog"
+	"math/rand/v2"
 	"net/http"
 	"slices"
 	"sync"
@@ -79,11 +81,17 @@ const (
 	// of box.unreachable for every home at once; past it an alert is
 	// dropped, logged and counted, never silently.
 	MaxAlertsQueued = 50_000
-	// alertTries is how often one alert goes to Apple when Apple or the
-	// network fails for a while, each after twice the last wait from
-	// alertRetryAfter, while the alert is still worth showing.
-	alertTries      = 4
+	// An alert Apple or the network could not take goes again until it
+	// expires, after a wait that doubles from alertRetryAfter up to
+	// alertRetryMax, each between three quarters and all of it so retries
+	// from many homes do not arrive together.
 	alertRetryAfter = 2 * time.Second
+	alertRetryMax   = 5 * time.Minute
+	// WidgetWorkers send widget pushes side by side, within the one rate.
+	WidgetWorkers = 3
+	// widgetRetryAfter is when a widgets push Apple could not take goes
+	// once more.
+	widgetRetryAfter = 30 * time.Second
 	// WidgetHomesPerSecond and widgetBurst bound widget pushes over all
 	// homes. Tomorrow's prices reach every box within a minute or so;
 	// this turns that into a steady stream to Apple, which keeps alerts
@@ -172,21 +180,27 @@ type Service struct {
 	busy     atomic.Int64
 	retrying atomic.Int64
 	gate     gate
+	breaker  breaker
 
 	mu    sync.Mutex
 	homes map[string]*homeState
-	// widgetWaiting is the homes queued in widgets.
+	// widgetWaiting is the homes queued in widgets; widgetRetry the homes
+	// whose push failed once and goes once more.
 	widgetWaiting map[string]bool
+	widgetRetry   map[string]bool
 }
 
 // alertJob is one alert to a home's phones. On a retry, regs holds the
 // registrations Apple did not take, and tries how often it went.
+// unreachable marks box.unreachable, which is recorded as told only once a
+// phone took it.
 type alertJob struct {
-	home    string
-	payload []byte
-	expires time.Time
-	tries   int
-	regs    []registry.PushReg
+	home        string
+	payload     []byte
+	expires     time.Time
+	tries       int
+	regs        []registry.PushReg
+	unreachable bool
 }
 
 // homeState is one home's box connection, as the dead man's switch sees it,
@@ -223,6 +237,7 @@ func New(reg *registry.Registry, sender Sender, log *slog.Logger) *Service {
 		gate:          gate{rate: WidgetHomesPerSecond, burst: widgetBurst, tokens: widgetBurst},
 		homes:         map[string]*homeState{},
 		widgetWaiting: map[string]bool{},
+		widgetRetry:   map[string]bool{},
 	}
 }
 
@@ -233,7 +248,9 @@ func (s *Service) Run(ctx context.Context) {
 	for range AlertWorkers {
 		go s.alertWorker(ctx)
 	}
-	go s.widgetWorker(ctx)
+	for range WidgetWorkers {
+		go s.widgetWorker(ctx)
+	}
 	t := time.NewTicker(expireEvery)
 	defer t.Stop()
 	for {
@@ -281,14 +298,33 @@ func (s *Service) widgetWorker(ctx context.Context) {
 			}
 			continue
 		}
-		s.mu.Lock()
-		delete(s.widgetWaiting, home)
-		s.mu.Unlock()
-		if !s.gate.wait(ctx) {
+		retried := s.takeWidgets(home)
+		if !s.gate.wait(ctx) || !s.breaker.wait(ctx) {
 			return
 		}
-		s.sendWidgets(ctx, home)
+		if !s.sendWidgets(ctx, home) && !retried {
+			s.retryWidgets(home)
+		}
 	}
+}
+
+// takeWidgets marks a home's widgets push as taken from the queue, and
+// reports whether it is the one retry.
+func (s *Service) takeWidgets(home string) (retried bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.widgetWaiting, home)
+	retried = s.widgetRetry[home]
+	delete(s.widgetRetry, home)
+	return retried
+}
+
+// retryWidgets queues a home's failed widgets push once more, later.
+func (s *Service) retryWidgets(home string) {
+	s.mu.Lock()
+	s.widgetRetry[home] = true
+	s.mu.Unlock()
+	s.after(widgetRetryAfter, func() { s.queueWidgets(home) })
 }
 
 // Flush waits until no alert is queued, being sent or waiting to go again,
@@ -594,15 +630,14 @@ func (s *Service) unreachable(home string, gen uint64) {
 	}
 	st.told, st.stop = true, nil
 	s.mu.Unlock()
-	if err := s.reg.AwayTold(home); err != nil {
-		s.log.Warn("could not record box.unreachable as sent", "err", err)
-	}
 	s.log.Info("a box is out of reach; telling its phones")
 	payload, err := cloudwire.AlertPayload(cloudwire.Alert{Home: home, Kind: protocol.PushBoxUnreachable})
 	if err != nil {
 		return
 	}
-	s.queueAlert(alertJob{home: home, payload: payload, expires: s.now().Add(unreachableExpiry)})
+	// Told on disk only once a phone took it: an alert lost to a failure
+	// or an exit goes again after a restart.
+	s.queueAlert(alertJob{home: home, payload: payload, expires: s.now().Add(unreachableExpiry), unreachable: true})
 }
 
 func (s *Service) state(home string) *homeState {
@@ -638,47 +673,79 @@ func (s *Service) allow(home, kindName string) bool {
 // device an owner has suspended keeps its tokens, so lifting the suspension
 // brings its pushes back, but gets nothing meanwhile. A watch's token waits
 // for the watch app's topic.
-func (s *Service) regs(home, kindName string) []registry.PushReg {
+func (s *Service) regs(home, kindName string) ([]registry.PushReg, error) {
 	regs, err := s.reg.PushRegs(home, kindName)
 	if err != nil {
-		s.log.Warn("could not read push registrations", "err", err)
-		return nil
+		return nil, err
 	}
 	return slices.DeleteFunc(regs, func(r registry.PushReg) bool {
 		return s.reg.Suspended(home, r.DeviceID, r.Epoch) || (r.App == cloudwire.PushAppWatch && s.WatchApp == "")
-	})
+	}), nil
 }
 
 // sendAlert posts an alert to the home's registered devices. What Apple or
 // the network could not take goes again later, while the alert is worth
-// showing; a gone token is forgotten.
+// showing, and only to devices that may still get it; a gone token is
+// forgotten.
 func (s *Service) sendAlert(ctx context.Context, job alertJob) {
 	if s.sender == nil {
 		return
 	}
+	fresh, err := s.regs(job.home, cloudwire.PushKindAlert)
+	if err != nil {
+		s.log.Warn("could not read push registrations; the alert goes again", "err", err)
+		s.retryAlert(job, nil)
+		return
+	}
 	if job.tries == 0 {
-		job.regs = s.regs(job.home, cloudwire.PushKindAlert)
+		job.regs = fresh
 		if len(job.regs) == 0 {
+			s.told(job)
 			return
 		}
 		if !s.allow(job.home, cloudwire.PushKindAlert) {
 			pushCapped.Inc()
 			s.log.Warn("a home passed its push cap; push dropped", "kind", cloudwire.PushKindAlert, "cap_per_hour", MaxAlertsPerHour)
+			s.told(job)
+			return
+		}
+	} else {
+		// A device suspended, dropped by a roster or unregistered since
+		// the last try gets nothing.
+		job.regs = slices.DeleteFunc(job.regs, func(r registry.PushReg) bool {
+			return !slices.ContainsFunc(fresh, func(f registry.PushReg) bool { return bytes.Equal(f.Token, r.Token) })
+		})
+		if len(job.regs) == 0 {
+			s.told(job)
 			return
 		}
 	}
+	if !s.breaker.wait(ctx) {
+		return
+	}
 	job.tries++
-	again := s.deliver(ctx, job.home, cloudwire.PushKindAlert, job.payload, job.expires, job.regs)
-	if len(again) == 0 {
+	took, again := s.deliver(ctx, job.home, cloudwire.PushKindAlert, job.payload, job.expires, job.regs)
+	if took > 0 || len(again) == 0 {
+		s.told(job)
+	}
+	if len(again) > 0 {
+		s.retryAlert(job, again)
+	}
+}
+
+// retryAlert sends job again after its next wait, to again when it is not
+// nil, unless the alert has expired by then.
+func (s *Service) retryAlert(job alertJob, again []registry.PushReg) {
+	wait := min(alertRetryAfter<<min(max(job.tries-1, 0), 16), alertRetryMax)
+	wait -= time.Duration(rand.Int64N(int64(wait/4) + 1))
+	if !s.now().Add(wait).Before(job.expires) {
+		apnsResults[cloudwire.PushKindAlert]["failed"].Add(int64(max(len(again), 1)))
+		s.log.Warn("push: an alert could not reach Apple before it expired; given up", "tries", job.tries)
 		return
 	}
-	wait := alertRetryAfter << (job.tries - 1)
-	if job.tries >= alertTries || !s.now().Add(wait).Before(job.expires) {
-		apnsResults[cloudwire.PushKindAlert]["failed"].Add(int64(len(again)))
-		s.log.Warn("push: an alert could not reach Apple; given up", "devices", len(again), "tries", job.tries)
-		return
+	if again != nil {
+		job.regs = again
 	}
-	job.regs = again
 	s.retrying.Add(1)
 	s.after(wait, func() {
 		s.queueAlert(job)
@@ -686,27 +753,46 @@ func (s *Service) sendAlert(ctx context.Context, job alertJob) {
 	})
 }
 
-// sendWidgets posts a widgets push to the home's registered devices, once.
-func (s *Service) sendWidgets(ctx context.Context, home string) {
-	if s.sender == nil {
+// told records box.unreachable as sent, once a phone took it or nobody was
+// left to tell, so a restart does not send it again.
+func (s *Service) told(job alertJob) {
+	if !job.unreachable {
 		return
 	}
-	regs := s.regs(home, KindWidgets)
-	if len(regs) == 0 {
-		return
-	}
-	if !s.allow(home, KindWidgets) {
-		pushCapped.Inc()
-		return
-	}
-	if again := s.deliver(ctx, home, KindWidgets, widgetsPayload, s.now().Add(widgetsExpiry), regs); len(again) > 0 {
-		apnsResults[KindWidgets]["failed"].Add(int64(len(again)))
+	if err := s.reg.AwayTold(job.home); err != nil {
+		s.log.Warn("could not record box.unreachable as sent", "err", err)
 	}
 }
 
-// deliver posts one payload to each registration and returns those Apple
-// or the network failed for now: an error, 429 or a 5xx.
-func (s *Service) deliver(ctx context.Context, home, kindName string, payload []byte, exp time.Time, regs []registry.PushReg) []registry.PushReg {
+// sendWidgets posts a widgets push to the home's registered devices, once.
+// False means Apple or the network failed for a device, and it may go once
+// more.
+func (s *Service) sendWidgets(ctx context.Context, home string) bool {
+	if s.sender == nil {
+		return true
+	}
+	regs, err := s.regs(home, KindWidgets)
+	if err != nil {
+		return false
+	}
+	if len(regs) == 0 {
+		return true
+	}
+	if !s.allow(home, KindWidgets) {
+		pushCapped.Inc()
+		return true
+	}
+	if _, again := s.deliver(ctx, home, KindWidgets, widgetsPayload, s.now().Add(widgetsExpiry), regs); len(again) > 0 {
+		apnsResults[KindWidgets]["failed"].Add(int64(len(again)))
+		return false
+	}
+	return true
+}
+
+// deliver posts one payload to each registration and returns how many Apple
+// took, and those Apple or the network failed for now: an error, 429 or a
+// 5xx.
+func (s *Service) deliver(ctx context.Context, home, kindName string, payload []byte, exp time.Time, regs []registry.PushReg) (int, []registry.PushReg) {
 	k := kinds[kindName]
 	results := apnsResults[kindName]
 	var again []registry.PushReg
@@ -720,8 +806,10 @@ func (s *Service) deliver(ctx context.Context, home, kindName string, payload []
 		}
 		res, err := s.sender.Send(ctx, apns.Notification{Environment: r.Environment, DeviceToken: r.Token,
 			App: app, Type: k.pushType, Payload: payload, Expiration: exp})
+		transient := err != nil || res.Status == http.StatusTooManyRequests || res.Status >= 500
+		s.breaker.result(transient)
 		switch {
-		case err != nil || res.Status == http.StatusTooManyRequests || res.Status >= 500:
+		case transient:
 			failed++
 			results["retry"].Inc()
 			again = append(again, r)
@@ -741,7 +829,7 @@ func (s *Service) deliver(ctx context.Context, home, kindName string, payload []
 		}
 	}
 	s.log.Debug("push sent", "kind", kindName, "devices", sent, "gone", gone, "failed", failed)
-	return again
+	return sent, again
 }
 
 // sendQueued sends everything queued now, here, without the widget rate.
@@ -756,9 +844,8 @@ func (s *Service) sendQueued(ctx context.Context) {
 		if !ok {
 			return
 		}
-		s.mu.Lock()
-		delete(s.widgetWaiting, home)
-		s.mu.Unlock()
-		s.sendWidgets(ctx, home)
+		if retried := s.takeWidgets(home); !s.sendWidgets(ctx, home) && !retried {
+			s.retryWidgets(home)
+		}
 	}
 }

@@ -22,6 +22,7 @@ import (
 	"log/slog"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -30,6 +31,7 @@ import (
 	"github.com/srcfl/ftw-cloud/internal/registry"
 	"github.com/srcfl/ftw-cloud/internal/shard"
 	"github.com/srcfl/ftw-cloud/internal/store"
+	"github.com/srcfl/ftw-cloud/internal/wsclose"
 	"github.com/srcfl/ftw/go/protocol/appwire"
 	"github.com/srcfl/ftw/go/protocol/cloudwire"
 )
@@ -125,11 +127,12 @@ type Server struct {
 	// Set before serving.
 	Shards *shard.Directory
 
-	// draining closes when Drain starts; restartReason is what its close
-	// says.
-	draining      chan struct{}
-	drainOnce     sync.Once
-	restartReason string
+	// sockets are every phone's socket from its upgrade on, so a drain
+	// reaches those still in their handshake. draining is set once Drain
+	// starts; restartReason is what its close says.
+	sockets       wsclose.Set
+	draining      atomic.Bool
+	restartReason atomic.Value
 
 	mu      sync.Mutex
 	looking map[string]*look
@@ -167,8 +170,7 @@ func New(st *store.Store, reg *registry.Registry, w Watcher, key appwire.KeyPair
 	}
 	return &Server{store: st, registry: reg, watcher: w, key: key, log: log, now: time.Now,
 		renewEvery: WatchRenew, looking: map[string]*look{}, watchedUntil: map[string]time.Time{}, onceMessage2: maxNoiseMessage,
-		draining: make(chan struct{}),
-		once:     onceLimits{homes: map[string]int{}, devices: map[string]*onceDevice{}}}
+		once: onceLimits{homes: map[string]int{}, devices: map[string]*onceDevice{}}}
 }
 
 var upgrader = websocket.Upgrader{
@@ -202,23 +204,38 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	appSockets.Add(1)
 	defer appSockets.Add(-1)
 	conn.SetReadLimit(maxPhoneMessage)
+	sock := s.sockets.Add(conn)
+	defer s.sockets.Remove(sock)
+	// Drain sets draining before it takes the set, so a socket it did not
+	// see sees draining here.
+	if s.draining.Load() {
+		reason, _ := s.restartReason.Load().(string)
+		sock.Close(cloudwire.CloseRestart, reason)
+		sock.AwaitPeer()
+		return
+	}
 	// The close goes before message 1 is read: a browser cannot see the
-	// status of a refused upgrade, but every client reads a close.
-	code, reason := 0, ""
+	// status of a refused upgrade, but every client reads a close. The
+	// phone's answer is awaited, so it reads the code rather than a reset.
 	if host, ours := s.owner(home); !ours {
 		appWrongShard.Inc()
-		code, reason = cloudwire.CloseWrongShard, host
-	} else {
-		code, err = s.serve(conn, home)
-		if err != nil {
-			s.log.Debug("app session closed", "err", err)
-		}
-		if code == cloudwire.CloseRestart {
-			reason = s.restartReason
-		}
+		sock.Close(cloudwire.CloseWrongShard, host)
+		sock.AwaitPeer()
+		return
 	}
-	if code != 0 {
-		_ = conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(code, reason), time.Now().Add(time.Second))
+	var reading <-chan struct{}
+	code, err := s.serve(conn, home, &reading)
+	if err != nil {
+		s.log.Debug("app session closed", "err", err)
+	}
+	if code == 0 {
+		return
+	}
+	sock.Close(code, "")
+	if reading != nil {
+		<-reading // the session's reader takes the phone's answer
+	} else {
+		sock.AwaitPeer()
 	}
 }
 
@@ -231,35 +248,28 @@ func (s *Server) owner(home string) (string, bool) {
 	return s.Shards.Owner(home)
 }
 
-// Sockets is how many app sessions are open.
-func (s *Server) Sockets() int { return int(appSockets.Load()) }
+// Sockets is how many phone sockets are open, handshakes included.
+func (s *Server) Sockets() int { return s.sockets.Len() }
 
-// WaitClosed waits, at most d, until every app session has closed, as after
-// Drain, and reports how many are still open. Each session writes its own
-// close, so the process must not exit before they have.
-func (s *Server) WaitClosed(d time.Duration) int {
-	deadline := time.Now().Add(d)
-	for appSockets.Load() > 0 && time.Now().Before(deadline) {
-		time.Sleep(10 * time.Millisecond)
-	}
-	return int(appSockets.Load())
+// Drain closes every phone's socket with cloudwire.CloseRestart and reason,
+// the spread in milliseconds, those still in their handshake too, and every
+// socket that comes after.
+func (s *Server) Drain(reason string) {
+	s.restartReason.Store(reason)
+	s.draining.Store(true)
+	s.sockets.CloseAll(cloudwire.CloseRestart, reason)
 }
 
-// Drain ends every app session with cloudwire.CloseRestart and reason, the
-// spread in milliseconds, and every session that finishes its handshake
-// from now on. It returns how many sockets were open.
-func (s *Server) Drain(reason string) int {
-	s.drainOnce.Do(func() {
-		s.restartReason = reason
-		close(s.draining)
-	})
-	return int(appSockets.Load())
-}
+// WaitClosed waits, at most d, until every phone has answered the drain's
+// close or timed out, and returns how many sockets are still open.
+func (s *Server) WaitClosed(d time.Duration) int { return s.sockets.WaitEmpty(d) }
 
 var errProtocol = errors.New("appsession: the phone broke the protocol")
 
-// serve runs one session and returns the close code to end it with.
-func (s *Server) serve(conn *websocket.Conn, home string) (int, error) {
+// serve runs one session and returns the close code to end it with. Once the
+// session's reader runs, reading is set to a channel that closes when it
+// stops, and only that reader may read the socket.
+func (s *Server) serve(conn *websocket.Conn, home string, reading *<-chan struct{}) (int, error) {
 	start := time.Now()
 	_ = conn.SetReadDeadline(time.Now().Add(handshakeTimeout))
 	kind, msg1, err := conn.ReadMessage()
@@ -334,6 +344,8 @@ func (s *Server) serve(conn *websocket.Conn, home string) (int, error) {
 
 	c.setLooking(hz >= cloudwire.HzLooking)
 	defer c.stopLooking()
+	c.readDone = make(chan struct{})
+	*reading = c.readDone
 	return c.run(sess)
 }
 
@@ -454,6 +466,8 @@ type phoneConn struct {
 	// goroutine is done.
 	replies chan []byte
 	quit    chan struct{}
+	// readDone closes when the reader stops.
+	readDone chan struct{}
 
 	// sess is the store's session; tunSid the box session this phone ran
 	// last through the tunnel, when hasTun. Touched by the read loop and,
@@ -521,6 +535,7 @@ func (c *phoneConn) run(sess *store.Session) (int, error) {
 	}
 	read := make(chan result, 1)
 	go func() {
+		defer close(c.readDone)
 		code, err := c.readLoop()
 		read <- result{code, err}
 	}()
@@ -546,8 +561,6 @@ func (c *phoneConn) run(sess *store.Session) (int, error) {
 				return 0, err
 			}
 			tunUp.Observe(t.Waited())
-		case <-c.s.draining:
-			return cloudwire.CloseRestart, nil
 		case <-sess.Done():
 			return sess.Code(), nil
 		case r := <-read:

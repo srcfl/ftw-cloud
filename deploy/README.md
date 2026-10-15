@@ -151,15 +151,20 @@ service makes that short and spreads the return:
 
 1. `docker compose down` sends SIGTERM and waits up to 15 s
    (`stop_grace_period`).
-2. The old process stops accepting connections. It closes every box and
-   phone with 4503 and a spread: the sockets it holds at 500 a second
-   (`-restart-rate`), at least 5 s (`-restart-spread-min`, about how long the
-   next container takes to start) and at most 60 s. 4,000 boxes get 8 s.
-3. It closes the boxes side by side, so a stuck socket holds up none of
-   the others, waits up to 2 s for the phones' closes to go out, and up to
-   3 s for queued alerts. An alert still queued or waiting to go again is
-   lost, and the log says how many. A box closed this way starts no
-   `box.unreachable`.
+2. The old process stops accepting connections. It closes every socket,
+   boxes and phones and those still in their handshake, with 4503 and a
+   spread: the sockets it holds at 500 a second (`-restart-rate`), at least
+   15 s (`-restart-spread-min`) and at most 60 s. The port stays closed for
+   about 4 to 8 s while compose takes the old container down and starts
+   the new one, so a shorter spread would send most clients to a closed
+   port; 12,000 sockets get 24 s. A run of the harness over a real stop and
+   start is still to do, and may lower the floor.
+3. Each close waits for the client's answer, up to 2 s in all, so the
+   client reads 4503 and the spread rather than a reset. A stuck socket
+   holds up none of the others. Then queued alerts get up to 3 s; an alert
+   still queued or waiting to go again is lost, and the log says how many,
+   and a `box.unreachable` not yet taken by a phone goes again after the
+   restart. A box closed this way starts no `box.unreachable`.
 4. It exits, in about 0.1 s in the load test.
 5. The new container reads every signed roster back and checks the
    signatures on all cores before it listens: 0.35 s for 10,000 homes on
@@ -169,18 +174,21 @@ service makes that short and spreads the return:
 6. A box with srcfl/ftw#1645 redials at a random moment within the spread,
    and so does a phone once the apps honour 4503. Older clients redial on
    their own backoff, within 0.5 s, and those that come before the new
-   container is up back off further.
+   container is up back off further. A box that hears 4503 before
+   `hello_ok` counts it as a failure and backs off.
 
-The log shows `drained for a restart` with the counts and the spread, then
-`rosters restored from the registry` with how long that took.
+The log shows `drained for a restart` with the sockets, those still open and
+the spread, then `rosters restored from the registry` with how long that
+took. A command in flight at the drain may be lost; the phone treats it as
+unknown, not failed (protocol, "Shards and restarts").
 
 **Blue/green, when an NLB is worth it.** One host cannot run two containers
 on 443 with the port mapping in `compose.yml`. With a TCP NLB in front (it
 keeps the TLS binding), start the new instance on a second host with the same
-keys and registry file, register it with the target group, deregister the old
-one, then send the old one SIGTERM. Its sockets come back through the NLB to
-the new instance within the spread, and no client meets a closed port. Copy
-the registry first with `ftwcloudd move` (see [Shards](#shards)).
+keys and a copy of the registry, register it with the target group,
+deregister the old one, then send the old one SIGTERM. Its sockets come back
+through the NLB to the new instance within the spread, and no client meets a
+closed port, so the spread's floor can drop to a few seconds.
 
 ## Watching it
 
@@ -207,7 +215,8 @@ box, and measures. Each box sends a signed `live` every second with the
 readable copy on. Each phone looks at its home and sends a 64-byte `tun`
 every second, which its box sends straight back. The service ran with
 `GOMAXPROCS=2`, as on the host's two vCPUs, on an Apple M5 laptop, in a Linux
-container unless marked macOS. Runs lasted under two minutes.
+container unless marked macOS. Runs lasted under two minutes. **None of this
+was measured on a t4g.small.**
 
 | Run | Service CPU (100 = one core) | Service RSS | Inside the service, p99 | Phone to box and back, p50 / p99 |
 |---|---|---|---|---|
@@ -216,11 +225,14 @@ container unless marked macOS. Runs lasted under two minutes.
 | 8,000 homes, a phone each (16,000 sockets) | 84 % | 1.43 GiB | envelope ≤ 2.5 ms, tun ≤ 0.25 ms | 6 / 160 ms |
 | 2,000 homes, a phone each, macOS | 33 % | 377 MiB | envelope ≤ 1 ms, tun ≤ 0.1 ms | 0.8 / 27 ms |
 | Storm: 4,000 boxes redial at once | peak 155 % | | | all back in 0.9 s |
-| SIGTERM with 3,000 homes and phones | | | | 6,000 of 6,000 got 4503 with 12 s; exit in 0.11 s |
+| SIGTERM with 3,000 homes and phones | | | | 6,000 of 6,000 got 4503 with 12 s (before the 15 s floor); exit in 0.11 s |
 
 - **Per 1,000 boxes:** 8.4 % of a core and 69 MiB. The live heap is 22 MiB;
   goroutine stacks and the collector's headroom make up the rest. Below
-  about 45 MiB the collector runs without pause, so that is the floor.
+  about 45 MiB the collector runs without pause, so that is the floor. The
+  test boxes sent only `live`; a real home also holds its newest `prices`,
+  `plan`, `lp`, `hb` and `health`, a few kilobytes each, so count about
+  10 MiB more per 1,000 homes.
 - **Per 1,000 phones on top**, each sending a command a second: about 3 % of
   a core and 100 to 110 MiB. On macOS a phone cost more CPU.
 - **Where box CPU goes,** in a macOS profile: reading the socket, about two
@@ -231,12 +243,12 @@ container unless marked macOS. Runs lasted under two minutes.
   message waits at most a few milliseconds at the 99th percentile. The tail
   end to end is the harness and the laptop, which ran other work.
 
-**On a t4g.small.** These runs were not on the host. A Graviton2 core does
+**On a t4g.small (unmeasured).** These runs were not on the host. A Graviton2 core does
 this work at roughly a third of an M5 core's speed, an estimate from public
 single-core benchmarks, so take 3.5 times the CPU and the same memory, and
 check against `/metrics` once real boxes connect:
 
-| | Per 1,000 boxes at one message a second |
+| Estimate, unmeasured | Per 1,000 boxes at one message a second |
 |---|---|
 | CPU | about 30 % of a vCPU |
 | Memory | about 70 MiB |
@@ -283,37 +295,22 @@ same directory file apart from `self`:
 ```
 
 Homes fall into 256 buckets by a hash of their id. `homes` moves single
-homes and wins over `buckets`. An instance answers a home it does not hold
-with that shard's host (protocol: "Shards and restarts"); clients follow once
-and keep the host. A second shard holds homes only once their boxes list
+homes and wins over `buckets`. Every host must be `cloud.ftw.energy` or one
+label under it, as clients check. An instance answers a home it does not
+hold with that shard's host (protocol: "Shards and restarts"); clients follow
+once and keep the host. A second shard holds homes only once their boxes list
 `shard` in `hello.caps` (`boxes_following_shards`) and the apps follow 4421.
 
-**Moving homes**, here buckets 128-255 from s1 to s2:
+Moving homes means copying their registry rows to the new shard and then
+switching the directory on every instance. The tool for that comes with the
+second shard, when there is a concrete need for it.
 
-1. On s1, copy their rows while s1 still holds them:
-   `ftwcloudd move -registry /state/registry.db -to /state/to-s2.db -shards <new file> -shard s2`.
-2. Take `to-s2.db` to s2's volume and merge it into s2's registry, before
-   s2 starts: `ftwcloudd move -registry to-s2.db -to /state/registry.db -shards <s2's file> -shard s2`.
-3. Start s2 with its file, and point `s2.cloud.ftw.energy` at it.
-4. Within ten minutes of step 3, deploy s1 with the new file. It drains,
-   and from then on its boxes and phones of those homes hear 4421 and go to
-   s2. (s2 starts the wait for `box.unreachable` for each moved home with
-   alert registrations; a box that has not arrived in ten minutes would
-   raise a false alarm. s1 starts none for the homes it no longer holds.)
-5. On s1, run step 1 again with `-drop`, so what changed between step 1 and
-   step 4 follows and s1 forgets the homes. Merge that file into s2 as in
-   step 2, then deploy s2 again so it reads the merged suspensions.
-
-A merge never makes a row older: a roster is taken only with a higher
-`rosterSeq`, other rows only where they are missing, and a tombstone deletes
-its home. It adds and never deletes, so a row s1 deleted between steps 1
-and 4 stays on s2. A box's roster at its first connect to s2 prunes the
-tokens and push registrations it no longer allows, and a withdrawn copy
-prunes every token again; what is left is a token dropped by a suspension
-in that window and a push token a phone unregistered in it. Keep steps 1
-to 4 short. Extension tokens keep working, because their hashes move with
-the rows and each token names its home; tokens from before this change
-named none, and no app read them.
+**MCP and OAuth stay on the default host.** Assistants' MCP and OAuth
+clients belong to other parties and follow neither 4421 nor 421. `/mcp` and
+`/oauth/*` stay on `cloud.ftw.energy`; once there is a second shard, that
+instance forwards each call to the shard that holds the home. An agent's
+sessions are drained and counted in the spread like the phones': the part
+that holds them adds itself to the drainers in `cmd/ftwcloudd`.
 
 ## Checking it
 

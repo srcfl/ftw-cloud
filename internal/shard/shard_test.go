@@ -80,11 +80,14 @@ func TestADirectoryThatCouldSendAClientAwayIsRefused(t *testing.T) {
 	}
 	for name, change := range map[string]func(*File){
 		"a host off the domain": func(f *File) { f.Shards["s2"] = "evil.example" },
-		"two labels deep":       func(f *File) { f.Shards["s2"] = "a.b.cloud.ftw.energy" },
-		"no default":            func(f *File) { f.Default = "s9" },
-		"self unknown":          func(f *File) { f.Self = "s9" },
-		"buckets for nobody":    func(f *File) { f.Buckets = map[string][]string{"s9": {"1"}} },
-		"bucket out of range":   func(f *File) { f.Buckets = map[string][]string{"s2": {"200-256"}} },
+		"a whole other base": func(f *File) {
+			f.Shards = map[string]string{"s1": "cloud.example", "s2": "s2.cloud.example"}
+		},
+		"two labels deep":     func(f *File) { f.Shards["s2"] = "a.b.cloud.ftw.energy" },
+		"no default":          func(f *File) { f.Default = "s9" },
+		"self unknown":        func(f *File) { f.Self = "s9" },
+		"buckets for nobody":  func(f *File) { f.Buckets = map[string][]string{"s9": {"1"}} },
+		"bucket out of range": func(f *File) { f.Buckets = map[string][]string{"s2": {"200-256"}} },
 		"bucket twice": func(f *File) {
 			f.Shards["s3"] = "s3.cloud.ftw.energy"
 			f.Buckets = map[string][]string{"s2": {"0-10"}, "s3": {"10"}}

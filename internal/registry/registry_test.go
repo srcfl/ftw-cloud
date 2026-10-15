@@ -127,3 +127,29 @@ func TestDurableWritesLeaveTheWriterAtNormal(t *testing.T) {
 		}
 	}
 }
+
+// A roster prune lifts a suspension only at the epoch it read: an owner who
+// suspended the device again at its new epoch meanwhile keeps it.
+func TestAPruneDoesNotLiftASuspensionMadeSinceItRead(t *testing.T) {
+	r, err := Open(filepath.Join(t.TempDir(), "registry.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	home, now := "aaaaaaaaaaaaaaaaaaaaaaaaaa", time.Now()
+	_ = r.Claim(home, []byte("pk"), now)
+	_ = r.Suspend(home, "phone", 1, now)
+	// The prune read epoch 1; the owner suspends epoch 2 before it deletes.
+	_ = r.Suspend(home, "phone", 2, now)
+	if err := r.unsuspendAt(home, "phone", 1); err != nil {
+		t.Fatal(err)
+	}
+	if !r.Suspended(home, "phone", 2) {
+		t.Fatal("the suspension at the new epoch was lifted in memory")
+	}
+	var n int
+	_ = r.rd.QueryRow(`SELECT COUNT(*) FROM suspensions WHERE home = ? AND epoch = 2`, home).Scan(&n)
+	if n != 1 {
+		t.Fatal("the suspension at the new epoch was lifted on disk")
+	}
+}

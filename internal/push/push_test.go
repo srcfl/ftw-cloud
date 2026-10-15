@@ -111,6 +111,8 @@ func newRig(t *testing.T) *rig {
 		clock: &timers{now: time.Unix(1_791_820_800, 0)}, home: "fjzyr67buzpyncqmjliwgezvde"}
 	r.svc = New(reg, r.apple, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	r.svc.now, r.svc.after = r.clock.time, r.clock.after
+	// The breaker sleeps in real time; only its own test lets it open.
+	r.svc.breaker.trips = 1 << 30
 	if err := reg.Claim(r.home, []byte("pk"), r.clock.time()); err != nil {
 		t.Fatal(err)
 	}

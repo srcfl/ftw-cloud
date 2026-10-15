@@ -5,7 +5,6 @@
 //	ftwcloudd keygen -out service.key          make the service key; prints its public half
 //	ftwcloudd keygen -noise -out noise.key     make the Noise key phones dial; prints its public half
 //	ftwcloudd metrics                          print the running service's counts, from inside its container
-//	ftwcloudd move -shards f -shard s2 -to f   copy the registry rows of the homes the directory gives s2
 //	ftwcloudd [flags]                          serve
 package main
 
@@ -58,13 +57,6 @@ func main() {
 		}
 		return
 	}
-	if len(os.Args) > 1 && os.Args[1] == "move" {
-		if err := move(os.Args[2:]); err != nil {
-			fmt.Fprintln(os.Stderr, err)
-			os.Exit(1)
-		}
-		return
-	}
 	if len(os.Args) > 1 && os.Args[1] == "metrics" {
 		if err := printMetrics(os.Args[2:]); err != nil {
 			fmt.Fprintln(os.Stderr, err)
@@ -96,7 +88,7 @@ func serve(args []string) error {
 	shardsPath := fs.String("shards", "", "shard directory, JSON; without it this instance holds every home")
 	metricsAddr := fs.String("metrics-listen", defaultMetricsAddr, "loopback address for /metrics; empty turns it off")
 	restartRate := fs.Int("restart-rate", defaultRestartRate, "sockets a second the next instance can take after a restart; sets the spread of the redial")
-	restartMin := fs.Duration("restart-spread-min", 5*time.Second, "the shortest spread: about how long the next instance takes to start")
+	restartMin := fs.Duration("restart-spread-min", 15*time.Second, "the shortest spread: longer than the port stays closed while the next container starts")
 	_ = fs.Parse(args)
 
 	harden()
@@ -250,7 +242,13 @@ func serve(args []string) error {
 
 	// A deploy: stop accepting, tell every box and phone to come back within
 	// a spread the next instance can take, let the queued alerts go, then
-	// exit. A box closed this way starts no box.unreachable.
+	// exit. A box closed this way starts no box.unreachable. Every part
+	// that holds sockets is a drainer, so an agent's sessions are closed and
+	// counted in the spread too once that part adds itself here.
+	drainers := []drainer{up}
+	if app != nil {
+		drainers = append(drainers, app)
+	}
 	drained := make(chan struct{})
 	go func() {
 		defer close(drained)
@@ -258,24 +256,23 @@ func serve(args []string) error {
 		shutdown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		go func() { _ = httpSrv.Shutdown(shutdown) }()
-		phones := 0
-		if app != nil {
-			phones = app.Sockets()
+		sockets := 0
+		for _, d := range drainers {
+			sockets += d.Sockets()
 		}
-		spread := restartSpread(up.Boxes()+phones, *restartRate, *restartMin)
+		spread := restartSpread(sockets, *restartRate, *restartMin)
 		reason := strconv.FormatInt(spread.Milliseconds(), 10)
-		// The phones first: their sessions close on their own goroutines
-		// while the boxes' closes go out here.
-		if app != nil {
-			app.Drain(reason)
+		for _, d := range drainers {
+			d.Drain(reason)
 		}
-		boxes := up.Drain(reason)
-		if app != nil {
-			if left := app.WaitClosed(2 * time.Second); left > 0 {
-				log.Warn("app sessions still open at exit", "count", left)
-			}
+		// Each socket waits for its client's answer to the close, so the
+		// client reads 4503 and the spread rather than a reset.
+		left := 0
+		deadline := time.Now().Add(drainWait)
+		for _, d := range drainers {
+			left += d.WaitClosed(time.Until(deadline))
 		}
-		log.Info("drained for a restart", "boxes", boxes, "phones", phones, "spread", spread)
+		log.Info("drained for a restart", "sockets", sockets, "still_open", left, "spread", spread)
 		if left := pushSvc.Flush(3 * time.Second); left > 0 {
 			log.Warn("alerts queued or waiting to go again at exit; they are lost", "count", left)
 		}
@@ -292,6 +289,20 @@ func serve(args []string) error {
 	<-drained
 	return nil
 }
+
+// drainer is a part that holds sockets and closes them before a restart.
+type drainer interface {
+	// Sockets is how many sockets it holds, handshakes included.
+	Sockets() int
+	// Drain closes them with 4503 and reason, and turns away new ones.
+	Drain(reason string)
+	// WaitClosed waits at most d for their clients' answers and returns how
+	// many are still open.
+	WaitClosed(d time.Duration) int
+}
+
+// drainWait bounds the wait for the clients' answers to the drain's close.
+const drainWait = 2 * time.Second
 
 // defaultRestartRate is how many sockets a second one instance takes on
 // the host, with room to spare: deploy/README.md, "Load", has the numbers.
@@ -331,40 +342,6 @@ func serveMetrics(ctx context.Context, addr string) error {
 		<-ctx.Done()
 		_ = m.Close()
 	}()
-	return nil
-}
-
-// move copies the registry rows of every home a directory gives one shard
-// into that shard's registry file, and with -drop deletes them here. See
-// deploy/README.md, "Shards".
-func move(args []string) error {
-	fs := flag.NewFlagSet("move", flag.ExitOnError)
-	from := fs.String("registry", "/state/registry.db", "this shard's registry")
-	to := fs.String("to", "", "the registry file of the shard the homes move to")
-	dir := fs.String("shards", "", "the directory that gives the homes their new shard")
-	name := fs.String("shard", "", "the shard the homes move to")
-	drop := fs.Bool("drop", false, "delete the moved homes here once copied; only after this shard has stopped holding them")
-	_ = fs.Parse(args)
-	if *to == "" || *dir == "" || *name == "" {
-		return errors.New("move: -to, -shards and -shard are required")
-	}
-	d, err := shard.Load(*dir)
-	if err != nil {
-		return err
-	}
-	if *drop && d.Self() == *name {
-		return fmt.Errorf("move: -drop deletes the homes from %s, the shard they move to", *name)
-	}
-	reg, err := registry.Open(*from)
-	if err != nil {
-		return err
-	}
-	defer reg.Close()
-	n, err := reg.MoveTo(*to, func(home string) bool { return d.Of(home) == *name }, *drop)
-	if err != nil {
-		return err
-	}
-	fmt.Printf("moved %d homes to %s\n", n, *name)
 	return nil
 }
 

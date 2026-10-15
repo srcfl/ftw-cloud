@@ -127,3 +127,52 @@ func sleepCtx(ctx context.Context, d time.Duration) bool {
 		return true
 	}
 }
+
+// breaker holds every push back for breakerOpen after breakerTrips of
+// Apple's or the network's failures in a row, so an outage at Apple is
+// waited out rather than met with every queued alert at once.
+type breaker struct {
+	mu        sync.Mutex
+	fails     int
+	openUntil time.Time
+	// trips replaces breakerTrips when set; tests raise it.
+	trips int
+}
+
+const (
+	breakerTrips = 10
+	breakerOpen  = 30 * time.Second
+)
+
+var breakerOpened = metrics.Default.Counter("ftwcloud_apns_breaker_open_total", "Times pushes were held back after Apple failed again and again.")
+
+// result counts one answer: a failure for now, or anything else.
+func (b *breaker) result(transient bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if !transient {
+		b.fails = 0
+		return
+	}
+	b.fails++
+	trips := breakerTrips
+	if b.trips > 0 {
+		trips = b.trips
+	}
+	if b.fails >= trips {
+		b.fails = 0
+		b.openUntil = time.Now().Add(breakerOpen)
+		breakerOpened.Inc()
+	}
+}
+
+// wait sleeps while the breaker is open. False means ctx ended.
+func (b *breaker) wait(ctx context.Context) bool {
+	b.mu.Lock()
+	d := time.Until(b.openUntil)
+	b.mu.Unlock()
+	if d <= 0 {
+		return true
+	}
+	return sleepCtx(ctx, d)
+}

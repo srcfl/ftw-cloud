@@ -48,12 +48,16 @@ maintains it.
   hold a home names the host that does (4421, or 421 with `Ftw-Shard`)
   before it reads message 1 or touches the registry. Nothing about a home
   crosses between instances: no shared pub/sub, no shared storage. With no
-  `-shards` file one instance holds every home.
+  `-shards` file one instance holds every home. `/mcp` and `/oauth` stay on
+  `cloud.ftw.energy` and forward to the home's shard once there is a second
+  one, because other parties' clients follow no redirect.
 - **Counts name nobody.** `/metrics` listens on loopback only, and it and
   the minute's log line sum over all homes: no home id, device or address.
-- **A deploy drains.** On SIGTERM every box and phone hears 4503 with a
-  spread before the process exits, and no drained box starts
-  `box.unreachable`.
+- **A deploy drains.** On SIGTERM every socket, handshakes included, hears
+  4503 with a spread before the process exits, and no drained box starts
+  `box.unreachable`. A part that holds sockets is a `drainer` in
+  `cmd/ftwcloudd`. Every close the service sends waits for the client's
+  answer (`internal/wsclose`), so the client reads the code, not a reset.
 
 ## Work
 
@@ -68,18 +72,19 @@ maintains it.
 
   | Part | Lines |
   |---|---|
-  | `internal/appsession` (app session, one-shot read) | 1,103 (1,020) |
-  | `internal/uplink` | 953 (719) |
-  | `internal/registry` | 930 (694) |
-  | `internal/push` | 893 (542) |
+  | `internal/appsession` (app session, one-shot read) | 1,116 (1,020) |
+  | `internal/push` | 1,029 (542) |
+  | `internal/uplink` | 938 (719) |
   | `internal/store` | 854 (807) |
-  | `cmd/ftwcloudd` | 724 (553) |
+  | `internal/registry` | 809 (694) |
+  | `cmd/ftwcloudd` | 701 (553) |
   | `internal/metrics` | 448 (new) |
   | `internal/apns` | 299 (299) |
   | `internal/token` | 214 (170) |
   | `internal/server` | 199 (205) |
-  | `internal/shard` | 187 (new) |
-  | All | 6,804 (5,009) |
+  | `internal/shard` | 188 (new) |
+  | `internal/wsclose` | 109 (new) |
+  | All | 6,904 (5,009) |
 
   `cmd/ftwload`, the load harness, is a tool and not the service (1,938).
 - Nothing is deployed from here without the owner. `deploy/` describes the

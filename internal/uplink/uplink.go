@@ -31,6 +31,7 @@ import (
 	"github.com/srcfl/ftw-cloud/internal/registry"
 	"github.com/srcfl/ftw-cloud/internal/shard"
 	"github.com/srcfl/ftw-cloud/internal/store"
+	"github.com/srcfl/ftw-cloud/internal/wsclose"
 	"github.com/srcfl/ftw/go/protocol"
 	"github.com/srcfl/ftw/go/protocol/cloudwire"
 )
@@ -72,8 +73,7 @@ const (
 	// limitsIdle is how long a home's limits outlive its last connection,
 	// longer than any of its buckets takes to fill again.
 	limitsIdle = 2 * time.Minute
-	// drainWait bounds Drain: the closes of stuck sockets are left to the
-	// process's exit.
+	// drainWait bounds Drain's wait for the boxes' answers to its close.
 	drainWait = 2 * time.Second
 )
 
@@ -110,8 +110,10 @@ type Uplink struct {
 	// Shards says which homes this instance holds. Nil holds every home.
 	// Set before serving.
 	Shards *shard.Directory
-	// draining is set once Drain starts; restartReason is what its close
-	// says.
+	// sockets are every box's socket from its upgrade on, so a drain
+	// reaches those still in their handshake. draining is set once Drain
+	// starts; restartReason is what its close says.
+	sockets       wsclose.Set
 	draining      atomic.Bool
 	restartReason atomic.Value
 
@@ -218,37 +220,22 @@ func (u *Uplink) Boxes() int {
 	return len(u.conns)
 }
 
-// Drain closes every box's uplink with cloudwire.CloseRestart and reason,
-// the spread in milliseconds, and turns away boxes still in their
-// handshake. Their absence starts no box.unreachable: the service is the one
-// going. It returns how many it closed.
-func (u *Uplink) Drain(reason string) int {
+// Sockets is how many box sockets are open, handshakes included.
+func (u *Uplink) Sockets() int { return u.sockets.Len() }
+
+// Drain closes every box's socket with cloudwire.CloseRestart and reason,
+// the spread in milliseconds, those still in their handshake too, and turns
+// away any that come after. Their absence starts no box.unreachable: the
+// service is the one going.
+func (u *Uplink) Drain(reason string) {
 	u.restartReason.Store(reason)
 	u.draining.Store(true)
-	u.mu.Lock()
-	conns := make([]*boxConn, 0, len(u.conns))
-	for _, c := range u.conns {
-		conns = append(conns, c)
-	}
-	u.mu.Unlock()
-	// Side by side, and at most drainWait in all: a box whose socket is
-	// stuck must not hold up the others' closes, nor the phones'.
-	var wg sync.WaitGroup
-	for _, c := range conns {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			c.closeWith(cloudwire.CloseRestart, reason)
-		}()
-	}
-	done := make(chan struct{})
-	go func() { wg.Wait(); close(done) }()
-	select {
-	case <-done:
-	case <-time.After(drainWait):
-	}
-	return len(conns)
+	u.sockets.CloseAll(cloudwire.CloseRestart, reason)
 }
+
+// WaitClosed waits, at most d, until every box has answered the drain's
+// close or timed out, and returns how many sockets are still open.
+func (u *Uplink) WaitClosed(d time.Duration) int { return u.sockets.WaitEmpty(d) }
 
 // owner is the host of the shard that holds home, and whether it is this
 // instance.
@@ -290,8 +277,17 @@ func (u *Uplink) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	conn.SetReadLimit(maxBoxFrame)
 	boxSockets.Add(1)
 	defer boxSockets.Add(-1)
-	c := &boxConn{u: u, conn: conn, ekm: ekm, started: time.Now()}
+	sock := u.sockets.Add(conn)
+	defer u.sockets.Remove(sock)
+	c := &boxConn{u: u, conn: conn, sock: sock, ekm: ekm, started: time.Now()}
 	c.write = c.writeFrame
+	// Drain sets draining before it takes the set, so a socket it did not
+	// see sees draining here.
+	if u.draining.Load() {
+		reason, _ := u.restartReason.Load().(string)
+		c.closeAndWait(cloudwire.CloseRestart, reason)
+		return
+	}
 	if err := c.run(); err != nil && !websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
 		u.log.Debug("box uplink closed", "err", err)
 	}
@@ -413,8 +409,9 @@ type boxConn struct {
 	tun bool
 	// bye is the reason the box gave for leaving, if it gave one.
 	bye string
-	// started is when the socket was upgraded; lim the home's limits,
-	// once hello named the home.
+	// sock closes the socket with a code; started is when it was
+	// upgraded; lim the home's limits, once hello named the home.
+	sock    *wsclose.Socket
 	started time.Time
 	lim     *limits
 	// pinger pings the box every pingEvery until stopped.
@@ -470,12 +467,12 @@ func (c *boxConn) writeFrame(frame []byte) error {
 	return err
 }
 
-// closeWith ends the uplink with a close code and reason. gorilla lets
-// WriteControl run beside a data write, so a write stuck on a full socket
-// does not hold the close back.
-func (c *boxConn) closeWith(code int, reason string) {
-	_ = c.conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(code, reason), time.Now().Add(time.Second))
-	_ = c.conn.Close()
+// closeAndWait ends the uplink with a close code and reason, and waits for
+// the box's answer, so the box reads the code rather than a reset. Only the
+// box's own goroutine calls it.
+func (c *boxConn) closeAndWait(code int, reason string) {
+	c.sock.Close(code, reason)
+	c.sock.AwaitPeer()
 }
 
 var errProtocol = errors.New("uplink: the box broke the protocol")
@@ -506,19 +503,14 @@ func (c *boxConn) run() error {
 	// service about to stop sends the box to the next one.
 	if host, ours := c.u.owner(c.home); !ours {
 		wrongShard.Inc()
-		c.closeWith(cloudwire.CloseWrongShard, host)
-		return nil
-	}
-	if c.u.draining.Load() {
-		reason, _ := c.u.restartReason.Load().(string)
-		c.closeWith(cloudwire.CloseRestart, reason)
+		c.closeAndWait(cloudwire.CloseWrongShard, host)
 		return nil
 	}
 	c.lim = c.u.limitsFor(c.home)
 	defer c.u.release(c.lim)
 	if !c.lim.take(func() bool { return c.lim.connects.take(1, c.u.now()) }) {
 		dropConnect.Inc()
-		c.closeWith(cloudwire.CloseBusy, "")
+		c.closeAndWait(cloudwire.CloseBusy, "")
 		return nil
 	}
 
@@ -555,14 +547,7 @@ func (c *boxConn) run() error {
 			_ = old.conn.Close()
 		}
 		c.u.conns[c.home] = c
-		// Drain sets draining before it takes the list under this lock, so
-		// a connection it did not see sees draining here.
-		drained := c.u.draining.Load()
 		c.u.mu.Unlock()
-		if drained {
-			reason, _ := c.u.restartReason.Load().(string)
-			c.closeWith(cloudwire.CloseRestart, reason)
-		}
 		defer func() {
 			c.u.mu.Lock()
 			current := c.u.conns[c.home] == c

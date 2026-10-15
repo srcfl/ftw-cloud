@@ -38,11 +38,13 @@ CREATE TABLE IF NOT EXISTS tokens (
 // TokenIssue binds a token's hash to a roster entry, in place of the
 // device's old token.
 func (r *Registry) TokenIssue(row TokenRow, hash []byte) error {
-	_, err := r.db.Exec(`INSERT INTO tokens (home, device_id, epoch, hash, expires_ms) VALUES (?, ?, ?, ?, ?)
-		ON CONFLICT (home, device_id) DO UPDATE SET epoch = excluded.epoch, hash = excluded.hash,
-			expires_ms = excluded.expires_ms`,
-		row.Home, row.DeviceID, int64(row.Epoch), hash, row.Expires.UnixMilli())
-	return err
+	return r.durably(func(ctx context.Context, c *sql.Conn) error {
+		_, err := c.ExecContext(ctx, `INSERT INTO tokens (home, device_id, epoch, hash, expires_ms) VALUES (?, ?, ?, ?, ?)
+			ON CONFLICT (home, device_id) DO UPDATE SET epoch = excluded.epoch, hash = excluded.hash,
+				expires_ms = excluded.expires_ms`,
+			row.Home, row.DeviceID, int64(row.Epoch), hash, row.Expires.UnixMilli())
+		return err
+	})
 }
 
 // TokenLookup returns the binding of a token's hash, if it has not expired.

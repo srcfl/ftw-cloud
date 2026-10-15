@@ -50,7 +50,9 @@ func closeOf(t *testing.T, conn *websocket.Conn) (int, string) {
 }
 
 // A phone that dials an instance not holding its home hears the host that
-// does before it has sent message 1, so it spends no handshake here.
+// does before its message 1 is read, so it spends no handshake here. It
+// writes message 1 at once, as phones do; the service waits for the phone's
+// answer to its close, so the phone reads 4421 and not a reset.
 func TestAPhoneOfAnotherShardIsSentThereBeforeMessage1(t *testing.T) {
 	s := newStack(t)
 	box := s.connectTunBox()
@@ -63,6 +65,14 @@ func TestAPhoneOfAnotherShardIsSentThereBeforeMessage1(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer conn.Close()
+	key, _ := appwire.GenerateKeyPair()
+	init, _ := appwire.NewInitiator(appwire.InitiatorOptions{StaticKey: key, RemoteStatic: s.noise.Public(),
+		Prologue: cloudwire.AppPrologue(box.home)})
+	payload, _ := cloudwire.Unsigned(cloudwire.MsgNow, cloudwire.Now{Hz: 1})
+	msg1, _ := init.WriteMessage(payload)
+	if err := conn.WriteMessage(websocket.BinaryMessage, msg1); err != nil {
+		t.Fatal(err)
+	}
 	if code, host := closeOf(t, conn); code != cloudwire.CloseWrongShard || host != "s2.cloud.ftw.energy" {
 		t.Fatalf("close %d %q", code, host)
 	}
@@ -96,9 +106,10 @@ func TestDrainSendsPhonesAndBoxesToComeBack(t *testing.T) {
 		phone = s.dialPhone(box.home, key, cloudwire.Now{Hz: 1}, "")
 		return phone.conn != nil && phone.tr != nil
 	})
-	if n := s.app.Drain("1500"); n < 1 {
-		t.Fatalf("drained %d phones", n)
+	if n := s.app.Sockets(); n < 1 {
+		t.Fatalf("%d phones to drain", n)
 	}
+	s.app.Drain("1500")
 	s.up.Drain("1500")
 	// The phone's reader closes tuns once it has recorded why it ended.
 	for range phone.tuns {

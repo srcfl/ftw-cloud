@@ -70,20 +70,108 @@ func TestAnAlertAppleCouldNotTakeGoesAgain(t *testing.T) {
 	}
 }
 
-// An alert is given up after alertTries, and only the devices Apple did not
-// take hear it again.
-func TestAnAlertIsGivenUpAfterItsTries(t *testing.T) {
+// An alert goes again until it expires, then is given up and counted.
+func TestAnAlertGoesAgainUntilItExpires(t *testing.T) {
 	r := newRig(t)
-	apple := &flakyApple{n: 100, status: 429}
+	apple := &flakyApple{n: 1000, status: 429}
 	r.svc.sender = apple
 	_ = r.register(t, r.owner, r.all, "owner-token")
+	failed := apnsResults[cloudwire.PushKindAlert]["failed"].Load()
 	r.svc.Event(r.home, []byte{0xa0})
-	for range 10 {
+	for range 15 {
 		r.drain()
 		r.clock.advance(time.Minute)
 	}
-	if apple.count() != alertTries {
-		t.Fatalf("sent %d times, want %d", apple.count(), alertTries)
+	sent := apple.count()
+	// Waits of 2, 4, 8 … 256 s, each up to a quarter shorter, fit in the
+	// event's ten minutes about nine times.
+	if sent < 8 || sent > 12 {
+		t.Fatalf("sent %d times in ten minutes", sent)
+	}
+	r.clock.advance(time.Hour)
+	r.drain()
+	if apple.count() != sent {
+		t.Fatal("an expired alert went again")
+	}
+	if apnsResults[cloudwire.PushKindAlert]["failed"].Load() == failed {
+		t.Fatal("the given-up alert was not counted")
+	}
+}
+
+// box.unreachable is recorded as told only once a phone took it, so an
+// alert that failed goes again after a restart.
+func TestBoxUnreachableIsToldOnlyOnceAPhoneTookIt(t *testing.T) {
+	r := newRig(t)
+	apple := &flakyApple{n: 1, status: 503}
+	r.svc.sender = apple
+	_ = r.register(t, r.owner, r.all, "owner-token")
+	r.connected()
+	r.gone("")
+	r.clock.advance(601 * time.Second)
+	r.drain()
+	if apple.count() != 1 {
+		t.Fatalf("sent %d", apple.count())
+	}
+	told := func() bool {
+		away, _ := r.reg.AwayAll()
+		return len(away) == 1 && away[0].Told
+	}
+	if told() {
+		t.Fatal("told before any phone took it")
+	}
+	r.clock.advance(alertRetryAfter)
+	r.drain()
+	if apple.count() != 2 || !told() {
+		t.Fatalf("sent %d, told %v", apple.count(), told())
+	}
+}
+
+// A device suspended between two tries gets nothing on the second.
+func TestARetryGoesOnlyToDevicesThatMayStillGetIt(t *testing.T) {
+	r := newRig(t)
+	apple := &flakyApple{n: 2, status: 503}
+	r.svc.sender = apple
+	_ = r.register(t, r.owner, r.all, "owner-token")
+	viewer := r.viewer
+	viewer.Scopes = r.all
+	_ = r.register(t, viewer, r.all, "viewer-token")
+	r.svc.Event(r.home, []byte{0xa0})
+	r.drain()
+	_ = r.reg.Suspend(r.home, viewer.ID, viewer.Epoch, r.clock.time())
+	r.clock.advance(alertRetryAfter)
+	r.drain()
+	apple.mu.Lock()
+	defer apple.mu.Unlock()
+	if len(apple.sent) != 3 || string(apple.sent[2].DeviceToken) != "owner-token" {
+		var got []string
+		for _, n := range apple.sent {
+			got = append(got, string(n.DeviceToken))
+		}
+		t.Fatalf("sent %v", got)
+	}
+}
+
+// After many failures in a row the breaker holds pushes back, and one
+// success closes it.
+func TestTheBreakerOpensAfterFailuresInARow(t *testing.T) {
+	var b breaker
+	b.trips = 3
+	b.result(true)
+	b.result(true)
+	b.result(false)
+	b.result(true)
+	b.result(true)
+	if time.Until(b.openUntil) > 0 {
+		t.Fatal("open without three failures in a row")
+	}
+	b.result(true)
+	if time.Until(b.openUntil) <= 0 {
+		t.Fatal("closed after three failures in a row")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if b.wait(ctx) {
+		t.Fatal("an open breaker let a push through")
 	}
 }
 
@@ -200,5 +288,31 @@ func TestFlushCountsAlertsWaitingToGoAgain(t *testing.T) {
 	r.svc.alerts.pop()
 	if n := r.svc.Flush(50 * time.Millisecond); n != 0 {
 		t.Fatalf("Flush left %d after the retry was taken", n)
+	}
+}
+
+// A widgets push Apple could not take goes once more, and no more.
+func TestAFailedWidgetsPushGoesOnceMore(t *testing.T) {
+	r := newRig(t)
+	apple := &flakyApple{n: 2, status: 503}
+	r.svc.sender = apple
+	box := newBoxSigner(t)
+	_ = r.registerWidgets(t, r.owner, r.all, "owner-widgets")
+	t0 := int64(1_791_820_800_000)
+	r.svc.Held(r.home, cloudwire.MsgPrices, box.prices(r.home, t0, 48, 12))
+	r.svc.Held(r.home, cloudwire.MsgPrices, box.prices(r.home, t0, 48, 24))
+	r.drain()
+	if apple.count() != 1 {
+		t.Fatalf("sent %d", apple.count())
+	}
+	r.clock.advance(widgetRetryAfter)
+	r.drain()
+	if apple.count() != 2 {
+		t.Fatalf("sent %d after the retry", apple.count())
+	}
+	r.clock.advance(time.Hour)
+	r.drain()
+	if apple.count() != 2 {
+		t.Fatalf("a widgets push went a third time: %d", apple.count())
 	}
 }

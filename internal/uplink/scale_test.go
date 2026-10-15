@@ -1,6 +1,8 @@
 package uplink
 
 import (
+	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"sync/atomic"
 	"testing"
@@ -8,6 +10,7 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/srcfl/ftw-cloud/internal/shard"
+	"github.com/srcfl/ftw-cloud/internal/wsclose"
 	"github.com/srcfl/ftw/go/protocol"
 	"github.com/srcfl/ftw/go/protocol/cloudwire"
 )
@@ -111,9 +114,7 @@ func TestDrainSendsEveryBoxToComeBack(t *testing.T) {
 	}
 	b.send(cloudwire.MsgRoster, b.roster(protocol.ScopeLiveRead))
 	wait(t, "the box is the home's", func() bool { return s.up.Boxes() == 1 })
-	if n := s.up.Drain("3000"); n != 1 {
-		t.Fatalf("drained %d", n)
-	}
+	s.up.Drain("3000")
 	_, _, err := b.conn.ReadMessage()
 	if code, reason := closeCode(err); code != cloudwire.CloseRestart || reason != "3000" {
 		t.Fatalf("close %d %q (%v)", code, reason, err)
@@ -122,9 +123,17 @@ func TestDrainSendsEveryBoxToComeBack(t *testing.T) {
 	if gone != 0 {
 		t.Fatal("a drained box started box.unreachable")
 	}
-	// A box that dials while the service drains is sent on after hello.
-	other := newBox(t)
-	_, err = other.connect(s, nil)
+	// A box that dials while the service drains hears it before the
+	// challenge.
+	pool := x509.NewCertPool()
+	pool.AddCert(s.srv.Certificate())
+	d := websocket.Dialer{TLSClientConfig: &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS13}}
+	conn, _, err := d.Dial("wss://"+s.srv.Listener.Addr().String()+"/v1/box", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	_, _, err = conn.ReadMessage()
 	if code, reason := closeCode(err); code != cloudwire.CloseRestart || reason != "3000" {
 		t.Fatalf("close %d %q (%v)", code, reason, err)
 	}
@@ -235,15 +244,43 @@ func TestAStuckBoxDoesNotHoldUpTheDrain(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 	start := time.Now()
 	s.up.Drain("1000")
-	if d := time.Since(start); d > time.Second {
-		t.Fatalf("the drain took %s", d)
-	}
+	_ = live.conn.SetReadDeadline(time.Now().Add(time.Second))
 	_, _, err := live.conn.ReadMessage()
 	if code, _ := closeCode(err); code != cloudwire.CloseRestart {
 		t.Fatalf("the live box heard %v", err)
 	}
+	if d := time.Since(start); d > 500*time.Millisecond {
+		t.Fatalf("the live box heard 4503 after %s", d)
+	}
 	_, _, err = stuck.conn.ReadMessage()
 	if code, _ := closeCode(err); code != cloudwire.CloseRestart {
 		t.Fatalf("the stuck box heard %v", err)
+	}
+	if n := s.up.WaitClosed(drainWait + wsclose.Wait); n != 0 {
+		t.Fatalf("%d sockets still open after the drain's wait", n)
+	}
+}
+
+// A box still in its handshake when the drain starts hears 4503 too.
+func TestTheDrainReachesABoxInItsHandshake(t *testing.T) {
+	s := newService(t)
+	pool := x509.NewCertPool()
+	pool.AddCert(s.srv.Certificate())
+	d := websocket.Dialer{TLSClientConfig: &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS13}}
+	conn, _, err := d.Dial("wss://"+s.srv.Listener.Addr().String()+"/v1/box", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	// It reads the challenge and never says hello.
+	if _, _, err := conn.ReadMessage(); err != nil {
+		t.Fatal(err)
+	}
+	wait(t, "the socket is tracked", func() bool { return s.up.Sockets() == 1 })
+	s.up.Drain("2000")
+	_ = conn.SetReadDeadline(time.Now().Add(time.Second))
+	_, _, err = conn.ReadMessage()
+	if code, reason := closeCode(err); code != cloudwire.CloseRestart || reason != "2000" {
+		t.Fatalf("a box in its handshake heard %v", err)
 	}
 }
