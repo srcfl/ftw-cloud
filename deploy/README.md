@@ -42,7 +42,8 @@ Every AWS resource carries the tag `Project=ftw-cloud`.
   `/opt/ftw-cloud` is checked out at the commit that image was built from and
   supplies `compose.yml`.
 - The Docker volume `ftw-cloud_ftw-cloud-state` holds the SQLite registry
-  (home ids, box keys, signed rosters, tombstones) and the ACME cache, on the
+  (home ids, box keys, signed rosters, tombstones), the ACME cache, and
+  `deadman.json` (sealed push ciphertext for the command path), on the
   encrypted root disk. No readings. No backup.
 
 ## The service key
@@ -195,6 +196,34 @@ The disk goes with the instance, and with it the registry. Secrets Manager
 keeps the service key for 30 days after `delete-secret`, so a mistaken
 teardown can still be undone, and then deletes it. Nothing else holds FTW
 Cloud data; the images on `ghcr.io` hold only code.
+
+## Remote commands
+
+The same process answers the Frankfurt relay's paths: `/r/`, `/x/` and
+`/deadman`. Frames are the bytes the app and the box already exchange, and
+the service cannot read them. This file describes the host. It does not
+change DNS, and it does not stop `relay.ftw.energy`. A client switches by
+building against `cloud.ftw.energy`. Until the box, the app and the watch do
+that, Frankfurt is still where commands go.
+
+Deploying the image that contains the path is a later step, by the owner.
+Nothing here changes the running container, its command, its ports or its
+secrets.
+
+Before Frankfurt can be turned off:
+
+- Box, webapp and watch builds must dial this origin. The paths and the
+  frames stay the same; the constants live in `srcfl/ftw` and `srcfl/ftw-webapp`.
+- `POST /fleet` is not served here. Core's default fleet URL is
+  `https://relay.ftw.energy/fleet`, and it is not derived from the command
+  socket's origin.
+- Dead-man rows already stored in Frankfurt are not copied. A box posts its
+  row again when it connects, so a box that is offline at the cutover has no
+  switch until it returns. Frankfurt's file stays until that has happened.
+- A box-key proof is accepted and not required. Requiring it waits on boxes
+  sending `X-FTW-Box-Key` and `X-FTW-Box-Sig`.
+- ADR 0008 in `srcfl/ftw` still says commands stay on the relay. That text
+  is the decision record to revise.
 
 ## Not here yet
 

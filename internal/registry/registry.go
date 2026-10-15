@@ -6,11 +6,13 @@
 package registry
 
 import (
+	"bytes"
 	"database/sql"
 	"errors"
 	"fmt"
 	"time"
 
+	"github.com/srcfl/ftw/go/protocol/cloudwire"
 	_ "modernc.org/sqlite"
 )
 
@@ -107,6 +109,20 @@ func (r *Registry) Claim(home string, pk []byte, now time.Time) error {
 
 // ErrPurged is a home whose box asked for it to be deleted.
 var ErrPurged = errors.New("registry: home was purged")
+
+// RecognizesBoxKey reports whether pk is the key a live home registered.
+// A purged home is not recognised. The command path uses this only to
+// check a box-key proof; it is not a way to read the home.
+func (r *Registry) RecognizesBoxKey(pk []byte) bool {
+	if len(pk) != cloudwire.PublicKeyBytes {
+		return false
+	}
+	h, ok, err := r.Get(cloudwire.HomeID(pk))
+	if err != nil || !ok {
+		return false
+	}
+	return bytes.Equal(h.PK, pk)
+}
 
 // Get returns one home.
 func (r *Registry) Get(home string) (Home, bool, error) {

@@ -1,8 +1,14 @@
 # FTW Cloud
 
 FTW Cloud keeps a signed, readable copy of each home that turns it on, and
-serves it to that home's phones. It reads and never controls. The box opens
-the connection, picks and signs every message, and can revoke at any time.
+serves it to that home's phones. On that path it reads and never controls:
+the box opens the connection, picks and signs every message, and can revoke
+at any time. A second path on the same server carries remote commands. Those
+frames are end-to-end Noise between the app and the box; this service
+forwards the bytes and cannot open them, and it does not originate a
+command. [ADR 0008](https://github.com/srcfl/ftw/blob/master/docs/adr/0008-ftw-cloud.md)
+said commands stay on the Frankfurt relay. That stance is being revised.
+The ADR text lives in `srcfl/ftw` and is not changed here.
 
 This is `ftwcloudd`, the service. The decision is
 [ADR 0008](https://github.com/srcfl/ftw/blob/master/docs/adr/0008-ftw-cloud.md)
@@ -81,6 +87,20 @@ to it yet.
   token, valid for 7 days; a new one replaces the old. It stops reading when
   the roster drops the device, moves its epoch or runs out, an owner
   suspends the device, or the home is purged.
+- **Remote commands.** The Frankfurt relay's protocol, on this server.
+  A box dials out to `/r/<epoch>/<handle>/box`, an app to `…/app`, and the
+  box's exchange socket to `…/exchange`. A watch posts one command at
+  `/x/<epoch>/<handle>`. Binary frames pass through unchanged and stay in
+  the room named by the handle. The handle rotates every hour, spread over
+  five minutes, and `/x/` accepts the previous epoch during that window.
+  `/deadman` holds the box's sealed "I am gone" row and posts it when the
+  claim stays down past the deadline. The handle is the capability today's
+  clients already present, so an app, a watch or a box switches by changing
+  the origin and nothing else. A box may also send `X-FTW-Box-Key` and
+  `X-FTW-Box-Sig`; a proof that does not verify is refused, and a join with
+  neither header is still admitted, because current boxes send none. This
+  path is not `/v1/box`. That socket's downlink is still only `challenge`,
+  `hello_ok`, `watch`, `resync` and `purged`.
 
 Not built yet:
 
@@ -88,6 +108,7 @@ Not built yet:
 |---|---|---|
 | C6 | Tiles | `internal/server` |
 | C7–C8 | Statistics | not started |
+| — | Anonymous fleet ping (`POST /fleet`) | still only on `relay.ftw.energy`; Core's default URL is not this origin |
 
 ## How it holds a home
 
@@ -96,6 +117,10 @@ box ──wss, TLS 1.3, signed frames──▶ /v1/box ──▶ store (memory) 
                                          │                                  ◀── /v1/app/once ◀──Noise IK in one POST── watch
                                          │                                  ◀── /v1/now ◀──token──── widget
                                          └────▶ registry (SQLite: key, roster, tombstones, suspensions, APNs, token hashes)
+
+box ──wss, dials out──▶ /r/…/box ──┐
+app ──wss──────────▶ /r/…/app ─────┼──▶ relay (blind; frames not stored) ──▶ the other peer
+watch ──POST──────▶ /x/…  ─────────┘
 ```
 
 - **The home id is a hash of the box's key.** It comes from the key that
@@ -107,13 +132,15 @@ box ──wss, TLS 1.3, signed frames──▶ /v1/box ──▶ store (memory) 
   principal reads only `live`, `prices` and `hb` within that same scope. There is no
   listing and no principal for staff; `TestNoRouteReadsAHome` checks every
   route.
-- **A phone or a watch can narrow and nothing else.** A phone can say
-  whether it is looking, and an owner can suspend a device in the roster. A
-  watch can read, ask for its token and register for push. Commands go to
-  the box over the relay, never through here.
-- **The service sends five things.** `challenge`, `hello_ok`, `watch`,
-  `resync` and `purged` are the whole downlink, and none asks the box to act.
-  The box closes the uplink on anything else.
+- **A phone or a watch can narrow and nothing else** on the readable path.
+  A phone can say whether it is looking, and an owner can suspend a device
+  in the roster. A watch can read, ask for its token and register for push.
+  A command is Noise between the app and the box. It crosses this process
+  on `/r/` and `/x/` and is not written into the home.
+- **The service sends five things on `/v1/box`.** `challenge`, `hello_ok`,
+  `watch`, `resync` and `purged` are the whole downlink, and none asks the
+  box to act. The box closes the uplink on anything else. `ready` and `gone`
+  are words of the command path, and they are not sent on `/v1/box`.
 - **No TLS terminator in front.** Box and service bind the handshake to the
   TLS session, so `ftwcloudd` ends TLS itself. A TCP load balancer is fine.
 - **Root on the host can read memory.** The privacy notice says so.

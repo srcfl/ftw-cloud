@@ -1,6 +1,7 @@
 // Command ftwcloudd is FTW Cloud: it keeps a signed, readable copy of each
-// home that turned it on, in memory, and serves it to that home's phones. It
-// reads and never controls. See README.md.
+// home that turned it on, in memory, and serves it to that home's phones.
+// On that path it reads and never controls. On /r/, /x/ and /deadman it
+// forwards command frames it cannot open. See README.md.
 //
 //	ftwcloudd keygen -out service.key          make the service key; prints its public half
 //	ftwcloudd keygen -noise -out noise.key     make the Noise key phones dial; prints its public half
@@ -35,6 +36,7 @@ import (
 	"github.com/srcfl/ftw-cloud/internal/appsession"
 	"github.com/srcfl/ftw-cloud/internal/push"
 	"github.com/srcfl/ftw-cloud/internal/registry"
+	"github.com/srcfl/ftw-cloud/internal/relay"
 	"github.com/srcfl/ftw-cloud/internal/server"
 	"github.com/srcfl/ftw-cloud/internal/store"
 	"github.com/srcfl/ftw-cloud/internal/token"
@@ -100,7 +102,15 @@ func serve(args []string) error {
 	st.UseSuspensions(reg.Suspended)
 	up := uplink.New(st, reg, key, log)
 	tokens := token.New(st, reg, log)
-	srv := &server.Server{Store: st, Registry: reg, Uplink: up, Tokens: tokens, Log: log}
+	// The command path is the blind relay. It shares this process and this
+	// listener, and nothing else: it cannot see the store. Dead-man rows
+	// sit beside the registry as sealed push ciphertext.
+	commands := relay.New(relay.Options{
+		Log:         log,
+		DeadmanPath: filepath.Join(*stateDir, "deadman.json"),
+		BoxKeys:     reg,
+	})
+	srv := &server.Server{Store: st, Registry: reg, Uplink: up, Tokens: tokens, Relay: commands, Log: log}
 
 	// Alerts: the box's signed events to its phones through Apple, and
 	// box.unreachable when a box is away. Widgets: a push with no data when
@@ -179,6 +189,7 @@ func serve(args []string) error {
 	defer stop()
 	go srv.Upkeep(ctx, time.Minute)
 	go pushSvc.Run(ctx)
+	go commands.Run(ctx)
 	if *devPush != "" {
 		if err := serveDevPush(ctx, *devPush, reg, pushSvc, sender, log); err != nil {
 			return err

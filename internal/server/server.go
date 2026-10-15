@@ -5,11 +5,15 @@
 //	/v1/app   a phone's Noise session to the service (package appsession)
 //	/v1/app/once  a watch's one-shot read, Noise inside one POST (package appsession)
 //	/v1/now   a widget's token read (package token)
+//	/r/       the blind command path: box, app and exchange sockets (package relay)
+//	/x/       a watch's one command, posted, and answered by the box
+//	/deadman  the box's sealed "I am gone" switch
 //	/source   the source of the running service, as AGPL-3.0 asks
 //	/healthz  liveness, and nothing about any home
 //
 // There is no route for staff. Reading a home needs its box's key, a phone in
-// its roster, or a token bound to one.
+// its roster, or a token bound to one. The command path does not read a home
+// at all: it forwards Noise frames under a rendezvous handle.
 package server
 
 import (
@@ -22,6 +26,7 @@ import (
 
 	"github.com/srcfl/ftw-cloud/internal/appsession"
 	"github.com/srcfl/ftw-cloud/internal/registry"
+	"github.com/srcfl/ftw-cloud/internal/relay"
 	"github.com/srcfl/ftw-cloud/internal/store"
 	"github.com/srcfl/ftw-cloud/internal/token"
 	"github.com/srcfl/ftw-cloud/internal/uplink"
@@ -31,7 +36,7 @@ import (
 const SourceArchive = "/usr/share/ftw-cloud/source.tar.gz"
 
 // Routes are every path the service answers.
-var Routes = []string{"/v1/box", "/v1/app", "/v1/app/once", "/v1/now", "/source", "/healthz"}
+var Routes = []string{"/v1/box", "/v1/app", "/v1/app/once", "/v1/now", "/r/", "/x/", "/deadman", "/source", "/healthz"}
 
 // devRoutes adds a local inspection route in binaries built with
 // -tags ftwclouddev. It is nil in every other build.
@@ -48,7 +53,10 @@ type Server struct {
 	// Tokens answers /v1/now. Tokens come only over the app session, so
 	// without a Noise key every token read is refused.
 	Tokens *token.Service
-	Log    *slog.Logger
+	// Relay is the blind command path. Nil leaves /r/, /x/ and /deadman
+	// unmounted, which is only for a test that has not built one.
+	Relay *relay.Relay
+	Log   *slog.Logger
 }
 
 // Handler is the whole HTTP surface.
@@ -66,6 +74,12 @@ func (s *Server) Handler() http.Handler {
 		mux.Handle("/v1/now", s.Tokens)
 	} else {
 		mux.HandleFunc("/v1/now", notYet)
+	}
+	if s.Relay != nil {
+		mux.Handle("/r/", s.Relay)
+		mux.Handle("/x/", s.Relay)
+		mux.Handle("/deadman", s.Relay)
+		mux.Handle("/deadman/", s.Relay)
 	}
 	mux.HandleFunc("/source", source)
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
