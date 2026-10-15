@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/fxamacker/cbor/v2"
@@ -31,6 +32,12 @@ import (
 const (
 	cmdValidFor     = 30 * time.Second
 	cmdAnswerWithin = 10 * time.Second
+	// defaultHoldMinutes is a hold's length when the call names none,
+	// shortened to the grant's holdS.
+	defaultHoldMinutes = 15
+	// cmdIDKept is how long a call's command id is kept for a retry. A
+	// renewal minutes later is a new command.
+	cmdIDKept = time.Minute
 )
 
 var idPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$`)
@@ -38,13 +45,13 @@ var idPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$`)
 func controlTools() []*tool {
 	return []*tool{
 		{
-			name: "ev.charge_now", title: "Charge the car now",
-			description: "Charge the car at one charger now, at a fixed power, for a few minutes within the caps the owner granted (see homes.list), or release this assistant's own hold with stop. It ends by itself; call again to renew. An owner's own hold wins. For a car that must be full by a time, use goal.request.",
+			name: "ev_charge_now", title: "Charge the car now", destructive: true,
+			description: "Charge the car at one charger now, at a fixed power, for a few minutes within the caps the owner granted (see homes_list), or release this assistant's own hold with stop. It ends by itself; call again to renew. An owner's own hold wins. For a car that must be full by a time, use goal_request.",
 			scope:       oauth.ScopeDispatchHold,
 			input: object(map[string]any{
-				"loadpoint":  map[string]any{"type": "string", "pattern": idPattern.String(), "description": "The charger's id, from chargers.list"},
-				"power_w":    map[string]any{"type": "integer", "minimum": 0, "maximum": protocol.MaxWMax, "description": "Charging power in watts, at most the grant's maxW"},
-				"minutes":    integer("How long to charge, at most the grant's holdS", 1, protocol.HoldSMax/60, 15),
+				"loadpoint":  map[string]any{"type": "string", "pattern": idPattern.String(), "description": "The charger's id, from chargers_list"},
+				"power_w":    map[string]any{"type": "integer", "minimum": 1, "maximum": protocol.MaxWMax, "description": "Charging power in watts, at most the grant's maxW. Needed unless stop"},
+				"minutes":    integer("How long to charge, at most the grant's holdS", 1, protocol.HoldSMax/60, defaultHoldMinutes),
 				"phase_mode": enum("Phases to charge on", "auto", "1p", "3p"),
 				"stop":       map[string]any{"type": "boolean", "description": "Release this assistant's own hold instead"},
 			}, "loadpoint"),
@@ -66,15 +73,22 @@ func controlTools() []*tool {
 					}
 					body["clear"] = true
 				} else {
+					// The box reads a missing power as 0, a pause: charging
+					// needs a power.
+					if a.PowerW == nil || *a.PowerW < 1 {
+						return nil, userError("power_w is needed, at least 1 W, to charge; use stop to release the hold.")
+					}
 					// hold_s is never 0: on the box that is the operator's
 					// hold with no end, which an agent may never send.
-					if a.Minutes < 1 {
+					minutes := a.Minutes
+					if minutes == 0 {
+						minutes = min(defaultHoldMinutes, int64(cc.grant.Caps.HoldS/60))
+					}
+					if minutes < 1 {
 						return nil, userError("minutes must be at least 1.")
 					}
-					body["hold_s"] = a.Minutes * 60
-					if a.PowerW != nil {
-						body["power_w"] = *a.PowerW
-					}
+					body["hold_s"] = minutes * 60
+					body["power_w"] = *a.PowerW
 					if a.PhaseMode != "" {
 						body["phase_mode"] = a.PhaseMode
 					}
@@ -86,17 +100,17 @@ func controlTools() []*tool {
 			},
 		},
 		{
-			name:  "goal.request",
+			name:  "goal_request",
 			title: "Ask for a lasting change",
 			description: "Ask the owner for a lasting change: the home's mode, the planning style, solar-only charging at a charger, or a correction of the car's charge level. " +
-				"Nothing changes until an owner confirms it in the FTW app; requests.list shows how it ended. Put your reason, in your own words, in why.",
+				"Nothing changes until an owner confirms it in the FTW app; requests_list shows how it ended. Put your reason, in your own words, in why.",
 			scope: oauth.ScopeGoalsRequest,
 			input: object(map[string]any{
 				"kind":           enum("What to change", "mode", "planning", "surplus_only", "car_charge_level"),
 				"mode":           map[string]any{"type": "string", "pattern": idPattern.String(), "description": "With kind mode: a mode's key, from status"},
 				"safety_k":       map[string]any{"type": "number", "minimum": 0, "maximum": 2, "description": "With kind planning: how cautious the plan is"},
 				"battery_export": enum("With kind planning: whether the battery may sell to the grid", "unknown", "not_allowed", "allowed"),
-				"loadpoint":      map[string]any{"type": "string", "pattern": idPattern.String(), "description": "With surplus_only or car_charge_level: the charger's id, from chargers.list"},
+				"loadpoint":      map[string]any{"type": "string", "pattern": idPattern.String(), "description": "With surplus_only or car_charge_level: the charger's id, from chargers_list"},
 				"on":             map[string]any{"type": "boolean", "description": "With surplus_only: charge from solar surplus only"},
 				"percent":        map[string]any{"type": "integer", "minimum": 0, "maximum": 100, "description": "With car_charge_level: the car's charge now"},
 				"why":            map[string]any{"type": "string", "maxLength": protocol.RequestWhyMax, "description": "Why you ask, shown to the owner as your words"},
@@ -170,7 +184,7 @@ func controlTools() []*tool {
 			},
 		},
 		{
-			name: "requests.list", title: "My requests",
+			name: "requests_list", title: "My requests",
 			description: "This assistant's own grant on the box and the lasting changes it asked for, with how each ended: pending, approved, declined or expired." + dataNote,
 			input:       object(nil), readOnly: true,
 			run: func(ctx context.Context, cc *callCtx, args json.RawMessage) (any, error) {
@@ -278,12 +292,16 @@ func (cc *callCtx) request(ctx context.Context, r protocol.AgentRequest) (any, e
 		return nil, err
 	}
 	return map[string]any{"request": ok, "waitsForOwner": true,
-		"note": "Nothing changes until an owner confirms it in the FTW app. requests.list shows how it ended."}, nil
+		"note": "Nothing changes until an owner confirms it in the FTW app. requests_list shows how it ended."}, nil
 }
 
 // command sends one cmd and waits for what the box did. The box checks it
-// against the agent's grant and caps, in Core's order; a stale control
-// revision is learnt from the box's answer and tried once more.
+// against the agent's grant and caps, in Core's order. The control
+// revision comes from the chargers' answer, read first when this session
+// has not seen it, so the first command does not spend the grant's rate on
+// a conflict; a stale one is learnt from E_CONFLICT and tried once more. A
+// client's retry of the same call within a minute reuses its command id,
+// so the box acts once.
 func (cc *callCtx) command(ctx context.Context, op string, args map[string]any) (any, error) {
 	c, err := cc.conn(ctx)
 	if err != nil {
@@ -295,6 +313,13 @@ func (cc *callCtx) command(ctx context.Context, op string, args map[string]any) 
 	if err != nil {
 		return nil, words(err)
 	}
+	c.mu.Lock()
+	known := c.rev != 0
+	c.mu.Unlock()
+	if !known && cc.grant.Has(protocol.RegistryReads[protocol.MsgLoadpointsGet]) {
+		_, _ = cc.read(ctx, protocol.MsgLoadpointsGet, nil)
+	}
+	key := cc.idemKey(op, args)
 	release, err := c.take(ctx)
 	if err != nil {
 		return nil, err
@@ -305,7 +330,11 @@ func (cc *callCtx) command(ctx context.Context, op string, args map[string]any) 
 		c.mu.Lock()
 		rev := c.rev
 		c.mu.Unlock()
-		cmd := protocol.Cmd{CmdID: uuidV7(), Op: op, Args: args, NotValidAfterMs: uptime + cmdValidFor.Milliseconds(),
+		id := uuidV7()
+		if try == 0 {
+			id = cc.s.cmdIDs.get(key, id, time.Now())
+		}
+		cmd := protocol.Cmd{CmdID: id, Op: op, Args: args, NotValidAfterMs: uptime + cmdValidFor.Milliseconds(),
 			Expect: protocol.Expect{Rev: rev, Guards: []protocol.Guard{}}}
 		res, ack, err := c.cmd(ctx, cmd)
 		if err != nil {
@@ -316,11 +345,63 @@ func (cc *callCtx) command(ctx context.Context, op string, args map[string]any) 
 				c.mu.Lock()
 				c.rev = actual
 				c.mu.Unlock()
+				cc.s.cmdIDs.forget(key)
 				continue
 			}
 		}
+		if res != nil && res.Error != nil {
+			if res.Error.Code == protocol.ErrNotFound && args["clear"] == true {
+				return nil, userError("There is no hold of this assistant's on that charger to stop (E_NOT_FOUND).")
+			}
+			return nil, userError(fmt.Sprintf("The box did not do it (%s). %s", codeText(res.Error.Code),
+				words(boxError{Code: res.Error.Code, Args: res.Error.Args}).Error()))
+		}
 		return commandReport(res, ack, uptime), nil
 	}
+}
+
+// idemKey names one call for its retries: the agent, the JSON-RPC id, the
+// op and its arguments. Empty when the call has no id.
+func (cc *callCtx) idemKey(op string, args map[string]any) string {
+	if cc.rpcID == "" {
+		return ""
+	}
+	raw, _ := json.Marshal(args) // map keys sorted
+	return cc.grant.Subject.Home + "/" + cc.grant.Subject.Agent + "/" + cc.rpcID + "/" + op + "/" + string(raw)
+}
+
+// cmdIDs remembers each call's command id for a minute.
+type cmdIDs struct {
+	mu sync.Mutex
+	m  map[string]cmdIDEntry
+}
+
+type cmdIDEntry struct {
+	id string
+	at time.Time
+}
+
+// get returns the id a call had within cmdIDKept, or records fresh for it.
+func (k *cmdIDs) get(key, fresh string, now time.Time) string {
+	if key == "" {
+		return fresh
+	}
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if k.m == nil || len(k.m) >= 4096 {
+		k.m = map[string]cmdIDEntry{}
+	}
+	if e, ok := k.m[key]; ok && now.Sub(e.at) < cmdIDKept {
+		return e.id
+	}
+	k.m[key] = cmdIDEntry{id: fresh, at: now}
+	return fresh
+}
+
+func (k *cmdIDs) forget(key string) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	delete(k.m, key)
 }
 
 // cmd sends one command and collects its ack and result.
@@ -378,9 +459,6 @@ func commandReport(res *protocol.CmdResult, ack *protocol.CmdAck, uptime int64) 
 	switch {
 	case res != nil:
 		out["state"] = clean(res.State)
-		if res.Error != nil {
-			out["error"] = map[string]any{"code": clean(res.Error.Code), "words": words(boxError{Code: res.Error.Code, Args: res.Error.Args}).Error()}
-		}
 		if res.Observed != nil {
 			out["observed"] = map[string]any{"value": res.Observed.Value, "source": clean(res.Observed.Src)}
 		}

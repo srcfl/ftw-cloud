@@ -493,7 +493,7 @@ func (c *agentConn) dispatch(env appwire.Envelope) {
 	}
 	// Every answer carries its request's id. A message without one that is
 	// not above (agent.decided, the box telling an open session how a
-	// request ended) answers no call; requests.list reads the same.
+	// request ended) answers no call; requests_list reads the same.
 	if env.ID == nil {
 		return
 	}

@@ -27,13 +27,18 @@ type tool struct {
 	scope                    string
 	input                    map[string]any
 	readOnly                 bool
-	run                      func(ctx context.Context, cc *callCtx, args json.RawMessage) (any, error)
+	// destructive is a tool that can change what a home does.
+	destructive bool
+	run         func(ctx context.Context, cc *callCtx, args json.RawMessage) (any, error)
 }
 
 // callCtx is one call's grant and the way to its home.
 type callCtx struct {
 	s     *Server
 	grant *oauth.Grant
+	// rpcID is the JSON-RPC request's id, which a client keeps when it
+	// retries a request.
+	rpcID string
 }
 
 func (cc *callCtx) conn(ctx context.Context) (*agentConn, error) {
@@ -57,6 +62,18 @@ func (cc *callCtx) read(ctx context.Context, t string, body any) (any, error) {
 	env, err := c.ask(ctx, t, body)
 	if err != nil {
 		return nil, words(err)
+	}
+	if t == protocol.MsgLoadpointsGet {
+		// The chargers' answer names the control revision a command must
+		// expect.
+		var lp struct {
+			ControlRev uint64 `cbor:"controlRev"`
+		}
+		if cbor.Unmarshal(env.B, &lp) == nil && lp.ControlRev > 0 {
+			c.mu.Lock()
+			c.rev = lp.ControlRev
+			c.mu.Unlock()
+		}
 	}
 	return decodeData(env.B)
 }
@@ -82,7 +99,7 @@ func (s *Server) listing() []map[string]any {
 			"annotations": map[string]any{
 				"title":           t.title,
 				"readOnlyHint":    t.readOnly,
-				"destructiveHint": false,
+				"destructiveHint": t.destructive,
 				"idempotentHint":  t.readOnly,
 				"openWorldHint":   false,
 			},

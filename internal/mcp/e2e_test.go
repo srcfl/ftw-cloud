@@ -158,9 +158,11 @@ type stubBox struct {
 	noNoise bool
 	// noClock is a box whose clock is not set: it refuses agents.
 	noClock bool
+	// controlRev is the box's control revision, which a cmd must expect.
+	controlRev uint64
 	// slowHandshake holds message 2 back.
 	slowHandshake time.Duration
-	closed  chan struct{}
+	closed        chan struct{}
 }
 
 type boxSession struct {
@@ -175,7 +177,7 @@ func (w *world) connectBox() *stubBox {
 	static, _ := appwire.GenerateKeyPair()
 	pk, _ := cloudwire.PublicKeyBytesOf(&key.PublicKey)
 	b := &stubBox{t: w.t, w: w, key: key, home: cloudwire.HomeID(pk), static: static, agents: map[string]*agentGrant{},
-		sessions: map[string]*boxSession{}}
+		sessions: map[string]*boxSession{}, controlRev: 4}
 	w.mu.Lock()
 	w.boxes[b.home] = b
 	w.mu.Unlock()
@@ -507,7 +509,10 @@ func (b *stubBox) handle(s *boxSession, env appwire.Envelope) {
 	case protocol.MsgDriversGet:
 		b.reply(s, protocol.MsgDrivers, env.ID, protocol.Drivers{Drivers: []protocol.DriverState{{Src: "s1", Kind: "inverter", State: "ok", AgeMs: 900}}})
 	case protocol.MsgLoadpointsGet:
-		b.reply(s, protocol.MsgLoadpoints, env.ID, map[string]any{"controlRev": 4, "loadpoints": []any{map[string]any{"id": "lpA1", "plugged": true, "powerW": 7400}}})
+		b.mu.Lock()
+		rev := b.controlRev
+		b.mu.Unlock()
+		b.reply(s, protocol.MsgLoadpoints, env.ID, map[string]any{"controlRev": rev, "loadpoints": []any{map[string]any{"id": "lpA1", "plugged": true, "powerW": 7400}}})
 	case protocol.MsgCarsGet:
 		b.reply(s, protocol.MsgCars, env.ID, map[string]any{"cars": []any{map[string]any{"id": "carA1", "socPermille": 640}}})
 	case protocol.MsgEventsGet:
@@ -549,6 +554,13 @@ func (b *stubBox) handle(s *boxSession, env appwire.Envelope) {
 			fn = func(c protocol.Cmd) []any {
 				if !slices.Contains(a.ops, c.Op) {
 					return []any{protocol.CmdResult{CmdID: c.CmdID, State: protocol.CmdRejected, Error: &protocol.ErrorBody{Code: protocol.ErrOpNotGranted}}}
+				}
+				b.mu.Lock()
+				rev := b.controlRev
+				b.mu.Unlock()
+				if c.Expect.Rev != rev {
+					return []any{protocol.CmdResult{CmdID: c.CmdID, State: protocol.CmdRejected,
+						Error: &protocol.ErrorBody{Code: protocol.ErrConflict, Args: map[string]any{"expected": c.Expect.Rev, "actual": rev}}}}
 				}
 				return []any{protocol.CmdAck{CmdID: c.CmdID, LeaseID: "lease-1", ExpiresAtMs: 3_700_000},
 					protocol.CmdResult{CmdID: c.CmdID, State: protocol.CmdApplied}}

@@ -96,6 +96,9 @@ type Server struct {
 	inflight chan struct{}
 	// limit bounds the requests of each agent, tools/list included.
 	limit rateLimit
+	// cmdIDs keeps the command id of each recent control call, so a
+	// client's retry is the same command to the box.
+	cmdIDs cmdIDs
 }
 
 // rateLimit is a token bucket per agent: 30 requests, then 10 a second.
@@ -378,7 +381,7 @@ func (s *Server) call(w http.ResponseWriter, r *http.Request, id json.RawMessage
 		args = json.RawMessage("{}")
 	}
 	ctx := r.Context()
-	data, err := t.run(ctx, &callCtx{s: s, grant: g}, args)
+	data, err := t.run(ctx, &callCtx{s: s, grant: g, rpcID: string(id)}, args)
 	if err != nil {
 		var ue userError
 		if !errors.As(err, &ue) {

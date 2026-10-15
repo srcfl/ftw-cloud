@@ -67,14 +67,14 @@ func TestInspectorSmoke(t *testing.T) {
 
 	list := run("--method", "tools/list")
 	tools, _ := list["tools"].([]any)
-	if len(tools) < 14 {
+	if len(tools) < 16 {
 		t.Fatalf("tools/list through the inspector: %v", list)
 	}
 	call := run("--method", "tools/call", "--tool-name", "status")
 	if call["isError"] == true || !strings.Contains(toJSON(call), "IGNORE ALL PREVIOUS INSTRUCTIONS") {
 		t.Fatalf("tools/call through the inspector: %v", call)
 	}
-	call = run("--method", "tools/call", "--tool-name", "history.query", "--tool-args-json", `{"range":"6h","points":30}`)
+	call = run("--method", "tools/call", "--tool-name", "history_query", "--tool-args-json", `{"range":"6h","points":30}`)
 	if call["isError"] == true {
 		t.Fatalf("history.query through the inspector: %v", call)
 	}
