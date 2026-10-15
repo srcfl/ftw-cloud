@@ -119,6 +119,10 @@ func (s *Server) serveAuthorize(w http.ResponseWriter, r *http.Request) {
 		Kid: kid, AgentKey: pub, Created: now, Expires: now.Add(RequestTTL), Status: statusPending}
 	for try := 0; ; try++ {
 		con.Code = shortCode()
+		if con.Offer, err = s.signOffer(ctx, buildOffer(con)); err != nil {
+			s.log.Warn("the keys part could not sign an offer", "err", err)
+			break
+		}
 		err = s.st.putConsent(rid, browser, con)
 		if err == nil || try == 3 {
 			break
@@ -196,7 +200,9 @@ func authorizationError(redirect, code, desc, state string) string {
 // --------------------------------------------------------------------------
 
 type requestView struct {
-	Request  string       `json:"request,omitempty"`
+	Request string `json:"request,omitempty"`
+	// Offer is the signed grant offer, base64url, as the link carries it.
+	Offer    string       `json:"offer"`
 	Status   string       `json:"status"`
 	Code     string       `json:"code"`
 	Client   clientView   `json:"client"`
@@ -231,7 +237,7 @@ func (s *Server) view(c consent) requestView {
 	if status == statusPending && !s.now().Before(c.Expires) {
 		status = "expired"
 	}
-	return requestView{Status: status, Code: c.Code,
+	return requestView{Offer: c.Offer, Status: status, Code: c.Code,
 		Client:   clientView{ID: c.ClientID, Name: c.ClientName, Host: c.ClientHost, Verified: c.Verified},
 		Redirect: redirectView{Host: u.Hostname(), Local: u.Scheme == "http" && isLoopback(u.Hostname())},
 		Scopes:   splitScope(c.Scope),
@@ -253,8 +259,10 @@ func (s *Server) serveRequest(w http.ResponseWriter, r *http.Request) {
 }
 
 // serveRequestByCode finds a request by the code an owner typed on the box's
-// page. Lookups are rate limited for everyone together: a code lasts ten
-// minutes and has about 29 bits, and finding one only shows a client's name.
+// page or in the app, once: a short code cannot carry the agent's key, so
+// it fetches the signed offer. Lookups are rate limited for everyone
+// together, and a code works once: it lasts ten minutes and has about 29
+// bits, and finding one shows only an offer the owner must still approve.
 func (s *Server) serveRequestByCode(w http.ResponseWriter, r *http.Request) {
 	if !s.lookupLimit.allow(s.now()) {
 		w.Header().Set("Retry-After", "1")
@@ -266,8 +274,8 @@ func (s *Server) serveRequestByCode(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	c, ok, err := s.st.consentByCode(code)
-	if err != nil || !ok || c.Status != statusPending || !s.now().Before(c.Expires) {
+	c, ok, err := s.st.spendCode(code, s.now())
+	if err != nil || !ok {
 		http.NotFound(w, r)
 		return
 	}

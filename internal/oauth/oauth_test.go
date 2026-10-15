@@ -9,6 +9,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"github.com/fxamacker/cbor/v2"
 	"io"
 	"log/slog"
 	"net"
@@ -25,6 +26,7 @@ import (
 	"time"
 
 	"github.com/srcfl/ftw-cloud/internal/keys"
+	"github.com/srcfl/ftw/go/protocol"
 	"github.com/srcfl/ftw/go/protocol/cloudwire"
 )
 
@@ -276,8 +278,25 @@ func (g *rig) roster(h string, devs ...cloudwire.Device) {
 	time.Sleep(20 * time.Millisecond)
 }
 
+// agentDevice is an agent row as the box lists it in its roster, for the
+// metadata-document client, ending in 30 days.
 func agentDevice(key []byte, scopes ...string) cloudwire.Device {
-	return cloudwire.Device{ID: cloudwire.DeviceID(key), Key: key, Role: "agent", Scopes: scopes, Epoch: 1, Tun: true}
+	return agentFor(key, cimdID, time.Now().Add(30*24*time.Hour), scopes...)
+}
+
+// agentFor is an agent row for a client, with the end the box set. The
+// readable copy's scopes are empty, as the contract has it for agents.
+func agentFor(key []byte, clientID string, end time.Time, scopes ...string) cloudwire.Device {
+	var ops []string
+	for op, sc := range protocol.RegistryAgentOps {
+		if slices.Contains(scopes, sc) {
+			ops = append(ops, op)
+		}
+	}
+	slices.Sort(ops)
+	return cloudwire.Device{ID: cloudwire.DeviceID(key), Key: key, Role: protocol.RoleAgent, Scopes: []string{}, Epoch: 1, Tun: true,
+		Agent: &cloudwire.Agent{Scopes: scopes, Ops: ops, Caps: protocol.Caps{HoldS: 600, MaxW: 5000, PerMin: 6},
+			ExpiresAtMs: end.UnixMilli(), Principal: protocol.Principal{Client: "Claude", ClientID: clientID}}}
 }
 
 // redirectOf reads the client's redirect from an event.
@@ -335,7 +354,7 @@ func (g *rig) approve(f *flow, clientID string, scopes ...string) tokens {
 	if len(scopes) == 0 {
 		scopes = []string{ScopeLiveRead, ScopePlanRead}
 	}
-	g.roster(home, agentDevice(f.agentKey(g.t), scopes...))
+	g.roster(home, agentFor(f.agentKey(g.t), clientID, g.now().Add(30*24*time.Hour), scopes...))
 	ev := next(g.t, ch)
 	if ev.name != "approved" {
 		g.t.Fatalf("event %q after the roster", ev.name)
@@ -406,7 +425,7 @@ func getJSON(t *testing.T, u string, v any) {
 func TestTheFullFlowWithAMetadataDocument(t *testing.T) {
 	g := newRig(t)
 	f := g.start(cimdID, cimdBack, ScopeLiveRead+" "+ScopePlanRead+" "+ScopeHistoryRead)
-	if f.view.Client.Name != "Claude" || !f.view.Client.Verified || f.view.Client.Host != "example.com" ||
+	if f.view.Client.Name != "Claude" || f.view.Client.Verified || f.view.Client.Host != "example.com" ||
 		f.view.Redirect.Host != "example.com" || f.view.Status != statusPending || len(f.view.Code) != codeLen {
 		t.Fatalf("what the app sees: %+v", f.view)
 	}
@@ -578,7 +597,7 @@ func TestTheFullFlowWithDynamicRegistration(t *testing.T) {
 	}
 	ch, stop := g.events(f, true)
 	next(t, ch)
-	g.roster(home, agentDevice(f.agentKey(t), ScopeLiveRead))
+	g.roster(home, agentFor(f.agentKey(t), id, time.Now().Add(time.Hour), ScopeLiveRead))
 	code := redirectOf(t, next(t, ch)).Query().Get("code")
 	stop()
 	if status, tk := g.token(url.Values{"grant_type": {grantCode}, "code": {code}, "client_id": {id}, "code_verifier": {f.verifier}}); status != http.StatusOK {
@@ -594,7 +613,7 @@ func TestTheFullFlowWithDynamicRegistration(t *testing.T) {
 	ch, stop = g.events(f, true)
 	defer stop()
 	next(t, ch)
-	g.roster(home, agentDevice(f.agentKey(t), ScopeLiveRead))
+	g.roster(home, agentFor(f.agentKey(t), cid, time.Now().Add(time.Hour), ScopeLiveRead))
 	code = redirectOf(t, next(t, ch)).Query().Get("code")
 	form := url.Values{"grant_type": {grantCode}, "code": {code}, "client_id": {cid}, "code_verifier": {f.verifier}}
 	if status, _ := g.token(form); status != http.StatusUnauthorized {
@@ -623,15 +642,24 @@ func TestConsentCompletesOnlyWhenTheRosterListsTheAgent(t *testing.T) {
 	if next(t, browser).name != "pending" || next(t, stranger).name != "pending" {
 		t.Fatal("not pending at first")
 	}
-	// Another key, the right key without a tunnel, the right key under
-	// another id: none of them approves.
+	// Another key; the right key without a tunnel, under another id, for
+	// another client, past its end, as support, or as a phone: none of them
+	// approves.
 	other := bytes.Repeat([]byte{1}, 32)
 	key := f.agentKey(t)
 	noTun := agentDevice(key, ScopeLiveRead)
 	noTun.Tun = false
 	wrongID := agentDevice(key, ScopeLiveRead)
 	wrongID.ID = "someone"
-	g.roster(home, agentDevice(other, ScopeLiveRead), noTun, wrongID)
+	otherClient := agentFor(key, "https://evil.example/client.json", time.Now().Add(time.Hour), ScopeLiveRead)
+	ended := agentFor(key, cimdID, g.now().Add(-time.Second), ScopeLiveRead)
+	support := agentDevice(key, ScopeLiveRead)
+	support.Role = protocol.RoleSupport
+	phone := agentDevice(key, ScopeLiveRead)
+	phone.Agent = nil
+	for _, d := range []cloudwire.Device{noTun, wrongID, otherClient, ended, support, phone} {
+		g.roster(home, agentDevice(other, ScopeLiveRead), d)
+	}
 	select {
 	case ev := <-browser:
 		t.Fatalf("event %q before the roster listed the agent", ev.name)
@@ -728,10 +756,13 @@ func TestRevokeAtTheBoxEndsTheTokens(t *testing.T) {
 // An agent whose time the box set runs out fails, and is swept.
 func TestAnExpiredAgentFails(t *testing.T) {
 	g := newRig(t)
-	end := g.now().Add(2 * time.Hour)
-	g.s.AgentExpiry = func(cloudwire.Device) time.Time { return end }
 	f := g.start(cimdID, cimdBack, "")
-	tk := g.approve(f, cimdID)
+	ch, stop := g.events(f, true)
+	defer stop()
+	next(t, ch)
+	g.roster(home, agentFor(f.agentKey(t), cimdID, g.now().Add(2*time.Hour), ScopeLiveRead))
+	code := redirectOf(t, next(t, ch)).Query().Get("code")
+	_, tk := g.token(url.Values{"grant_type": {grantCode}, "code": {code}, "client_id": {cimdID}, "code_verifier": {f.verifier}})
 	if _, aerr := g.bearer(tk.Access); aerr != nil {
 		t.Fatal(aerr)
 	}
@@ -755,7 +786,7 @@ func TestWrongAudienceIsRefused(t *testing.T) {
 	f := g.start(cimdID, cimdBack, "")
 	tk := g.approve(f, cimdID)
 	agent := cloudwire.DeviceID(f.agentKey(t))
-	other := "ftwat_" + randomToken(32)
+	other := "ftwat_" + home + "." + randomToken(32)
 	if err := g.s.st.putToken(other, tokenRow{Kind: kindAccess, Family: []byte("f"), ClientID: cimdID, Home: home,
 		Agent: agent, Scope: ScopeLiveRead, Resource: "https://cloud.ftw.energy/other", Expires: g.now().Add(time.Minute)}); err != nil {
 		t.Fatal(err)
@@ -804,8 +835,12 @@ func TestTheBoxPageFindsARequestByItsCode(t *testing.T) {
 	typed := strings.ToLower(f.view.Code[:3]) + " - " + f.view.Code[3:]
 	var v requestView
 	getJSON(t, g.srv.URL+"/oauth/requests?code="+url.QueryEscape(typed), &v)
-	if v.Agent.Key != f.view.Agent.Key || v.Request != "" {
+	if v.Agent.Key != f.view.Agent.Key || v.Request != "" || v.Offer == "" || v.Offer != f.view.Offer {
 		t.Fatalf("by code: %+v", v)
+	}
+	// Once.
+	if resp, _ := http.Get(g.srv.URL + "/oauth/requests?code=" + f.view.Code); resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("a code used twice: %d", resp.StatusCode)
 	}
 	resp, _ := http.Get(g.srv.URL + "/oauth/requests?code=ZZZZZZ")
 	if resp.StatusCode != http.StatusNotFound {
@@ -834,7 +869,7 @@ func TestTheConsentPage(t *testing.T) {
 	resp, _ := noFollow.Get(g.srv.URL + "/oauth/authorize?" + q.Encode())
 	body, _ := io.ReadAll(resp.Body)
 	page := string(body)
-	for _, want := range []string{"Let Claude into your home?", "Identified by example.com", "127.0.0.1:8123",
+	for _, want := range []string{"Let Claude into your home?", "From example.com. FTW Cloud does not know this client", "127.0.0.1:8123",
 		"a program on this computer", "<svg", AppLink, scopeWords[ScopeDispatchHold], "Control lasts minutes"} {
 		if !strings.Contains(page, want) {
 			t.Fatalf("the page lacks %q", want)
@@ -911,5 +946,102 @@ func TestApprovalOutlastsAKeysPartThatIsAway(t *testing.T) {
 	g.roster(home, agentDevice(f.agentKey(t), ScopeLiveRead))
 	if ev := next(t, ch); ev.name != "approved" {
 		t.Fatalf("event %q", ev.name)
+	}
+}
+
+// The offer: signed by the keys part's offer key, carrying the agent's key,
+// the client, what it asks for and the code, and no home; in the QR, the
+// link and the request's details alike.
+func TestTheOfferIsSignedAndCarriesTheConsent(t *testing.T) {
+	g := newRig(t)
+	f := g.start(cimdID, cimdBack, ScopeLiveRead+" "+ScopeDispatchHold)
+	raw, err := base64.RawURLEncoding.DecodeString(f.view.Offer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var so signedOffer
+	if err := cbor.Unmarshal(raw, &so); err != nil {
+		t.Fatal(err)
+	}
+	pub, _ := g.keys.OfferKey(context.Background())
+	if err := keys.VerifyOffer(pub, so.Offer, so.Sig); err != nil {
+		t.Fatalf("the offer does not verify: %v", err)
+	}
+	var o protocol.GrantOffer
+	if err := cbor.Unmarshal(so.Offer, &o); err != nil {
+		t.Fatal(err)
+	}
+	if o.V != protocol.GrantOfferVersion || o.Home != "" || !bytes.Equal(o.Key, f.agentKey(t)) || o.Role != protocol.RoleAgent ||
+		o.Client != "Claude" || o.ClientID != cimdID || o.Code != f.view.Code ||
+		!slices.Equal(o.Scopes, []string{ScopeDispatchHold, ScopeLiveRead}) ||
+		!slices.Equal(o.Ops, []string{"battery.hold", "loadpoint.boost", "loadpoint.hold"}) || o.Caps.HoldS == 0 ||
+		o.TTLS != uint64(protocol.AgentMaxMs/1000) {
+		t.Fatalf("offer %+v", o)
+	}
+	// The page's link and QR carry the same offer, in the fragment.
+	q, _ := g.authorizeParams(cimdID, cimdBack, "")
+	resp, _ := noFollow.Get(g.srv.URL + "/oauth/authorize?" + q.Encode())
+	page, _ := io.ReadAll(resp.Body)
+	if !regexp.MustCompile(`href="https://app\.ftw\.energy/a/[A-Za-z0-9_-]{22}#[A-Za-z0-9_-]{200,}"`).Match(page) {
+		t.Fatal("the app link does not carry the offer in its fragment")
+	}
+}
+
+func TestTheOfferKeyIsPublished(t *testing.T) {
+	g := newRig(t)
+	var v struct{ Alg, Tag, Pub string }
+	getJSON(t, g.srv.URL+"/.well-known/ftw-offer-key", &v)
+	pub, _ := g.keys.OfferKey(context.Background())
+	if v.Alg != "ES256" || v.Tag != keys.OfferTag || v.Pub != base64.RawURLEncoding.EncodeToString(pub) {
+		t.Fatalf("offer key %+v", v)
+	}
+}
+
+// A token names its home, so any instance can tell where it belongs; the
+// name proves nothing by itself.
+func TestTokensNameTheirHome(t *testing.T) {
+	g := newRig(t)
+	f := g.start(cimdID, cimdBack, "")
+	tk := g.approve(f, cimdID)
+	if TokenHome(tk.Access) != home || TokenHome(tk.Refresh) != home || !strings.HasPrefix(tk.Access, accessPrefix+home+".") {
+		t.Fatalf("tokens %s %s", tk.Access, tk.Refresh)
+	}
+	forged := accessPrefix + home + "." + randomToken(32)
+	if _, aerr := g.bearer(forged); aerr == nil {
+		t.Fatal("a token with the right home and a made-up secret was accepted")
+	}
+}
+
+// The grant is what the newest roster lists: an owner who narrows it
+// narrows the token at once, one who renews it extends it, and an end
+// reached by the service's own clock stops the agent without a roster.
+func TestTheGrantFollowsTheRoster(t *testing.T) {
+	g := newRig(t)
+	f := g.start(cimdID, cimdBack, ScopeLiveRead+" "+ScopePlanRead)
+	tk := g.approve(f, cimdID, ScopeLiveRead, ScopePlanRead)
+	key := f.agentKey(t)
+	g.roster(home, agentFor(key, cimdID, g.now().Add(time.Hour), ScopeLiveRead))
+	grant, aerr := g.bearer(tk.Access)
+	if aerr != nil || grant.Has(ScopePlanRead) || !grant.Has(ScopeLiveRead) || grant.Caps.MaxW != 5000 {
+		t.Fatalf("after narrowing: %+v %v", grant, aerr)
+	}
+	g.roster(home, agentFor(key, cimdID, g.now().Add(3*time.Hour), ScopeLiveRead, ScopePlanRead, ScopeDispatchHold))
+	grant, _ = g.bearer(tk.Access)
+	if !grant.Has(ScopeDispatchHold) || !slices.Contains(grant.Ops, "battery.hold") || grant.AgentExpires.Before(g.now().Add(2*time.Hour)) {
+		t.Fatalf("after widening and renewing: %+v", grant)
+	}
+	g.advance(3*time.Hour + time.Second)
+	if _, aerr := g.bearer(tk.Access); aerr == nil {
+		t.Fatal("an agent past its end was admitted")
+	}
+}
+
+// Only clients FTW Cloud knows, by their document's host, are verified.
+func TestVerifiedHosts(t *testing.T) {
+	for host, want := range map[string]bool{"claude.ai": true, "www.claude.ai": true, "chatgpt.com": true, "grok.com": true,
+		"evilclaude.ai": false, "claude.ai.evil.example": false, "example.com": false} {
+		if verifiedHost(host) != want {
+			t.Errorf("%s: %v", host, !want)
+		}
 	}
 }

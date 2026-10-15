@@ -135,16 +135,24 @@ to it yet.
   as the socket connects, no redirects, no proxy, 16 KiB, 5 s, cached), or
   registers at `/oauth/register` (RFC 7591), kept for ChatGPT and older
   clients. There is no account and no password: `/oauth/authorize` asks
-  `ftwkeysd` for a new agent key, then shows the client's name, where the
-  browser goes back, the rights asked for, a short code, a QR and the link
-  `https://app.ftw.energy/a/<request>`. The owner approves in the app or on
-  the box's page; the box lists the agent's key in the roster it signs, and
-  when that roster arrives the page, waiting on a server-sent event, returns
-  to the client with a code. Only the browser that started the request gets
-  it. Access tokens last 10 minutes; refresh tokens rotate, and a reused one
-  revokes its family. The service keeps hashes, never tokens. A token is
-  bound to one agent of one home; a roster without the agent, or the end the
-  box set for it, ends its tokens and its key.
+  `ftwkeysd` for a new agent key and has it sign the grant offer
+  (srcfl/ftw `docs/agents.md`): the key, the client, the scopes, ops and
+  caps asked for, and the page's code, with no home, since the owner picks
+  it. The page shows the client's name, where the browser goes back, the
+  rights, the code, a QR and `https://app.ftw.energy/a/<request>#<offer>`;
+  the app checks the offer against the offer key it pins, which
+  `/.well-known/ftw-offer-key` serves. The box's page or an owner who types
+  the code finds the offer once at `/oauth/requests?code=`. The owner
+  approves in the app or on the box's page; the box lists the agent's key,
+  for that client, in the roster it signs, and when that roster arrives the
+  page, waiting on a server-sent event, returns to the client with a code.
+  Only the browser that started the request gets it. Access tokens last 10
+  minutes; refresh tokens rotate, and a reused one revokes its family. A
+  token names its home (`ftwat_<home>.<secret>`) so any instance can route
+  it; the service keeps hashes, never tokens. A token carries the grant the
+  newest roster lists, narrowed or widened at once, and stops at the
+  agent's end by the service's own clock. A roster without the agent ends
+  its tokens and its key.
 
 Not built yet:
 

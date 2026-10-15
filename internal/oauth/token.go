@@ -5,6 +5,7 @@ import (
 	"crypto/subtle"
 	"encoding/base64"
 	"fmt"
+	"github.com/srcfl/ftw/go/protocol"
 	"net/http"
 	"regexp"
 	"slices"
@@ -14,11 +15,26 @@ import (
 
 var verifierRE = regexp.MustCompile(`^[A-Za-z0-9._~-]{43,128}$`)
 
-// Token prefixes, so a leaked token is recognisable for what it is.
+// Token prefixes, so a leaked token is recognisable for what it is. After
+// the prefix comes the home, then a dot and the secret, so any instance can
+// tell which shard holds a token's home without a lookup.
 const (
 	accessPrefix  = "ftwat_"
 	refreshPrefix = "ftwrt_"
 )
+
+// TokenHome is the home a token names, or "" for something else. It
+// proves nothing: only the stored hash does.
+func TokenHome(tok string) string {
+	for _, p := range []string{accessPrefix, refreshPrefix} {
+		if rest, ok := strings.CutPrefix(tok, p); ok {
+			if home, _, ok := strings.Cut(rest, "."); ok {
+				return home
+			}
+		}
+	}
+	return ""
+}
 
 func (s *Server) serveToken(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, 16<<10)
@@ -126,14 +142,14 @@ func (s *Server) refresh(w http.ResponseWriter, r *http.Request, cl client) {
 // The refresh token ends no later than refreshEnd or the agent.
 func (s *Server) issue(w http.ResponseWriter, family []byte, clientID string, a agentRow, scope string, refreshEnd time.Time) {
 	now := s.now()
-	if !a.Expires.IsZero() && a.Expires.Before(refreshEnd) {
+	if a.Expires.Before(refreshEnd) {
 		refreshEnd = a.Expires
 	}
 	accessEnd := now.Add(AccessTTL)
 	if accessEnd.After(refreshEnd) {
 		accessEnd = refreshEnd
 	}
-	access, refresh := accessPrefix+randomToken(32), refreshPrefix+randomToken(32)
+	access, refresh := accessPrefix+a.Home+"."+randomToken(32), refreshPrefix+a.Home+"."+randomToken(32)
 	base := tokenRow{Family: family, ClientID: clientID, Home: a.Home, Agent: a.Agent, Scope: scope, Resource: Resource}
 	at, rt := base, base
 	at.Kind, at.Expires = kindAccess, accessEnd
@@ -155,8 +171,10 @@ func (s *Server) issue(w http.ResponseWriter, family []byte, clientID string, a 
 	}, false)
 }
 
+// agentGone is an agent past the end its box set. The service stops
+// admitting it by its own clock, without waiting for a roster.
 func (s *Server) agentGone(a agentRow) bool {
-	return !a.Expires.IsZero() && !s.now().Before(a.Expires)
+	return !s.now().Before(a.Expires)
 }
 
 func tokenError(w http.ResponseWriter, status int, code, desc string) {
@@ -208,12 +226,20 @@ type Subject struct {
 // SubjectAgent is a personal agent an owner approved.
 const SubjectAgent = "agent"
 
-// Grant is what one valid access token allows.
+// Grant is what one valid access token allows: the rights the box grants
+// its agent now, as the newest roster lists them. An owner who narrows the
+// grant narrows the token at once; one who widens it widens the token too.
 type Grant struct {
 	Subject  Subject
 	ClientID string
 	Scopes   []string
-	Expires  time.Time
+	// Ops and Caps are the grant's operations and caps. The service may
+	// hold a call to them before the box does; it never loosens them.
+	Ops     []string
+	Caps    protocol.Caps
+	Expires time.Time
+	// AgentExpires is when the box ends the agent.
+	AgentExpires time.Time
 }
 
 // Has reports whether the grant carries a scope.
@@ -253,7 +279,7 @@ func (s *Server) Authenticate(r *http.Request) (*Grant, *AuthError) {
 	}
 	return &Grant{
 		Subject:  Subject{Kind: SubjectAgent, Shard: a.Shard, Home: a.Home, Agent: a.Agent, Key: a.Key, Kid: a.Kid},
-		ClientID: t.ClientID, Scopes: splitScope(t.Scope), Expires: t.Expires,
+		ClientID: t.ClientID, Scopes: a.Scopes, Ops: a.Ops, Caps: a.Caps, Expires: t.Expires, AgentExpires: a.Expires,
 	}, nil
 }
 

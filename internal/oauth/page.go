@@ -21,6 +21,7 @@ type pageData struct {
 	Name         string
 	Host         string
 	Verified     bool
+	FromDocument bool
 	RedirectHost string
 	Local        bool
 	Scopes       []string
@@ -38,9 +39,9 @@ type pageError struct {
 
 func (s *Server) consentPage(w http.ResponseWriter, rid string, c consent) {
 	u, _ := url.Parse(c.RedirectURI)
-	d := pageData{Nonce: randomToken(16), RID: rid, Name: c.ClientName, Host: c.ClientHost, Verified: c.Verified,
+	d := pageData{Nonce: randomToken(16), RID: rid, Name: c.ClientName, Host: c.ClientHost, Verified: c.Verified, FromDocument: isCIMD(c.ClientID),
 		RedirectHost: u.Host, Local: u.Scheme == "http" && isLoopback(u.Hostname()),
-		Code: c.Code[:3] + "-" + c.Code[3:], Link: AppLink + rid}
+		Code: c.Code[:3] + "-" + c.Code[3:], Link: appLink(rid, c.Offer)}
 	for _, sc := range splitScope(c.Scope) {
 		d.Scopes = append(d.Scopes, scopeWords[sc])
 		if !slices.Contains(ReadScopes, sc) {
@@ -74,7 +75,8 @@ func pageHeaders(w http.ResponseWriter, nonce string) {
 // qrSVG draws text as a QR code, dark on light whatever the page's theme,
 // with the quiet zone the standard asks for.
 func qrSVG(text string) template.HTML {
-	code, err := qr.Encode(text, qr.M)
+	// Level L: the link carries the signed offer, and a screen is clean.
+	code, err := qr.Encode(text, qr.L)
 	if err != nil {
 		return ""
 	}
@@ -100,7 +102,7 @@ const pageStyle = `
 main{max-width:560px;margin:0 auto;padding:32px 16px}h1{font-size:1.5rem;line-height:1.25;margin:0 0 8px}h2{font-size:1rem;margin:24px 0 8px}
 .muted{color:var(--muted)}.warn{color:var(--warn)}.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px}
 ul{margin:0;padding-left:20px}.approve{display:flex;gap:16px;align-items:center;flex-wrap:wrap;margin-top:24px}
-.qr{width:168px;height:168px;flex:none;background:#fff;border-radius:8px;padding:4px}.qr svg{width:100%;height:100%}
+.qr{width:232px;height:232px;flex:none;background:#fff;border-radius:8px;padding:4px}.qr svg{width:100%;height:100%}
 .code{font:600 1.75rem/1 ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:.08em;margin:4px 0 0}
 a.button{display:inline-block;background:var(--accent);color:#fff;text-decoration:none;padding:10px 16px;border-radius:8px;font-weight:600}
 @media (prefers-color-scheme:dark){a.button{color:#0b1a12}}
@@ -113,7 +115,7 @@ var consentTmpl = template.Must(template.New("consent").Parse(`<!doctype html>
 <title>Connect an assistant · FTW Cloud</title><style nonce="{{.Nonce}}">` + pageStyle + `</style></head>
 <body><main id="main" data-rid="{{.RID}}">
 <h1>Let {{.Name}} into your home?</h1>
-<p class="muted">{{if .Verified}}Identified by {{.Host}}.{{else}}This name is what the assistant registered with. FTW Cloud has not checked it.{{end}}</p>
+<p class="muted">{{if .Verified}}A client FTW Cloud knows, from {{.Host}}.{{else if .FromDocument}}From {{.Host}}. FTW Cloud does not know this client: check the name and the address.{{else}}This name is what the assistant registered with. FTW Cloud has not checked it.{{end}}</p>
 <div class="card">
 <p>After you approve, this window goes back to <strong>{{.RedirectHost}}</strong>.{{if .Local}} <span class="warn">That is a program on this computer. Approve only if you started it.</span>{{end}}</p>
 <h2>It asks to</h2>

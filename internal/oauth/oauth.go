@@ -62,24 +62,20 @@ const (
 	RefreshTTL = 30 * 24 * time.Hour
 )
 
-// Scopes. Each is a right the box grants an agent, by its registry name; a
-// token carries those the client asked for and the box granted.
-//
-// The first five are in contract/registry.yaml today. The rest are the
-// agent rights decided on 15 October 2026 and wait for their registry names
-// (the core-agent-role contract); they move to protocol constants when it
-// lands.
+// Scopes. Each is a right the box grants an agent, by its registry name
+// (docs/agents.md in srcfl/ftw); a token carries those the client asked for
+// and the box granted.
 const (
 	ScopeLiveRead     = protocol.ScopeLiveRead
 	ScopePlanRead     = protocol.ScopePlanRead
 	ScopeHistoryRead  = protocol.ScopeHistoryRead
 	ScopeHealthRead   = protocol.ScopeHealthRead
 	ScopeEventsRead   = protocol.ScopeEventsRead
-	ScopeLogsRead     = "ftw.logs.read"
-	ScopeConfigRead   = "ftw.config.read"
-	ScopeDiagRun      = "ftw.diag.run"
-	ScopeDispatchHold = "ftw.dispatch.hold"
-	ScopeGoalsRequest = "ftw.goals.request"
+	ScopeLogsRead     = protocol.ScopeLogsRead
+	ScopeConfigRead   = protocol.ScopeConfigRead
+	ScopeDiagRun      = protocol.ScopeDiagRun
+	ScopeDispatchHold = protocol.ScopeDispatchHold
+	ScopeGoalsRequest = protocol.ScopeGoalsRequest
 )
 
 // ReadScopes are what an agent gets by default.
@@ -121,6 +117,8 @@ type AgentKeys interface {
 	New(ctx context.Context) (kid string, pub []byte, err error)
 	Keep(ctx context.Context, kid string) error
 	Forget(ctx context.Context, kid string) error
+	SignOffer(ctx context.Context, offer []byte) ([]byte, error)
+	OfferKey(ctx context.Context) ([]byte, error)
 }
 
 // Server is the authorization server.
@@ -136,13 +134,11 @@ type Server struct {
 
 	roster chan rosterEvent
 
+	offerKey offerKey
+
 	// Shard names the shard a home lives on (shard.Directory). Nil is one
 	// shard, "".
 	Shard func(home string) string
-	// AgentExpiry reads when the box ends an agent, from its roster entry.
-	// Nil, or a zero time, is no end the service knows of; the box still
-	// enforces its own.
-	AgentExpiry func(d cloudwire.Device) time.Time
 	// OnRevoke hears that an agent is gone: its owner revoked it, or it
 	// ran out. The MCP server drops its warm session. It must not block.
 	OnRevoke func(home, agent string)
@@ -175,7 +171,7 @@ func (s *Server) Close() error { return s.st.close() }
 var Routes = []string{
 	"/.well-known/oauth-authorization-server", "/.well-known/oauth-protected-resource",
 	"/.well-known/oauth-protected-resource/mcp", "/oauth/authorize", "/oauth/token", "/oauth/register",
-	"/oauth/revoke", "/oauth/requests",
+	"/oauth/revoke", "/oauth/requests", "/.well-known/ftw-offer-key",
 }
 
 // Mount adds the authorization server's routes to mux.
@@ -187,6 +183,7 @@ func (s *Server) Mount(mux *http.ServeMux) {
 	mux.HandleFunc("POST /oauth/token", s.serveToken)
 	mux.HandleFunc("POST /oauth/register", s.serveRegister)
 	mux.HandleFunc("POST /oauth/revoke", s.serveRevoke)
+	mux.HandleFunc("GET /.well-known/ftw-offer-key", s.serveOfferKey)
 	mux.HandleFunc("GET /oauth/requests", s.serveRequestByCode)
 	mux.HandleFunc("GET /oauth/requests/{rid}", s.serveRequest)
 	mux.HandleFunc("GET /oauth/requests/{rid}/events", s.serveEvents)
@@ -285,19 +282,21 @@ func (s *Server) Run(ctx context.Context) {
 func (s *Server) applyRoster(ctx context.Context, ev rosterEvent) {
 	now := s.now()
 	retry := false
+	// The rows this service serves: a personal agent's, with its grant, a
+	// tunnel and an end still ahead. Support and release rows reach their
+	// homes another way.
 	listed := map[string]cloudwire.Device{}
 	for _, d := range ev.devices {
-		if d.Tun {
+		if d.Tun && d.Agent != nil && d.Role == protocol.RoleAgent && cloudwire.DeviceID(d.Key) == d.ID &&
+			now.Before(time.UnixMilli(d.Agent.ExpiresAtMs)) {
 			listed[d.ID] = d
 		}
 	}
-	// Approvals: a pending consent's key in the box's signed roster.
+	// Approvals: a pending consent's key in the box's signed roster, for
+	// the client the offer named.
 	for _, d := range listed {
 		ridHash, c, ok, err := s.st.pendingByKey(d.Key, now)
-		if err != nil || !ok {
-			continue
-		}
-		if cloudwire.DeviceID(d.Key) != d.ID {
+		if err != nil || !ok || d.Agent.Principal.ClientID != c.ClientID {
 			continue
 		}
 		if err := s.keys.Keep(ctx, c.Kid); err != nil {
@@ -306,8 +305,8 @@ func (s *Server) applyRoster(ctx context.Context, ev rosterEvent) {
 			continue
 		}
 		c.Home, c.Agent, c.Shard = ev.home, d.ID, s.shard(ev.home)
-		c.Granted = strings.Join(intersect(splitScope(c.Scope), d.Scopes), " ")
-		if err := s.st.approve(ridHash, c, s.expiry(d), now); err != nil {
+		c.Granted = strings.Join(intersect(splitScope(c.Scope), d.Agent.Scopes), " ")
+		if err := s.st.approve(ridHash, c, grantOf(d), now); err != nil {
 			continue
 		}
 		s.hub.notify(string(ridHash))
@@ -321,18 +320,29 @@ func (s *Server) applyRoster(ctx context.Context, ev rosterEvent) {
 			}
 		})
 	}
-	// Revocations: an agent the roster no longer lists, or lists with
-	// another key.
+	// Every agent the roster lists keeps the grant the box gives it now:
+	// an owner may widen, narrow or renew it. One it no longer lists, or
+	// lists with another key, is revoked.
 	agents, err := s.st.agentsOf(ev.home)
 	if err != nil {
 		return
 	}
 	for _, a := range agents {
-		if d, ok := listed[a.Agent]; ok && string(d.Key) == string(a.Key) {
+		d, ok := listed[a.Agent]
+		if !ok || string(d.Key) != string(a.Key) {
+			s.revoke(ctx, a)
 			continue
 		}
-		s.revoke(ctx, a)
+		if err := s.st.setGrant(a.Home, a.Agent, grantOf(d)); err != nil {
+			s.log.Warn("could not update an agent's grant", "err", err)
+		}
 	}
+}
+
+// grantOf is an agent row's grant, as the box signed it in the roster.
+func grantOf(d cloudwire.Device) agentGrant {
+	return agentGrant{Scopes: slices.Clone(d.Agent.Scopes), Ops: slices.Clone(d.Agent.Ops), Caps: d.Agent.Caps,
+		Expires: time.UnixMilli(d.Agent.ExpiresAtMs)}
 }
 
 func (s *Server) revoke(ctx context.Context, a agentRow) {
@@ -370,13 +380,6 @@ func (s *Server) shard(home string) string {
 		return ""
 	}
 	return s.Shard(home)
-}
-
-func (s *Server) expiry(d cloudwire.Device) time.Time {
-	if s.AgentExpiry == nil {
-		return time.Time{}
-	}
-	return s.AgentExpiry(d)
 }
 
 // --------------------------------------------------------------------------

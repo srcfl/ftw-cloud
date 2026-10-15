@@ -20,7 +20,9 @@ type client struct {
 	// Host is where the name came from: the host of the metadata
 	// document's URL, which vouches for it, or the client_uri a registration
 	// claimed, which does not.
-	Host         string
+	Host string
+	// Verified is a client FTW Cloud knows: a metadata document on one of
+	// verifiedHosts.
 	Verified     bool
 	RedirectURIs []string
 	AuthMethod   string
@@ -37,7 +39,7 @@ func (s *Server) resolveClient(ctx context.Context, id string) (client, error) {
 			return client{}, err
 		}
 		u, _ := url.Parse(id)
-		return client{ID: id, Name: md.ClientName, Host: u.Hostname(), Verified: true, RedirectURIs: md.RedirectURIs,
+		return client{ID: id, Name: md.ClientName, Host: u.Hostname(), Verified: verifiedHost(u.Hostname()), RedirectURIs: md.RedirectURIs,
 			AuthMethod: authNone}, nil
 	}
 	c, ok, err := s.st.client(id)

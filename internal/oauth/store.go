@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/srcfl/ftw/go/protocol"
 	_ "modernc.org/sqlite"
 )
 
@@ -62,7 +63,9 @@ CREATE TABLE IF NOT EXISTS requests (
 	shard TEXT NOT NULL DEFAULT '',
 	authz BLOB UNIQUE,
 	authz_ms INTEGER NOT NULL DEFAULT 0,
-	authz_used INTEGER NOT NULL DEFAULT 0
+	authz_used INTEGER NOT NULL DEFAULT 0,
+	offer TEXT NOT NULL DEFAULT '',
+	code_used INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS agents (
 	home TEXT NOT NULL,
@@ -71,6 +74,8 @@ CREATE TABLE IF NOT EXISTS agents (
 	kid TEXT NOT NULL,
 	client_id TEXT NOT NULL,
 	scope TEXT NOT NULL,
+	ops TEXT NOT NULL,
+	caps TEXT NOT NULL,
 	shard TEXT NOT NULL,
 	expires_ms INTEGER NOT NULL,
 	created_ms INTEGER NOT NULL,
@@ -169,7 +174,7 @@ type consent struct {
 	ClientID    string
 	ClientName  string
 	ClientHost  string
-	Verified    bool // the client's name came from a document at its own https URL
+	Verified    bool // a client FTW Cloud knows (verifiedHosts)
 	RedirectURI string
 	State       string
 	Challenge   string
@@ -184,17 +189,19 @@ type consent struct {
 	Agent       string
 	Granted     string
 	Shard       string
+	// Offer is the signed grant offer, base64url, as the link carries it.
+	Offer string
 }
 
 const consentCols = `code, client_id, client_name, client_host, verified, redirect_uri, state, challenge, scope, resource,
-	kid, agent_key, created_ms, expires_ms, status, home, agent, granted, shard`
+	kid, agent_key, created_ms, expires_ms, status, home, agent, granted, shard, offer`
 
 func scanConsent(row interface{ Scan(...any) error }) (consent, error) {
 	var c consent
 	var verified int
 	var created, expires int64
 	err := row.Scan(&c.Code, &c.ClientID, &c.ClientName, &c.ClientHost, &verified, &c.RedirectURI, &c.State, &c.Challenge,
-		&c.Scope, &c.Resource, &c.Kid, &c.AgentKey, &created, &expires, &c.Status, &c.Home, &c.Agent, &c.Granted, &c.Shard)
+		&c.Scope, &c.Resource, &c.Kid, &c.AgentKey, &created, &expires, &c.Status, &c.Home, &c.Agent, &c.Granted, &c.Shard, &c.Offer)
 	c.Verified, c.Created, c.Expires = verified == 1, time.UnixMilli(created), time.UnixMilli(expires)
 	return c, err
 }
@@ -205,10 +212,10 @@ func (s *store) putConsent(rid, browser string, c consent) error {
 		verified = 1
 	}
 	_, err := s.db.Exec(`INSERT INTO requests (rid, browser, `+consentCols+`)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		hash(rid), hash(browser), c.Code, c.ClientID, c.ClientName, c.ClientHost, verified, c.RedirectURI, c.State,
 		c.Challenge, c.Scope, c.Resource, c.Kid, c.AgentKey, c.Created.UnixMilli(), c.Expires.UnixMilli(), c.Status,
-		c.Home, c.Agent, c.Granted, c.Shard)
+		c.Home, c.Agent, c.Granted, c.Shard, c.Offer)
 	return err
 }
 
@@ -216,7 +223,17 @@ func (s *store) consentByRID(rid string) (consent, bool, error) {
 	return s.oneConsent(`SELECT `+consentCols+` FROM requests WHERE rid = ?`, hash(rid))
 }
 
-func (s *store) consentByCode(code string) (consent, bool, error) {
+// spendCode finds a pending request by its short code, once: a code that
+// found its request finds nothing again.
+func (s *store) spendCode(code string, now time.Time) (consent, bool, error) {
+	res, err := s.db.Exec(`UPDATE requests SET code_used = 1 WHERE code = ? AND code_used = 0 AND status = ? AND expires_ms > ?`,
+		code, statusPending, now.UnixMilli())
+	if err != nil {
+		return consent{}, false, err
+	}
+	if n, _ := res.RowsAffected(); n != 1 {
+		return consent{}, false, nil
+	}
 	return s.oneConsent(`SELECT `+consentCols+` FROM requests WHERE code = ?`, code)
 }
 
@@ -243,7 +260,7 @@ func (s *store) pendingByKey(key []byte, now time.Time) (ridHash []byte, c conse
 	var verified int
 	var created, expires int64
 	err = row.Scan(&ridHash, &c.Code, &c.ClientID, &c.ClientName, &c.ClientHost, &verified, &c.RedirectURI, &c.State, &c.Challenge,
-		&c.Scope, &c.Resource, &c.Kid, &c.AgentKey, &created, &expires, &c.Status, &c.Home, &c.Agent, &c.Granted, &c.Shard)
+		&c.Scope, &c.Resource, &c.Kid, &c.AgentKey, &created, &expires, &c.Status, &c.Home, &c.Agent, &c.Granted, &c.Shard, &c.Offer)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, c, false, nil
 	}
@@ -251,9 +268,18 @@ func (s *store) pendingByKey(key []byte, now time.Time) (ridHash []byte, c conse
 	return ridHash, c, err == nil, err
 }
 
+// agentGrant is what the box's roster grants an agent now.
+type agentGrant struct {
+	Scopes  []string
+	Ops     []string
+	Caps    protocol.Caps
+	Expires time.Time
+}
+
 // approve marks a consent approved for an agent of a home, and records the
 // agent, in one transaction.
-func (s *store) approve(ridHash []byte, c consent, agentExpires, now time.Time) error {
+func (s *store) approve(ridHash []byte, c consent, g agentGrant, now time.Time) error {
+	caps, _ := json.Marshal(g.Caps)
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
@@ -269,11 +295,13 @@ func (s *store) approve(ridHash []byte, c consent, agentExpires, now time.Time) 
 	if n, _ := res.RowsAffected(); n != 1 {
 		return errGone
 	}
-	if _, err := tx.Exec(`INSERT INTO agents (home, agent, agent_key, kid, client_id, scope, shard, expires_ms, created_ms)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+	if _, err := tx.Exec(`INSERT INTO agents (home, agent, agent_key, kid, client_id, scope, ops, caps, shard, expires_ms, created_ms)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT (home, agent) DO UPDATE SET agent_key = excluded.agent_key, kid = excluded.kid,
-			client_id = excluded.client_id, scope = excluded.scope, shard = excluded.shard, expires_ms = excluded.expires_ms`,
-		c.Home, c.Agent, c.AgentKey, c.Kid, c.ClientID, c.Granted, c.Shard, agentExpires.UnixMilli(), now.UnixMilli()); err != nil {
+			client_id = excluded.client_id, scope = excluded.scope, ops = excluded.ops, caps = excluded.caps,
+			shard = excluded.shard, expires_ms = excluded.expires_ms`,
+		c.Home, c.Agent, c.AgentKey, c.Kid, c.ClientID, strings.Join(g.Scopes, " "), strings.Join(g.Ops, " "), string(caps),
+		c.Shard, g.Expires.UnixMilli(), now.UnixMilli()); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -321,7 +349,7 @@ func (s *store) redeem(code string, now time.Time) (c consent, ridHash []byte, r
 	var created, expires int64
 	err = row.Scan(&ridHash, &used, &ms, &c.Code, &c.ClientID, &c.ClientName, &c.ClientHost, &verified, &c.RedirectURI,
 		&c.State, &c.Challenge, &c.Scope, &c.Resource, &c.Kid, &c.AgentKey, &created, &expires, &c.Status, &c.Home,
-		&c.Agent, &c.Granted, &c.Shard)
+		&c.Agent, &c.Granted, &c.Shard, &c.Offer)
 	if errors.Is(err, sql.ErrNoRows) {
 		return c, nil, false, errGone
 	}
@@ -348,51 +376,63 @@ var errGone = errors.New("oauth: gone")
 // --------------------------------------------------------------------------
 
 // agentRow is an agent an owner approved, as the authorization server knows
-// it.
+// it: the grant is the one the box's newest roster lists.
 type agentRow struct {
 	Home     string
 	Agent    string
 	Key      []byte
 	Kid      string
 	ClientID string
-	Scope    string
 	Shard    string
-	Expires  time.Time // zero when the box set no end
+	agentGrant
+}
+
+const agentCols = `home, agent, agent_key, kid, client_id, scope, ops, caps, shard, expires_ms`
+
+func scanAgent(row interface{ Scan(...any) error }) (agentRow, error) {
+	var a agentRow
+	var scope, ops, caps string
+	var ms int64
+	err := row.Scan(&a.Home, &a.Agent, &a.Key, &a.Kid, &a.ClientID, &scope, &ops, &caps, &a.Shard, &ms)
+	if err != nil {
+		return a, err
+	}
+	a.Scopes, a.Ops, a.Expires = splitScope(scope), splitScope(ops), time.UnixMilli(ms)
+	_ = json.Unmarshal([]byte(caps), &a.Caps)
+	return a, nil
 }
 
 func (s *store) agent(home, agent string) (agentRow, bool, error) {
-	var a agentRow
-	var ms int64
-	err := s.db.QueryRow(`SELECT home, agent, agent_key, kid, client_id, scope, shard, expires_ms FROM agents WHERE home = ? AND agent = ?`,
-		home, agent).Scan(&a.Home, &a.Agent, &a.Key, &a.Kid, &a.ClientID, &a.Scope, &a.Shard, &ms)
+	a, err := scanAgent(s.db.QueryRow(`SELECT `+agentCols+` FROM agents WHERE home = ? AND agent = ?`, home, agent))
 	if errors.Is(err, sql.ErrNoRows) {
 		return a, false, nil
-	}
-	if ms > 0 {
-		a.Expires = time.UnixMilli(ms)
 	}
 	return a, err == nil, err
 }
 
 func (s *store) agentsOf(home string) ([]agentRow, error) {
-	rows, err := s.db.Query(`SELECT home, agent, agent_key, kid, client_id, scope, shard, expires_ms FROM agents WHERE home = ?`, home)
+	rows, err := s.db.Query(`SELECT `+agentCols+` FROM agents WHERE home = ?`, home)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	var out []agentRow
 	for rows.Next() {
-		var a agentRow
-		var ms int64
-		if err := rows.Scan(&a.Home, &a.Agent, &a.Key, &a.Kid, &a.ClientID, &a.Scope, &a.Shard, &ms); err != nil {
+		a, err := scanAgent(rows)
+		if err != nil {
 			return nil, err
-		}
-		if ms > 0 {
-			a.Expires = time.UnixMilli(ms)
 		}
 		out = append(out, a)
 	}
 	return out, rows.Err()
+}
+
+// setGrant records the grant the newest roster lists for an agent.
+func (s *store) setGrant(home, agent string, g agentGrant) error {
+	caps, _ := json.Marshal(g.Caps)
+	_, err := s.db.Exec(`UPDATE agents SET scope = ?, ops = ?, caps = ?, expires_ms = ? WHERE home = ? AND agent = ?`,
+		strings.Join(g.Scopes, " "), strings.Join(g.Ops, " "), string(caps), g.Expires.UnixMilli(), home, agent)
+	return err
 }
 
 // dropAgent deletes an agent and, by the foreign key, every token it holds.
@@ -402,7 +442,7 @@ func (s *store) dropAgent(home, agent string) error {
 }
 
 func (s *store) expiredAgents(now time.Time) ([]agentRow, error) {
-	rows, err := s.db.Query(`SELECT home, agent, kid FROM agents WHERE expires_ms > 0 AND expires_ms <= ?`, now.UnixMilli())
+	rows, err := s.db.Query(`SELECT home, agent, kid FROM agents WHERE expires_ms <= ?`, now.UnixMilli())
 	if err != nil {
 		return nil, err
 	}
