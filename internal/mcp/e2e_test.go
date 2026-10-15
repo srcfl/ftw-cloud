@@ -433,17 +433,19 @@ func (b *stubBox) handle(s *boxSession, env appwire.Envelope) {
 		b.reply(s, protocol.MsgError, env.ID, protocol.ErrorBody{Code: protocol.ErrScopeDenied})
 		return
 	}
-	b.mu.Lock()
-	b.inflight++
-	b.maxFlight = max(b.maxFlight, b.inflight)
-	delay := b.delay
-	b.mu.Unlock()
-	defer func() {
+	// A request is in flight while the box works on it, until it starts
+	// to answer. hello is the session's opening, not a request.
+	if env.T != protocol.MsgHello {
+		b.mu.Lock()
+		b.inflight++
+		b.maxFlight = max(b.maxFlight, b.inflight)
+		delay := b.delay
+		b.mu.Unlock()
+		time.Sleep(delay)
 		b.mu.Lock()
 		b.inflight--
 		b.mu.Unlock()
-	}()
-	time.Sleep(delay)
+	}
 	now := time.Now()
 	switch env.T {
 	case protocol.MsgHello:
