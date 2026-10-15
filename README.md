@@ -114,6 +114,16 @@ to it yet.
   the roster drops the device, moves its epoch or runs out, an owner
   suspends the device, or the home is purged.
 
+- **The keys part (`ftwkeysd`).** A second process on the same host, as
+  another user, answering only on a unix socket. It makes each assistant's
+  agent key (X25519) when an authorization starts, seals it at rest with a
+  data key from AWS KMS, and keeps it pending until the owner approves. It
+  unseals a key only to open that agent's Noise session to its box, keeps
+  the session's transport keys, and seals and opens each frame for
+  `ftwcloudd`, which carries them as `tun`. Forgetting a key ends its
+  sessions. [deploy/keys.md](deploy/keys.md) has the shape and how to turn
+  it on.
+
 Not built yet:
 
 | Step | What | Where |

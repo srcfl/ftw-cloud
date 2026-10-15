@@ -17,3 +17,13 @@ if [ -n "${reached}" ]; then
 fi
 
 echo "ftw-cloud: only go/protocol from srcfl/ftw ($(go list -deps ./... | grep -c '^github.com/srcfl/ftw/') packages)"
+
+# Only ftwkeysd talks to KMS. ftwcloudd links no AWS SDK, so a bug in the
+# door cannot reach for the agent keys' data keys itself.
+aws=$(go list -deps ./cmd/ftwcloudd | grep '^github.com/aws/' || true)
+if [ -n "${aws}" ]; then
+  echo "ftwcloudd links the AWS SDK; only ftwkeysd may:" >&2
+  printf '%s\n' "${aws}" >&2
+  exit 1
+fi
+echo "ftwcloudd: no AWS SDK"

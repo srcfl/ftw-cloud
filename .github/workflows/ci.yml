@@ -28,4 +28,6 @@ jobs:
       - name: What a watch can post never panics the service
         run: go test -run XXX -fuzz FuzzOnceMessage -fuzztime 30s ./internal/appsession
       - name: Builds for the host
-        run: GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -o /dev/null ./cmd/ftwcloudd
+        run: |
+          GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -o /dev/null ./cmd/ftwcloudd
+          GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -o /dev/null ./cmd/ftwkeysd

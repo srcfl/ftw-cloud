@@ -34,12 +34,54 @@ services:
       # boot by deploy/noise.sh. Empty means /v1/app is off, and the
       # service runs.
       - /run/ftw-cloud/noise:/run/secrets/noise:ro
+      # The keys part's socket (deploy/keys.md). Without ftwkeysd it holds
+      # nothing, and assistants cannot connect.
+      - /run/ftw-cloud-keys:/run/ftw-cloud-keys
     secrets:
       - ftw-cloud-service.key
     read_only: true
     tmpfs:
       - /tmp
     # Household readings live in memory. No core file may carry them out.
+    ulimits:
+      core: 0
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: '10m'
+        max-file: '3'
+
+  # The keys part: the only process that can act on a home, as an agent its
+  # owner approved (deploy/keys.md). It starts with COMPOSE_PROFILES=agents
+  # in compose.env, once the KMS key exists.
+  ftwkeysd:
+    image: ${FTW_CLOUD_IMAGE:?set FTW_CLOUD_IMAGE to an image digest}
+    profiles: [agents]
+    restart: unless-stopped
+    entrypoint: ['/usr/local/bin/ftwkeysd']
+    command:
+      - -socket=/run/ftw-cloud-keys/keys.sock
+      - -state=/keys
+      - -kms-key=${FTW_CLOUD_KMS_KEY:-}
+      - -region=eu-north-1
+      # ftwcloudd's user, the only one allowed on the socket.
+      - -peer-uid=65532
+    # Its own user, in ftwcloudd's group so that ftwcloudd may connect to
+    # the socket and nothing more.
+    user: '65533:65532'
+    # The host's network, because the instance's credentials answer one hop
+    # away and the bridged containers sit two hops off (deploy/keys.md):
+    # this is the one container that can reach KMS. It listens on nothing
+    # but the unix socket.
+    network_mode: host
+    volumes:
+      # Agent keys, sealed under KMS. ftwcloudd never mounts this.
+      - ftw-cloud-keys:/keys
+      - /run/ftw-cloud-keys:/run/ftw-cloud-keys
+    read_only: true
     ulimits:
       core: 0
     cap_drop: [ALL]
@@ -59,3 +101,4 @@ secrets:
 
 volumes:
   ftw-cloud-state:
+  ftw-cloud-keys:

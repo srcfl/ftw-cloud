@@ -18,15 +18,22 @@ COPY . .
 # No cgo: the SQLite driver is pure Go, so the binary runs on a static base.
 RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath \
       -ldflags "-s -w -X github.com/srcfl/ftw-cloud/internal/server.Revision=${REVISION}" \
-      -o /out/ftwcloudd ./cmd/ftwcloudd
+      -o /out/ftwcloudd ./cmd/ftwcloudd \
+    && CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -ldflags "-s -w" \
+      -o /out/ftwkeysd ./cmd/ftwkeysd
 RUN mkdir -p /out/share && tar -czf /out/share/source.tar.gz \
       --exclude=./.git --exclude=./state . \
-    && mkdir -p /out/state
+    && mkdir -p /out/state /out/keys
 
 FROM gcr.io/distroless/static-debian12:nonroot
 COPY --from=build /out/ftwcloudd /usr/local/bin/ftwcloudd
+# The keys part, run as its own container and user (deploy/keys.md).
+COPY --from=build /out/ftwkeysd /usr/local/bin/ftwkeysd
 COPY --from=build /out/share/source.tar.gz /usr/share/ftw-cloud/source.tar.gz
 COPY --from=build --chown=nonroot:nonroot /out/state /state
+# Owned by ftwkeysd's user, so a new volume mounted here starts out its own
+# and ftwcloudd cannot read it.
+COPY --from=build --chown=65533:65532 /out/keys /keys
 USER nonroot
 EXPOSE 443
 ENTRYPOINT ["/usr/local/bin/ftwcloudd"]
