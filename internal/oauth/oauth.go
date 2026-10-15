@@ -136,8 +136,9 @@ type Server struct {
 
 	roster chan rosterEvent
 
-	// Shard names the shard a home lives on. Nil is one shard, 0.
-	Shard func(home string) int
+	// Shard names the shard a home lives on (shard.Directory). Nil is one
+	// shard, "".
+	Shard func(home string) string
 	// AgentExpiry reads when the box ends an agent, from its roster entry.
 	// Nil, or a zero time, is no end the service knows of; the box still
 	// enforces its own.
@@ -342,9 +343,9 @@ func (s *Server) sweep(ctx context.Context) {
 	}
 }
 
-func (s *Server) shard(home string) int {
+func (s *Server) shard(home string) string {
 	if s.Shard == nil {
-		return 0
+		return ""
 	}
 	return s.Shard(home)
 }

@@ -193,8 +193,10 @@ func (s *Server) serveRevoke(w http.ResponseWriter, r *http.Request) {
 // and no home of its own: it reaches only homes with an active support
 // grant, each through that grant's agent.
 type Subject struct {
-	Kind  string // SubjectAgent
-	Shard int
+	Kind string // SubjectAgent
+	// Shard names the shard that held the home when the owner approved,
+	// so a router can send the token on; "" with one shard.
+	Shard string
 	Home  string
 	// Agent is the roster device id; Key the agent's X25519 public key,
 	// as the roster lists it; Kid its key in the keys part.

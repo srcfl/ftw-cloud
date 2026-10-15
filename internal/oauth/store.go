@@ -59,7 +59,7 @@ CREATE TABLE IF NOT EXISTS requests (
 	home TEXT NOT NULL DEFAULT '',
 	agent TEXT NOT NULL DEFAULT '',
 	granted TEXT NOT NULL DEFAULT '',
-	shard INTEGER NOT NULL DEFAULT 0,
+	shard TEXT NOT NULL DEFAULT '',
 	authz BLOB UNIQUE,
 	authz_ms INTEGER NOT NULL DEFAULT 0,
 	authz_used INTEGER NOT NULL DEFAULT 0
@@ -71,7 +71,7 @@ CREATE TABLE IF NOT EXISTS agents (
 	kid TEXT NOT NULL,
 	client_id TEXT NOT NULL,
 	scope TEXT NOT NULL,
-	shard INTEGER NOT NULL,
+	shard TEXT NOT NULL,
 	expires_ms INTEGER NOT NULL,
 	created_ms INTEGER NOT NULL,
 	PRIMARY KEY (home, agent)
@@ -183,7 +183,7 @@ type consent struct {
 	Home        string
 	Agent       string
 	Granted     string
-	Shard       int
+	Shard       string
 }
 
 const consentCols = `code, client_id, client_name, client_host, verified, redirect_uri, state, challenge, scope, resource,
@@ -356,7 +356,7 @@ type agentRow struct {
 	Kid      string
 	ClientID string
 	Scope    string
-	Shard    int
+	Shard    string
 	Expires  time.Time // zero when the box set no end
 }
 
