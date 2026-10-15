@@ -136,15 +136,17 @@ to it yet.
   registers at `/oauth/register` (RFC 7591), kept for ChatGPT and older
   clients. There is no account and no password: `/oauth/authorize` asks
   `ftwkeysd` for a new agent key and has it sign the grant offer
-  (srcfl/ftw `docs/agents.md`): the key, the client, the scopes, ops and
-  caps asked for, and the page's code, with no home, since the owner picks
-  it. The page shows the client's name, where the browser goes back, the
+  (srcfl/ftw `docs/agents.md`), sent as `{o, kid, sig}`: the key, the
+  client, the host it is known by and whether FTW Cloud knows it, the
+  scopes, ops and caps asked for, the page's code, and an end ten minutes
+  out, with no home, since the owner picks it. The page shows the client's name, where the browser goes back, the
   rights, the code, a QR and `https://app.ftw.energy/a/<request>#<offer>`;
-  the app checks the offer against the offer key it pins, which
+  the app checks the offer against the offer key it pins by kid, which
   `/.well-known/ftw-offer-key` serves. The box's page or an owner who types
   the code finds the offer once at `/oauth/requests?code=`. The owner
   approves in the app or on the box's page; the box lists the agent's key,
-  for that client, in the roster it signs, and when that roster arrives the
+  for that client, in the roster it signs (an agent row, with no tunnel of
+  its own), and when that roster arrives the
   page, waiting on a server-sent event, returns to the client with a code.
   Only the browser that started the request gets it. Access tokens last 10
   minutes; refresh tokens rotate, and a reused one revokes its family. A

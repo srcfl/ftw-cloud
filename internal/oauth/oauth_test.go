@@ -284,8 +284,9 @@ func agentDevice(key []byte, scopes ...string) cloudwire.Device {
 	return agentFor(key, cimdID, time.Now().Add(30*24*time.Hour), scopes...)
 }
 
-// agentFor is an agent row for a client, with the end the box set. The
-// readable copy's scopes are empty, as the contract has it for agents.
+// agentFor is an agent row for a client, with the end the box set. Its
+// copy scopes are empty and it has no tunnel of its own, as the contract
+// has it for agents.
 func agentFor(key []byte, clientID string, end time.Time, scopes ...string) cloudwire.Device {
 	var ops []string
 	for op, sc := range protocol.RegistryAgentOps {
@@ -294,7 +295,7 @@ func agentFor(key []byte, clientID string, end time.Time, scopes ...string) clou
 		}
 	}
 	slices.Sort(ops)
-	return cloudwire.Device{ID: cloudwire.DeviceID(key), Key: key, Role: protocol.RoleAgent, Scopes: []string{}, Epoch: 1, Tun: true,
+	return cloudwire.Device{ID: cloudwire.DeviceID(key), Key: key, Role: protocol.RoleAgent, Scopes: []string{}, Epoch: 1,
 		Agent: &cloudwire.Agent{Scopes: scopes, Ops: ops, Caps: protocol.Caps{HoldS: 600, MaxW: 5000, PerMin: 6},
 			ExpiresAtMs: end.UnixMilli(), Principal: protocol.Principal{Client: "Claude", ClientID: clientID}}}
 }
@@ -642,13 +643,10 @@ func TestConsentCompletesOnlyWhenTheRosterListsTheAgent(t *testing.T) {
 	if next(t, browser).name != "pending" || next(t, stranger).name != "pending" {
 		t.Fatal("not pending at first")
 	}
-	// Another key; the right key without a tunnel, under another id, for
-	// another client, past its end, as support, or as a phone: none of them
-	// approves.
+	// Another key; the right key under another id, for another client,
+	// past its end, as support, or as a phone: none of them approves.
 	other := bytes.Repeat([]byte{1}, 32)
 	key := f.agentKey(t)
-	noTun := agentDevice(key, ScopeLiveRead)
-	noTun.Tun = false
 	wrongID := agentDevice(key, ScopeLiveRead)
 	wrongID.ID = "someone"
 	otherClient := agentFor(key, "https://evil.example/client.json", time.Now().Add(time.Hour), ScopeLiveRead)
@@ -657,7 +655,7 @@ func TestConsentCompletesOnlyWhenTheRosterListsTheAgent(t *testing.T) {
 	support.Role = protocol.RoleSupport
 	phone := agentDevice(key, ScopeLiveRead)
 	phone.Agent = nil
-	for _, d := range []cloudwire.Device{noTun, wrongID, otherClient, ended, support, phone} {
+	for _, d := range []cloudwire.Device{wrongID, otherClient, ended, support, phone} {
 		g.roster(home, agentDevice(other, ScopeLiveRead), d)
 	}
 	select {
@@ -949,9 +947,10 @@ func TestApprovalOutlastsAKeysPartThatIsAway(t *testing.T) {
 	}
 }
 
-// The offer: signed by the keys part's offer key, carrying the agent's key,
-// the client, what it asks for and the code, and no home; in the QR, the
-// link and the request's details alike.
+// The offer: the contract's SignedOffer, which protocol.OpenOffer opens
+// with the offer key pinned by its kid. It carries the agent's key, the
+// client and its host, what it asks for, the code and an end within ten
+// minutes, and no home; in the QR, the link and the request's details alike.
 func TestTheOfferIsSignedAndCarriesTheConsent(t *testing.T) {
 	g := newRig(t)
 	f := g.start(cimdID, cimdBack, ScopeLiveRead+" "+ScopeDispatchHold)
@@ -959,24 +958,27 @@ func TestTheOfferIsSignedAndCarriesTheConsent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var so signedOffer
+	var so protocol.SignedOffer
 	if err := cbor.Unmarshal(raw, &so); err != nil {
 		t.Fatal(err)
 	}
 	pub, _ := g.keys.OfferKey(context.Background())
-	if err := keys.VerifyOffer(pub, so.Offer, so.Sig); err != nil {
-		t.Fatalf("the offer does not verify: %v", err)
+	o, err := protocol.OpenOffer(map[string][]byte{keys.OfferKid(pub): pub}, so, g.now().UnixMilli())
+	if err != nil {
+		t.Fatalf("the offer does not open: %v", err)
 	}
-	var o protocol.GrantOffer
-	if err := cbor.Unmarshal(so.Offer, &o); err != nil {
-		t.Fatal(err)
-	}
-	if o.V != protocol.GrantOfferVersion || o.Home != "" || !bytes.Equal(o.Key, f.agentKey(t)) || o.Role != protocol.RoleAgent ||
-		o.Client != "Claude" || o.ClientID != cimdID || o.Code != f.view.Code ||
-		!slices.Equal(o.Scopes, []string{ScopeDispatchHold, ScopeLiveRead}) ||
-		!slices.Equal(o.Ops, []string{"battery.hold", "loadpoint.boost", "loadpoint.hold"}) || o.Caps.HoldS == 0 ||
-		o.TTLS != uint64(protocol.AgentMaxMs/1000) {
+	if o.Home != "" || !bytes.Equal(o.Key, f.agentKey(t)) || o.Role != protocol.RoleAgent || o.Client != "Claude" ||
+		o.ClientID != cimdID || o.ClientHost != "example.com" || o.Verified || o.Code != f.view.Code ||
+		!slices.Equal(o.Scopes, []string{ScopeDispatchHold, ScopeLiveRead}) || !slices.Equal(o.Ops, []string{"loadpoint.hold"}) ||
+		o.Caps.HoldS == 0 || o.TTLS != uint64(protocol.AgentMaxMs/1000) || o.ExpMs > g.now().UnixMilli()+protocol.OfferTTLMs {
 		t.Fatalf("offer %+v", o)
+	}
+	// Another key does not open it, and it ends.
+	if _, err := protocol.OpenOffer(map[string][]byte{keys.OfferKid(pub): bytes.Repeat([]byte{4}, 65)}, so, g.now().UnixMilli()); err == nil {
+		t.Fatal("an offer opened with another key")
+	}
+	if _, err := protocol.OpenOffer(map[string][]byte{keys.OfferKid(pub): pub}, so, o.ExpMs); err == nil {
+		t.Fatal("an offer opened at its end")
 	}
 	// The page's link and QR carry the same offer, in the fragment.
 	q, _ := g.authorizeParams(cimdID, cimdBack, "")
@@ -985,14 +987,22 @@ func TestTheOfferIsSignedAndCarriesTheConsent(t *testing.T) {
 	if !regexp.MustCompile(`href="https://app\.ftw\.energy/a/[A-Za-z0-9_-]{22}#[A-Za-z0-9_-]{200,}"`).Match(page) {
 		t.Fatal("the app link does not carry the offer in its fragment")
 	}
+	// A registered client is shown by its redirect URI's host.
+	resp2, _ := http.Post(g.srv.URL+"/oauth/register", "application/json", strings.NewReader(`{"client_name":"X","redirect_uris":["https://x.example/cb"]}`))
+	var reg map[string]any
+	_ = json.NewDecoder(resp2.Body).Decode(&reg)
+	f2 := g.start(reg["client_id"].(string), "https://x.example/cb", "")
+	if f2.view.Client.Host != "x.example" {
+		t.Fatalf("a registered client's host: %q", f2.view.Client.Host)
+	}
 }
 
 func TestTheOfferKeyIsPublished(t *testing.T) {
 	g := newRig(t)
-	var v struct{ Alg, Tag, Pub string }
+	var v struct{ Alg, Tag, Kid, Pub string }
 	getJSON(t, g.srv.URL+"/.well-known/ftw-offer-key", &v)
 	pub, _ := g.keys.OfferKey(context.Background())
-	if v.Alg != "ES256" || v.Tag != keys.OfferTag || v.Pub != base64.RawURLEncoding.EncodeToString(pub) {
+	if v.Alg != "ES256" || v.Tag != protocol.OfferTag || v.Kid != keys.OfferKid(pub) || v.Pub != base64.RawURLEncoding.EncodeToString(pub) {
 		t.Fatalf("offer key %+v", v)
 	}
 }
@@ -1027,7 +1037,7 @@ func TestTheGrantFollowsTheRoster(t *testing.T) {
 	}
 	g.roster(home, agentFor(key, cimdID, g.now().Add(3*time.Hour), ScopeLiveRead, ScopePlanRead, ScopeDispatchHold))
 	grant, _ = g.bearer(tk.Access)
-	if !grant.Has(ScopeDispatchHold) || !slices.Contains(grant.Ops, "battery.hold") || grant.AgentExpires.Before(g.now().Add(2*time.Hour)) {
+	if !grant.Has(ScopeDispatchHold) || !slices.Contains(grant.Ops, "loadpoint.hold") || grant.AgentExpires.Before(g.now().Add(2*time.Hour)) {
 		t.Fatalf("after widening and renewing: %+v", grant)
 	}
 	g.advance(3*time.Hour + time.Second)

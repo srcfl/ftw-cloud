@@ -282,12 +282,14 @@ func (s *Server) Run(ctx context.Context) {
 func (s *Server) applyRoster(ctx context.Context, ev rosterEvent) {
 	now := s.now()
 	retry := false
-	// The rows this service serves: a personal agent's, with its grant, a
-	// tunnel and an end still ahead. Support and release rows reach their
-	// homes another way.
+	// The rows this service serves: a personal agent's, with its grant and
+	// an end still ahead. Support and release rows reach their homes
+	// another way.
 	listed := map[string]cloudwire.Device{}
 	for _, d := range ev.devices {
-		if d.Tun && d.Agent != nil && d.Role == protocol.RoleAgent && cloudwire.DeviceID(d.Key) == d.ID &&
+		// An agent row has no tunnel of its own (tun is false): only the
+		// keys part opens its session.
+		if d.Agent != nil && d.Role == protocol.RoleAgent && cloudwire.DeviceID(d.Key) == d.ID &&
 			now.Before(time.UnixMilli(d.Agent.ExpiresAtMs)) {
 			listed[d.ID] = d
 		}

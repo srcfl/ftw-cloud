@@ -114,7 +114,16 @@ func (s *Server) serveAuthorize(w http.ResponseWriter, r *http.Request) {
 	}
 	now := s.now()
 	rid, browser := randomToken(16), randomToken(32)
-	con := consent{ClientID: c.ID, ClientName: c.Name, ClientHost: c.Host, Verified: c.Verified, RedirectURI: redirect,
+	// The host the owner is shown: the metadata document's, or for a
+	// registered client the redirect URI's, since the name it registered
+	// proves nothing.
+	host := c.Host
+	if !isCIMD(c.ID) {
+		if u, err := url.Parse(redirect); err == nil {
+			host = u.Hostname()
+		}
+	}
+	con := consent{ClientID: c.ID, ClientName: c.Name, ClientHost: host, Verified: c.Verified, RedirectURI: redirect,
 		State: req.state, Challenge: req.challenge, Scope: strings.Join(req.scope, " "), Resource: Resource,
 		Kid: kid, AgentKey: pub, Created: now, Expires: now.Add(RequestTTL), Status: statusPending}
 	for try := 0; ; try++ {
@@ -279,7 +288,9 @@ func (s *Server) serveRequestByCode(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	allowApp(w, r)
+	// The box's page fetches it from the owner's browser, on whatever
+	// address the box has at home.
+	w.Header().Set("Access-Control-Allow-Origin", "*")
 	writeJSON(w, http.StatusOK, s.view(c), false)
 }
 
