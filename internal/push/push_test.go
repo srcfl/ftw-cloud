@@ -131,16 +131,7 @@ func (r *rig) connected() {
 func (r *rig) gone(why string) { r.svc.BoxGone(r.home, why, r.conn) }
 
 // drain runs what the uplink queued, as Run would.
-func (r *rig) drain() {
-	for {
-		select {
-		case job := <-r.svc.work:
-			job(context.Background())
-		default:
-			return
-		}
-	}
-}
+func (r *rig) drain() { r.svc.sendQueued(context.Background()) }
 
 func (r *rig) register(t *testing.T, dev cloudwire.Device, scopes []string, token string) error {
 	t.Helper()

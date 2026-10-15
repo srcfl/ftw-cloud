@@ -61,7 +61,7 @@ CREATE TABLE IF NOT EXISTS push (
 
 // PushHomes lists the homes with a registration of a kind.
 func (r *Registry) PushHomes(kind string) ([]string, error) {
-	rows, err := r.db.Query(`SELECT DISTINCT home FROM push WHERE kind = ?`, kind)
+	rows, err := r.rd.Query(`SELECT DISTINCT home FROM push WHERE kind = ?`, kind)
 	if err != nil {
 		return nil, err
 	}
@@ -100,7 +100,7 @@ func (r *Registry) PushUnregister(home, deviceID string, token []byte) error {
 
 // PushRegs returns a home's registrations of one kind.
 func (r *Registry) PushRegs(home, kind string) ([]PushReg, error) {
-	rows, err := r.db.Query(`SELECT device_id, epoch, token, environment, app, registered_ms FROM push
+	rows, err := r.rd.Query(`SELECT device_id, epoch, token, environment, app, registered_ms FROM push
 		WHERE home = ? AND kind = ? ORDER BY registered_ms`, home, kind)
 	if err != nil {
 		return nil, err
@@ -144,7 +144,7 @@ func (r *Registry) PushTrim(home, deviceID, kind string, keep int) error {
 // PushPrune keeps only the registrations keep allows: a device at its epoch,
 // for one kind, as a new roster says.
 func (r *Registry) PushPrune(home string, keep func(deviceID string, epoch uint64, kind string) bool) error {
-	rows, err := r.db.Query(`SELECT DISTINCT device_id, epoch, kind FROM push WHERE home = ?`, home)
+	rows, err := r.rd.Query(`SELECT DISTINCT device_id, epoch, kind FROM push WHERE home = ?`, home)
 	if err != nil {
 		return err
 	}

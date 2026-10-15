@@ -28,7 +28,11 @@ const (
 
 // Registry is the SQLite file.
 type Registry struct {
+	// db is the one connection that writes; rd is a few that only read.
+	// The file is in WAL mode, so readers never wait for the writer, and
+	// a box's reconnect or a token read does not queue behind a write.
 	db *sql.DB
+	rd *sql.DB
 
 	// suspended mirrors the suspensions table, so admission, which runs
 	// under a home's lock, never waits for SQLite. Every write updates it
@@ -52,9 +56,19 @@ type Home struct {
 	GrantID   []byte
 }
 
+// readers is how many connections may read at once.
+const readers = 4
+
 // Open opens or creates the registry at path.
+//
+// synchronous(NORMAL) syncs the file at each checkpoint rather than at each
+// commit. A power cut can lose the last commits but never corrupts the file,
+// and nothing here is lost for good that way: a box sends its roster again
+// at its next connect, and a phone registers again at its next start. It
+// makes a reconnect storm a matter of memory, not of disk syncs.
 func Open(path string) (*Registry, error) {
-	db, err := sql.Open("sqlite", "file:"+path+"?_pragma=journal_mode(WAL)&_pragma=secure_delete(ON)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)")
+	const pragmas = "_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_pragma=secure_delete(ON)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)"
+	db, err := sql.Open("sqlite", "file:"+path+"?"+pragmas+"&_txlock=immediate")
 	if err != nil {
 		return nil, err
 	}
@@ -98,9 +112,15 @@ CREATE TABLE IF NOT EXISTS away (
 		_ = db.Close()
 		return nil, fmt.Errorf("registry: schema: %w", err)
 	}
-	r := &Registry{db: db, suspended: map[suspendKey]uint64{}}
-	if err := r.loadSuspensions(); err != nil {
+	rd, err := sql.Open("sqlite", "file:"+path+"?"+pragmas+"&_pragma=query_only(1)")
+	if err != nil {
 		_ = db.Close()
+		return nil, err
+	}
+	rd.SetMaxOpenConns(readers)
+	r := &Registry{db: db, rd: rd, suspended: map[suspendKey]uint64{}}
+	if err := r.loadSuspensions(); err != nil {
+		_ = r.Close()
 		return nil, fmt.Errorf("registry: suspensions: %w", err)
 	}
 	return r, nil
@@ -135,7 +155,13 @@ func (r *Registry) forgetSuspensions(home string) {
 }
 
 // Close closes the file.
-func (r *Registry) Close() error { return r.db.Close() }
+func (r *Registry) Close() error {
+	rdErr := r.rd.Close()
+	if err := r.db.Close(); err != nil {
+		return err
+	}
+	return rdErr
+}
 
 // Claim registers a home at its box's first hello. A home id is a hash of the
 // key, so a second claim with another key is impossible by construction, and
@@ -146,6 +172,14 @@ func (r *Registry) Claim(home string, pk []byte, now time.Time) error {
 			return ErrPurged
 		}
 		return err
+	}
+	// A box that reconnects finds its row and writes nothing.
+	var known int
+	if err := r.rd.QueryRow(`SELECT COUNT(*) FROM homes WHERE home = ?`, home).Scan(&known); err != nil {
+		return err
+	}
+	if known > 0 {
+		return nil
 	}
 	_, err := r.db.Exec(`INSERT INTO homes (home, pk, created_ms) VALUES (?, ?, ?) ON CONFLICT (home) DO NOTHING`,
 		home, pk, now.UnixMilli())
@@ -160,7 +194,7 @@ func (r *Registry) Get(home string) (Home, bool, error) {
 	var h Home
 	var created, rosterMs int64
 	var seq int64
-	err := r.db.QueryRow(`SELECT home, pk, created_ms, roster, roster_seq, roster_ms, grant_id FROM homes WHERE home = ?`, home).
+	err := r.rd.QueryRow(`SELECT home, pk, created_ms, roster, roster_seq, roster_ms, grant_id FROM homes WHERE home = ?`, home).
 		Scan(&h.ID, &h.PK, &created, &h.Roster, &seq, &rosterMs, &h.GrantID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Home{}, false, nil
@@ -179,7 +213,7 @@ func (r *Registry) Get(home string) (Home, bool, error) {
 // admit phones by again after a restart. It is upkeep at start, never a
 // request.
 func (r *Registry) Rosters() ([]Home, error) {
-	rows, err := r.db.Query(`SELECT home, pk, created_ms, roster, roster_seq, roster_ms, grant_id FROM homes WHERE roster IS NOT NULL`)
+	rows, err := r.rd.Query(`SELECT home, pk, created_ms, roster, roster_seq, roster_ms, grant_id FROM homes WHERE roster IS NOT NULL`)
 	if err != nil {
 		return nil, err
 	}
@@ -226,7 +260,7 @@ func (r *Registry) AwayClear(home string) error {
 
 // AwayAll returns every home recorded as away.
 func (r *Registry) AwayAll() ([]Away, error) {
-	rows, err := r.db.Query(`SELECT home, due_ms, told FROM away`)
+	rows, err := r.rd.Query(`SELECT home, due_ms, told FROM away`)
 	if err != nil {
 		return nil, err
 	}
@@ -279,7 +313,7 @@ func (r *Registry) Purge(home string, grantID []byte, now time.Time) error {
 // Tombstone returns a purged home's grant id and when it was deleted.
 func (r *Registry) Tombstone(home string) (time.Time, bool, error) {
 	var ms int64
-	err := r.db.QueryRow(`SELECT deleted_ms FROM tombstones WHERE home = ?`, home).Scan(&ms)
+	err := r.rd.QueryRow(`SELECT deleted_ms FROM tombstones WHERE home = ?`, home).Scan(&ms)
 	if errors.Is(err, sql.ErrNoRows) {
 		return time.Time{}, false, nil
 	}
@@ -292,7 +326,7 @@ func (r *Registry) Tombstone(home string) (time.Time, bool, error) {
 // TombstoneGrant returns the grant id a purged home was deleted under.
 func (r *Registry) TombstoneGrant(home string) []byte {
 	var id []byte
-	_ = r.db.QueryRow(`SELECT grant_id FROM tombstones WHERE home = ?`, home).Scan(&id)
+	_ = r.rd.QueryRow(`SELECT grant_id FROM tombstones WHERE home = ?`, home).Scan(&id)
 	return id
 }
 
@@ -302,7 +336,7 @@ func (r *Registry) TombstoneGrant(home string) []byte {
 func (r *Registry) Expire(now time.Time) ([]string, error) {
 	newCutoff := now.Add(-NewHomeGrace).UnixMilli()
 	rosterCutoff := now.Add(-RosterGrace).UnixMilli()
-	rows, err := r.db.Query(`SELECT home FROM homes
+	rows, err := r.rd.Query(`SELECT home FROM homes
 		WHERE (roster_ms = 0 AND created_ms < ?) OR (roster_ms > 0 AND roster_ms < ?)`, newCutoff, rosterCutoff)
 	if err != nil {
 		return nil, err
@@ -369,7 +403,7 @@ func (r *Registry) Suspended(home, deviceID string, epoch uint64) bool {
 // PruneSuspensions drops the suspensions a new roster ended: devices it no
 // longer lists, and devices whose epoch moved.
 func (r *Registry) PruneSuspensions(home string, epochs map[string]uint64) error {
-	rows, err := r.db.Query(`SELECT device_id, epoch FROM suspensions WHERE home = ?`, home)
+	rows, err := r.rd.Query(`SELECT device_id, epoch FROM suspensions WHERE home = ?`, home)
 	if err != nil {
 		return err
 	}

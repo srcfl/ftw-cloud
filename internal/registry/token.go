@@ -48,7 +48,7 @@ func (r *Registry) TokenIssue(row TokenRow, hash []byte) error {
 func (r *Registry) TokenLookup(hash []byte, now time.Time) (TokenRow, bool, error) {
 	var row TokenRow
 	var epoch, ms int64
-	err := r.db.QueryRow(`SELECT home, device_id, epoch, expires_ms FROM tokens WHERE hash = ? AND expires_ms > ?`,
+	err := r.rd.QueryRow(`SELECT home, device_id, epoch, expires_ms FROM tokens WHERE hash = ? AND expires_ms > ?`,
 		hash, now.UnixMilli()).Scan(&row.Home, &row.DeviceID, &epoch, &ms)
 	if errors.Is(err, sql.ErrNoRows) {
 		return TokenRow{}, false, nil
@@ -75,7 +75,7 @@ func (r *Registry) TokenDropHash(hash []byte) error {
 // TokenPrune keeps only the tokens whose device keep allows at its epoch, as
 // a new roster says.
 func (r *Registry) TokenPrune(home string, keep func(deviceID string, epoch uint64) bool) error {
-	rows, err := r.db.Query(`SELECT device_id, epoch FROM tokens WHERE home = ?`, home)
+	rows, err := r.rd.Query(`SELECT device_id, epoch FROM tokens WHERE home = ?`, home)
 	if err != nil {
 		return err
 	}

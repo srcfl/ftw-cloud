@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"runtime"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -26,7 +27,9 @@ import (
 
 	"github.com/fxamacker/cbor/v2"
 	"github.com/gorilla/websocket"
+	"github.com/srcfl/ftw-cloud/internal/metrics"
 	"github.com/srcfl/ftw-cloud/internal/registry"
+	"github.com/srcfl/ftw-cloud/internal/shard"
 	"github.com/srcfl/ftw-cloud/internal/store"
 	"github.com/srcfl/ftw/go/protocol"
 	"github.com/srcfl/ftw/go/protocol/cloudwire"
@@ -61,6 +64,31 @@ const (
 	// maxPendingTTL how long one may last.
 	maxPending    = 4
 	maxPendingTTL = 3600
+	// A box redials after a drop, a deploy or a redirect, a few times an
+	// hour. Past connectBurst at one per connectEvery, a home's box is
+	// turned away before it touches the registry; its backoff grows.
+	connectBurst = 10
+	connectEvery = 6 * time.Second
+	// limitsIdle is how long a home's limits outlive its last connection,
+	// longer than any of its buckets takes to fill again.
+	limitsIdle = 2 * time.Minute
+)
+
+// What the uplink counts, summed over all homes.
+var (
+	boxSockets    = metrics.Sockets("box")
+	boxHandshake  = metrics.Handshake("box")
+	tunDown       = metrics.Forward("tun_down")
+	wrongShard    = metrics.WrongShard("box")
+	tunFramesUp   = metrics.Default.Counter("ftwcloud_tun_frames_total", "tun messages forwarded, up from boxes and down to them.", "dir", "up")
+	tunFramesDown = metrics.Default.Counter("ftwcloud_tun_frames_total", "tun messages forwarded, up from boxes and down to them.", "dir", "down")
+	tunBytesUp    = metrics.Default.Counter("ftwcloud_tun_bytes_total", "Bytes of tun d forwarded, up from boxes and down to them.", "dir", "up")
+	tunBytesDown  = metrics.Default.Counter("ftwcloud_tun_bytes_total", "Bytes of tun d forwarded, up from boxes and down to them.", "dir", "down")
+	dropTunUp     = metrics.Drop("tun_rate_up")
+	dropTunDown   = metrics.Drop("tun_rate_down")
+	dropUnknown   = metrics.Drop("box_unknown_type")
+	dropConnect   = metrics.Drop("box_connect_rate")
+	boxesFollow   = metrics.Default.Gauge("ftwcloud_boxes_following_shards", "Connected boxes that list shard in hello.caps.")
 )
 
 // Uplink is the /v1/box handler.
@@ -73,12 +101,16 @@ type Uplink struct {
 
 	mu    sync.Mutex
 	conns map[string]*boxConn
+	// limits are each home's rate limits, kept across its connections.
+	limits map[string]*limits
 
-	// Dropped counts box messages of a type this service does not know. A
-	// newer box works with an older service by this rule.
-	Dropped atomic.Int64
-	// TunDropped counts tun messages past a home's limits.
-	TunDropped atomic.Int64
+	// Shards says which homes this instance holds. Nil holds every home.
+	// Set before serving.
+	Shards *shard.Directory
+	// draining is set once Drain starts; restartReason is what its close
+	// says.
+	draining      atomic.Bool
+	restartReason atomic.Value
 
 	// OnConnect runs after a box's hello_ok, so the app sessions can ask a
 	// box that just came back for one-second updates and push can stop
@@ -102,7 +134,113 @@ func New(st *store.Store, reg *registry.Registry, key *ecdsa.PrivateKey, log *sl
 	if log == nil {
 		log = slog.Default()
 	}
-	return &Uplink{store: st, registry: reg, key: key, log: log, now: time.Now, conns: map[string]*boxConn{}}
+	return &Uplink{store: st, registry: reg, key: key, log: log, now: time.Now, conns: map[string]*boxConn{},
+		limits: map[string]*limits{}}
+}
+
+// limits are one home's rate limits. They outlive the connection, so a box
+// that redials does not start again with full buckets.
+type limits struct {
+	mu sync.Mutex
+	// msgs counts the box's signed messages; connects its connections.
+	msgs, connects bucket
+	// The tunnel's limits: up from the box, down from the home's phones.
+	// upHard is twice the up limits: a box past it is not pacing its
+	// tunnel, and its uplink closes.
+	upMsgs, upBytes         bucket
+	upHardMsgs, upHardBytes bucket
+	downMsgs, downBytes     bucket
+	// conns is how many connections use these now, and idle since when
+	// none has.
+	conns int
+	idle  time.Time
+}
+
+func newLimits(now time.Time) *limits {
+	return &limits{
+		msgs: newBucket(rateBurst, ratePerSec, now), connects: newBucket(connectBurst, 1/connectEvery.Seconds(), now),
+		upMsgs: newBucket(tunMsgBurst, tunMsgPerSec, now), upBytes: newBucket(tunByteBurst, tunBytePerSec, now),
+		upHardMsgs: newBucket(2*tunMsgBurst, 2*tunMsgPerSec, now), upHardBytes: newBucket(2*tunByteBurst, 2*tunBytePerSec, now),
+		downMsgs: newBucket(tunMsgBurst, tunMsgPerSec, now), downBytes: newBucket(tunByteBurst, tunBytePerSec, now),
+	}
+}
+
+// take runs f on the limits under their lock.
+func (l *limits) take(f func() bool) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return f()
+}
+
+// limitsFor returns a home's limits and counts one more connection on them.
+func (u *Uplink) limitsFor(home string) *limits {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	l := u.limits[home]
+	if l == nil {
+		l = newLimits(u.now())
+		u.limits[home] = l
+	}
+	l.conns++
+	return l
+}
+
+// release counts one connection fewer on a home's limits.
+func (u *Uplink) release(l *limits) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	l.conns--
+	if l.conns == 0 {
+		l.idle = u.now()
+	}
+}
+
+// Sweep forgets the limits of homes whose box has been gone for longer than
+// any bucket takes to fill. Upkeep calls it.
+func (u *Uplink) Sweep() {
+	now := u.now()
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	for home, l := range u.limits {
+		if l.conns == 0 && now.Sub(l.idle) > limitsIdle {
+			delete(u.limits, home)
+		}
+	}
+}
+
+// Boxes is how many boxes are connected now.
+func (u *Uplink) Boxes() int {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	return len(u.conns)
+}
+
+// Drain closes every box's uplink with cloudwire.CloseRestart and reason,
+// the spread in milliseconds, and turns away boxes still in their
+// handshake. Their absence starts no box.unreachable: the service is the one
+// going. It returns how many it closed.
+func (u *Uplink) Drain(reason string) int {
+	u.restartReason.Store(reason)
+	u.draining.Store(true)
+	u.mu.Lock()
+	conns := make([]*boxConn, 0, len(u.conns))
+	for _, c := range u.conns {
+		conns = append(conns, c)
+	}
+	u.mu.Unlock()
+	for _, c := range conns {
+		c.closeWith(cloudwire.CloseRestart, reason)
+	}
+	return len(conns)
+}
+
+// owner is the host of the shard that holds home, and whether it is this
+// instance.
+func (u *Uplink) owner(home string) (string, bool) {
+	if u.Shards == nil {
+		return "", true
+	}
+	return u.Shards.Owner(home)
 }
 
 var upgrader = websocket.Upgrader{
@@ -131,12 +269,9 @@ func (u *Uplink) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	defer conn.Close()
 	conn.SetReadLimit(maxBoxFrame)
-	now := u.now()
-	c := &boxConn{u: u, conn: conn, ekm: ekm, tokens: rateBurst, refilled: now,
-		upMsgs: newBucket(tunMsgBurst, tunMsgPerSec, now), upBytes: newBucket(tunByteBurst, tunBytePerSec, now),
-		upHardMsgs:  newBucket(2*tunMsgBurst, 2*tunMsgPerSec, now),
-		upHardBytes: newBucket(2*tunByteBurst, 2*tunBytePerSec, now),
-		downMsgs:    newBucket(tunMsgBurst, tunMsgPerSec, now), downBytes: newBucket(tunByteBurst, tunBytePerSec, now)}
+	boxSockets.Add(1)
+	defer boxSockets.Add(-1)
+	c := &boxConn{u: u, conn: conn, ekm: ekm, started: time.Now()}
 	c.write = c.writeFrame
 	if err := c.run(); err != nil && !websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
 		u.log.Debug("box uplink closed", "err", err)
@@ -160,20 +295,25 @@ func (u *Uplink) Watch(home string) {
 // past the home's limits is dropped and counted, and Tun still says true,
 // because the box is there.
 func (u *Uplink) Tun(home string, t cloudwire.Tun) bool {
+	start := time.Now()
 	u.mu.Lock()
 	c := u.conns[home]
 	u.mu.Unlock()
 	if c == nil || !c.tun {
 		return false
 	}
-	c.downMu.Lock()
-	ok := tunAllowed(&c.downMsgs, &c.downBytes, len(t.D), u.now())
-	c.downMu.Unlock()
-	if !ok {
-		u.TunDropped.Add(1)
+	now := u.now()
+	if !c.lim.take(func() bool { return tunAllowed(&c.lim.downMsgs, &c.lim.downBytes, len(t.D), now) }) {
+		dropTunDown.Inc()
 		return true
 	}
-	return c.send(tun(t)) == nil
+	if c.send(tun(t)) != nil {
+		return false
+	}
+	tunDown.Since(start)
+	tunFramesDown.Inc()
+	tunBytesDown.Add(int64(len(t.D)))
+	return true
 }
 
 // Restore holds each home's last signed roster again after a restart, read
@@ -185,25 +325,55 @@ func (u *Uplink) Restore() (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	n := 0
-	for _, h := range homes {
-		pub, err := cloudwire.ParsePublicKey(h.PK)
-		if err != nil || cloudwire.HomeID(h.PK) != h.ID {
-			continue
-		}
-		env, err := cloudwire.DecodeEnvelope(h.Roster)
-		if err != nil || env.T != cloudwire.MsgRoster || cloudwire.Verify(pub, h.ID, env) != nil {
-			u.log.Warn("a stored roster does not verify; its home waits for its box")
-			continue
-		}
-		var r cloudwire.Roster
-		if cloudwire.Unmarshal(env.B, &r) != nil {
-			continue
-		}
-		u.store.Seed(h.ID, &r, h.RosterAt)
-		n++
+	// Checking a signature is most of the work, so the rosters are checked
+	// side by side, one worker per core: a deploy admits phones sooner.
+	var n, bad atomic.Int64
+	work := make(chan registry.Home)
+	var wg sync.WaitGroup
+	for range runtime.GOMAXPROCS(0) {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for h := range work {
+				r, ok := verifiedRoster(h)
+				if !ok {
+					bad.Add(1)
+					continue
+				}
+				u.store.Seed(h.ID, r, h.RosterAt)
+				n.Add(1)
+			}
+		}()
 	}
-	return n, nil
+	for _, h := range homes {
+		// A home another shard holds now is that shard's to restore.
+		if _, ours := u.owner(h.ID); ours {
+			work <- h
+		}
+	}
+	close(work)
+	wg.Wait()
+	if bad.Load() > 0 {
+		u.log.Warn("stored rosters that do not verify; their homes wait for their boxes", "count", bad.Load())
+	}
+	return int(n.Load()), nil
+}
+
+// verifiedRoster is a stored roster, if it verifies with its home's key.
+func verifiedRoster(h registry.Home) (*cloudwire.Roster, bool) {
+	pub, err := cloudwire.ParsePublicKey(h.PK)
+	if err != nil || cloudwire.HomeID(h.PK) != h.ID {
+		return nil, false
+	}
+	env, err := cloudwire.DecodeEnvelope(h.Roster)
+	if err != nil || env.T != cloudwire.MsgRoster || cloudwire.Verify(pub, h.ID, env) != nil {
+		return nil, false
+	}
+	var r cloudwire.Roster
+	if cloudwire.Unmarshal(env.B, &r) != nil {
+		return nil, false
+	}
+	return &r, true
 }
 
 // boxConn is one box's connection.
@@ -224,19 +394,10 @@ type boxConn struct {
 	tun bool
 	// bye is the reason the box gave for leaving, if it gave one.
 	bye string
-
-	tokens   float64
-	refilled time.Time
-
-	// The tunnel's limits: up from the box, read on its goroutine; down
-	// from the home's phones, from theirs. upHard is twice the up limits: a
-	// box past it is not pacing its tunnel, and its uplink closes.
-	upMsgs, upBytes bucket
-	upHardMsgs      bucket
-	upHardBytes     bucket
-	downMu          sync.Mutex
-	downMsgs        bucket
-	downBytes       bucket
+	// started is when the socket was upgraded; lim the home's limits,
+	// once hello named the home.
+	started time.Time
+	lim     *limits
 }
 
 // bucket is a token bucket.
@@ -271,13 +432,28 @@ func tunAllowed(msgs, bytes *bucket, n int, now time.Time) bool {
 	return true
 }
 
+// writeFrame writes one frame. A write that fails or times out closes the
+// socket, so the box's read loop ends and the box redials, rather than
+// a socket that can read but never write lingering until its deadline.
 func (c *boxConn) writeFrame(frame []byte) error {
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
-	if err := c.conn.SetWriteDeadline(time.Now().Add(writeTimeout)); err != nil {
-		return err
+	err := c.conn.SetWriteDeadline(time.Now().Add(writeTimeout))
+	if err == nil {
+		err = c.conn.WriteMessage(websocket.BinaryMessage, frame)
 	}
-	return c.conn.WriteMessage(websocket.BinaryMessage, frame)
+	if err != nil {
+		_ = c.conn.Close()
+	}
+	return err
+}
+
+// closeWith ends the uplink with a close code and reason.
+func (c *boxConn) closeWith(code int, reason string) {
+	c.writeMu.Lock()
+	_ = c.conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(code, reason), time.Now().Add(time.Second))
+	c.writeMu.Unlock()
+	_ = c.conn.Close()
 }
 
 var errProtocol = errors.New("uplink: the box broke the protocol")
@@ -304,6 +480,25 @@ func (c *boxConn) run() error {
 	if err != nil {
 		return err
 	}
+	// Another shard's home goes there before it touches this registry; a
+	// service about to stop sends the box to the next one.
+	if host, ours := c.u.owner(c.home); !ours {
+		wrongShard.Inc()
+		c.closeWith(cloudwire.CloseWrongShard, host)
+		return nil
+	}
+	if c.u.draining.Load() {
+		reason, _ := c.u.restartReason.Load().(string)
+		c.closeWith(cloudwire.CloseRestart, reason)
+		return nil
+	}
+	c.lim = c.u.limitsFor(c.home)
+	defer c.u.release(c.lim)
+	if !c.lim.take(func() bool { return c.lim.connects.take(1, c.u.now()) }) {
+		dropConnect.Inc()
+		c.closeWith(cloudwire.CloseBusy, "")
+		return nil
+	}
 
 	switch err := c.u.registry.Claim(c.home, hello.PK, c.u.now()); {
 	case errors.Is(err, registry.ErrPurged):
@@ -320,6 +515,11 @@ func (c *boxConn) run() error {
 	}
 	if err := c.send(helloOK{BoxNonce: hello.BoxNonce, EKM: c.ekm, Have: map[string]string{}, RosterSeq: c.rosterSeq()}); err != nil {
 		return err
+	}
+	boxHandshake.Since(c.started)
+	if slices.Contains(hello.Caps, cloudwire.CapShard) {
+		boxesFollow.Add(1)
+		defer boxesFollow.Add(-1)
 	}
 	// The connection becomes the home's only after hello_ok has gone, so a
 	// watch or a tun from a phone can never reach the box before it: the
@@ -341,7 +541,7 @@ func (c *boxConn) run() error {
 				delete(c.u.conns, c.home)
 			}
 			c.u.mu.Unlock()
-			if current && c.u.OnGone != nil {
+			if current && c.u.OnGone != nil && !c.u.draining.Load() {
 				c.u.OnGone(c.home, c.bye, gen)
 			}
 		}()
@@ -413,13 +613,21 @@ func (c *boxConn) fromBox(env cloudwire.Envelope) error {
 		return fmt.Errorf("%w: a tun the service cannot route", errProtocol)
 	}
 	now := c.u.now()
-	if !tunAllowed(&c.upHardMsgs, &c.upHardBytes, len(t.D), now) {
+	hard, ok := true, true
+	c.lim.take(func() bool {
+		hard = tunAllowed(&c.lim.upHardMsgs, &c.lim.upHardBytes, len(t.D), now)
+		ok = hard && tunAllowed(&c.lim.upMsgs, &c.lim.upBytes, len(t.D), now)
+		return ok
+	})
+	if !hard {
 		return fmt.Errorf("%w: tun at twice the home's limits", errProtocol)
 	}
-	if !tunAllowed(&c.upMsgs, &c.upBytes, len(t.D), now) {
-		c.u.TunDropped.Add(1)
+	if !ok {
+		dropTunUp.Inc()
 		return nil
 	}
+	tunFramesUp.Inc()
+	tunBytesUp.Add(int64(len(t.D)))
 	if !c.handle.Tun(t) && !t.Ended() && c.tun {
 		return c.send(tun{Dev: t.Dev, Sid: t.Sid})
 	}
@@ -452,16 +660,11 @@ func (c *boxConn) ping(done <-chan struct{}) {
 	}
 }
 
-// allow is a token bucket over the box's messages.
+// allow is a token bucket over the box's signed messages, kept with the
+// home's limits.
 func (c *boxConn) allow() bool {
 	now := c.u.now()
-	c.tokens = min(rateBurst, c.tokens+now.Sub(c.refilled).Seconds()*ratePerSec)
-	c.refilled = now
-	if c.tokens < 1 {
-		return false
-	}
-	c.tokens--
-	return true
+	return c.lim.take(func() bool { return c.lim.msgs.take(1, now) })
 }
 
 // parseUplink reads one box frame. Only binary lane 1 frames carry the
@@ -512,7 +715,7 @@ func (c *boxConn) apply(env cloudwire.Envelope) (stop bool, err error) {
 	}
 
 	if _, forwarded := cloudwire.ClassScope[env.T]; !forwarded {
-		c.u.Dropped.Add(1)
+		dropUnknown.Inc()
 		return false, nil
 	}
 	if !c.handle.Serving() {
