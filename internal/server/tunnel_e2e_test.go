@@ -761,3 +761,57 @@ func TestAnOversizeTunClosesThePhone(t *testing.T) {
 		}
 	}
 }
+
+// The readable copy turns on and off while the box's uplink stays up: the
+// service takes what it may hold from the newest roster's grant, not from
+// hello, which named no grant. off → on → off on one connection.
+func TestTheCopyTurnsOnAndOffMidConnection(t *testing.T) {
+	s := newStack(t)
+	box := s.connectTunBox() // hello names no grant
+	key, _ := appwire.GenerateKeyPair()
+	box.roster(2, grantOff, nil, key.Public())
+	waitRoster(t, s, box.home, key)
+	live := func(w int64) {
+		box.send(cloudwire.MsgLive, cloudwire.Live{Header: box.header(), Fields: map[string]int64{"2": w}, Ages: map[string]int64{}})
+	}
+	held := func() int {
+		p := s.dialPhone(box.home, key, cloudwire.Now{}, "")
+		if p.conn != nil {
+			_ = p.conn.Close()
+		}
+		return len(p.snap.Envelopes)
+	}
+
+	live(1)
+	time.Sleep(100 * time.Millisecond)
+	if n := held(); n != 0 {
+		t.Fatalf("off: %d envelopes held", n)
+	}
+
+	grantID := bytes.Repeat([]byte{8}, cloudwire.GrantIDBytes)
+	box.roster(3, cloudwire.Grant{ID: grantID, Scopes: []string{protocol.ScopeLiveRead},
+		Purposes: []string{protocol.CloudPurposeServe}, Controller: cloudwire.ControllerSourceful}, nil, key.Public())
+	live(2)
+	eventually(t, "on: the copy is held on the same connection", func() bool { return held() == 1 })
+
+	box.roster(4, cloudwire.Grant{ID: grantID, Scopes: []string{}, Purposes: []string{},
+		Controller: cloudwire.ControllerSourceful}, nil, key.Public())
+	select {
+	case p := <-box.purged:
+		if p.What != cloudwire.PurgedCopy {
+			t.Fatalf("receipt %+v", p)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("no receipt")
+	}
+	live(3)
+	time.Sleep(100 * time.Millisecond)
+	if n := held(); n != 0 {
+		t.Fatalf("off again: %d envelopes held", n)
+	}
+	select {
+	case <-box.closed:
+		t.Fatal("the uplink closed while the copy turned on and off")
+	default:
+	}
+}

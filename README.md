@@ -23,6 +23,8 @@ to it yet.
 - Each home's newest message of each class lives in memory, as the exact bytes
   the box sent. Readings are dropped an hour after the box goes quiet and are
   never written to disk.
+- What the service holds follows the newest roster's grant, never `hello`:
+  the readable copy can turn on or off while the uplink stays up.
 - The registry (SQLite) holds the home id, the box key, the signed roster,
   owners' suspensions, APNs registrations, the hashes of extension tokens
   and when an away box's alert is due. A box whose owner turns the readable
