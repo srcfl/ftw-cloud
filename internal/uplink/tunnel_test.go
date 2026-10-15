@@ -37,7 +37,8 @@ func TestNothingReachesABoxBeforeHelloOK(t *testing.T) {
 			}
 		}
 	}()
-	for range 20 {
+	// As many connections as the home's connect limit lets through at once.
+	for range connectBurst {
 		// connect fails the test on anything but hello_ok after hello.
 		if _, err := b.connect(s, nil); err != nil {
 			t.Fatal(err)
@@ -129,7 +130,12 @@ func TestARosterGrantHasThreeShapes(t *testing.T) {
 // tunnel, with the readable copy off.
 func tunConnect(t *testing.T, s *service) *box {
 	t.Helper()
-	b := newBox(t)
+	return tunConnectAs(t, s, newBox(t))
+}
+
+// tunConnectAs connects b again, as the same home.
+func tunConnectAs(t *testing.T, s *service, b *box) *box {
+	t.Helper()
 	pool := x509.NewCertPool()
 	pool.AddCert(s.srv.Certificate())
 	d := websocket.Dialer{TLSClientConfig: &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS13}}
@@ -192,11 +198,21 @@ func TestPastTheTunLimitsTheServiceDrops(t *testing.T) {
 	s := newService(t)
 	b := tunConnect(t, s)
 	wait(t, "the box is the home's", func() bool { return s.up.Tun(b.home, cloudwire.Tun{Dev: "owner", Sid: 1}) })
+	// The box reads what it gets, as a live one does; one that stops
+	// reading has its socket closed after the write deadline.
+	go func() {
+		for {
+			if _, _, err := b.conn.ReadMessage(); err != nil {
+				return
+			}
+		}
+	}()
 	big := make([]byte, cloudwire.TunDataMax)
+	before := dropTunDown.Load()
 	for range 300 {
 		s.up.Tun(b.home, cloudwire.Tun{Dev: "owner", Sid: 1, D: big})
 	}
-	if s.up.TunDropped.Load() == 0 {
+	if dropTunDown.Load() == before {
 		t.Fatal("nothing was dropped past 4 MiB in a burst")
 	}
 	if !s.up.Tun(b.home, cloudwire.Tun{Dev: "owner", Sid: 1}) {

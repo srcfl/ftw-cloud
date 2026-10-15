@@ -310,12 +310,13 @@ func TestAnUnknownBoxMessageIsCountedNotFatal(t *testing.T) {
 	s := newService(t)
 	b := newBox(t)
 	_, _ = b.connect(s, nil)
+	before := dropUnknown.Load()
 	b.send(cloudwire.MsgRoster, b.roster(protocol.ScopeLiveRead))
 	b.send("stats.future", map[string]any{"seq": b.header().Seq})
 	b.send(cloudwire.MsgLive, cloudwire.Live{Header: b.header(), Fields: map[string]int64{"2": 1}})
 	wait(t, "the live after the stranger", func() bool { return len(snapshot(t, s, b.home)) == 1 })
-	if s.up.Dropped.Load() != 1 {
-		t.Fatalf("dropped %d", s.up.Dropped.Load())
+	if n := dropUnknown.Load() - before; n != 1 {
+		t.Fatalf("dropped %d", n)
 	}
 }
 
@@ -383,7 +384,8 @@ func FuzzBoxMessage(f *testing.F) {
 		u := New(st, reg, key, slog.New(slog.NewTextHandler(io.Discard, nil)))
 		handle, _ := st.For(store.Principal{Kind: store.Box, Home: home})
 		_ = reg.Claim(home, pk, time.Now())
-		c := &boxConn{u: u, home: home, pub: &key.PublicKey, handle: handle, write: func([]byte) error { return nil }}
+		c := &boxConn{u: u, home: home, pub: &key.PublicKey, handle: handle, write: func([]byte) error { return nil },
+			lim: newLimits(time.Now())}
 		env, err := cloudwire.SealBytes(key, home, typ, body)
 		if err != nil || typ == "" {
 			return
@@ -410,11 +412,8 @@ func FuzzBoxTun(f *testing.F) {
 		st := store.New(nil)
 		u := New(st, nil, key, slog.New(slog.NewTextHandler(io.Discard, nil)))
 		handle, _ := st.For(store.Principal{Kind: store.Box, Home: home})
-		now := time.Now()
 		c := &boxConn{u: u, home: home, pub: &key.PublicKey, handle: handle, tun: true,
-			write:  func([]byte) error { return nil },
-			upMsgs: newBucket(tunMsgBurst, tunMsgPerSec, now), upBytes: newBucket(tunByteBurst, tunBytePerSec, now),
-			upHardMsgs: newBucket(2*tunMsgBurst, 2*tunMsgPerSec, now), upHardBytes: newBucket(2*tunByteBurst, 2*tunBytePerSec, now)}
+			write: func([]byte) error { return nil }, lim: newLimits(time.Now())}
 		_ = c.fromBox(cloudwire.Envelope{T: cloudwire.MsgTun, B: body})
 	})
 }

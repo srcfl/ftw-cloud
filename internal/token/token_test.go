@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/srcfl/ftw-cloud/internal/registry"
+	"github.com/srcfl/ftw-cloud/internal/shard"
 	"github.com/srcfl/ftw-cloud/internal/store"
 	"github.com/srcfl/ftw/go/protocol"
 	"github.com/srcfl/ftw/go/protocol/cloudwire"
@@ -137,7 +138,7 @@ func (h *harness) issue(id string, epoch uint64) string {
 	if err != nil {
 		h.t.Fatal(err)
 	}
-	if tok.ExpiresInS != 7*24*3600 || len(tok.Token) != 43 {
+	if home, secret, ok := Split(tok.Token); tok.ExpiresInS != 7*24*3600 || !ok || home != h.home || len(secret) != 43 {
 		h.t.Fatalf("token %q expires in %d s", tok.Token, tok.ExpiresInS)
 	}
 	return tok.Token
@@ -330,7 +331,8 @@ func TestOnlyGETOverTLS13(t *testing.T) {
 
 func hashOf(t *testing.T, tok string) []byte {
 	t.Helper()
-	raw, err := base64.RawURLEncoding.DecodeString(tok)
+	_, secret, _ := Split(tok)
+	raw, err := base64.RawURLEncoding.DecodeString(secret)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -368,5 +370,43 @@ func TestAPruneKeepsATokenOfTheNewEpoch(t *testing.T) {
 	}
 	if code, _ := h.get("Bearer " + fresh); code != http.StatusOK {
 		t.Fatalf("the new epoch's token read %d", code)
+	}
+}
+
+// A token carries its home, so an instance that does not hold the home
+// names the shard that does, and one whose home was changed is refused.
+func TestATokenOfAnotherShardIsSentThere(t *testing.T) {
+	h := newHarness(t)
+	tok := h.issue("owner", 1)
+	get := func(tok string) *httptest.ResponseRecorder {
+		w := httptest.NewRecorder()
+		r := httptest.NewRequest(http.MethodGet, "/v1/now", nil)
+		r.TLS = &tls.ConnectionState{Version: tls.VersionTLS13}
+		r.Header.Set("Authorization", "Bearer "+tok)
+		h.svc.ServeHTTP(w, r)
+		return w
+	}
+	if w := get(tok); w.Code != http.StatusOK {
+		t.Fatalf("on its own shard: %d", w.Code)
+	}
+	d, err := shard.File{Self: "s1", Default: "s1",
+		Shards: map[string]string{"s1": "cloud.ftw.energy", "s2": "s2.cloud.ftw.energy"},
+		Homes:  map[string]string{h.home: "s2"}}.Directory()
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.svc.Shards = d
+	w := get(tok)
+	if w.Code != cloudwire.StatusWrongShard || w.Header().Get(cloudwire.ShardHeader) != "s2.cloud.ftw.energy" || w.Body.Len() != 0 {
+		t.Fatalf("on another shard: %d %q %q", w.Code, w.Header().Get(cloudwire.ShardHeader), w.Body.String())
+	}
+	h.svc.Shards = nil
+	_, secret, _ := Split(tok)
+	if w := get("aaaaaaaaaaaaaaaaaaaaaaaaaa." + secret); w.Code != http.StatusUnauthorized {
+		t.Fatalf("a token under another home: %d", w.Code)
+	}
+	// A token from before shards, the secret alone, still reads.
+	if w := get(secret); w.Code != http.StatusOK {
+		t.Fatalf("a token without its home: %d", w.Code)
 	}
 }

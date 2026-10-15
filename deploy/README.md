@@ -136,12 +136,181 @@ or, in a session (`aws ssm start-session --region eu-north-1 --target
 i-0ecac4cbc6b5f8adc`), `sudo ftw-cloud-deploy sha256:<digest>`. It pulls the
 image, refuses one whose commit is not on `main`, checks out that commit in
 `/opt/ftw-cloud`, fetches the key, starts a new container and deletes the old
-image. Every box reconnects within seconds. To go back, run it with the
-earlier digest.
+image. The old container drains first; see [Deploys](#deploys). To go back,
+run it with the earlier digest.
 
 It always makes a new container, even when only a mounted file changed. The
 relay ran into this: a file mounted on its own, like the service key, keeps
 the copy the container started with after the file changes on the host.
+
+## Deploys
+
+A deploy stops the one process that carries every box's uplink and every
+phone's session, so for each home commands wait until its box is back. The
+service makes that short and spreads the return:
+
+1. `docker compose down` sends SIGTERM and waits up to 15 s
+   (`stop_grace_period`).
+2. The old process stops accepting connections. It closes every socket,
+   boxes and phones and those still in their handshake, with 4503 and a
+   spread: the sockets it holds at 500 a second (`-restart-rate`), at least
+   15 s (`-restart-spread-min`) and at most 60 s. The port stays closed for
+   about 4 to 8 s while compose takes the old container down and starts
+   the new one, so a shorter spread would send most clients to a closed
+   port; 12,000 sockets get 24 s. A run of the harness over a real stop and
+   start is still to do, and may lower the floor.
+3. Each close waits for the client's answer, up to 2 s in all, so the
+   client reads 4503 and the spread rather than a reset. A stuck socket
+   holds up none of the others. Then queued alerts get up to 3 s; an alert
+   still queued or waiting to go again is lost, and the log says how many,
+   and a `box.unreachable` not yet taken by a phone goes again after the
+   restart. A box closed this way starts no `box.unreachable`.
+4. It exits, in about 0.1 s in the load test.
+5. The new container reads every signed roster back and checks the
+   signatures on all cores before it listens: 0.35 s for 10,000 homes on
+   two M5 cores (`BenchmarkRestore10k`), about 1.2 s on the host by the
+   estimate under [Load](#load). Phones are admitted at once; readings come
+   back with the boxes.
+6. A box with srcfl/ftw#1645 redials at a random moment within the spread,
+   and so does a phone once the apps honour 4503. Older clients redial on
+   their own backoff, within 0.5 s, and those that come before the new
+   container is up back off further. A box that hears 4503 before
+   `hello_ok` counts it as a failure and backs off.
+
+The log shows `drained for a restart` with the sockets, those still open and
+the spread, then `rosters restored from the registry` with how long that
+took. A command in flight at the drain may be lost; the phone treats it as
+unknown, not failed (protocol, "Shards and restarts").
+
+**Blue/green, when an NLB is worth it.** One host cannot run two containers
+on 443 with the port mapping in `compose.yml`. With a TCP NLB in front (it
+keeps the TLS binding), start the new instance on a second host with the same
+keys and a copy of the registry, register it with the target group,
+deregister the old one, then send the old one SIGTERM. Its sockets come back
+through the NLB to the new instance within the spread, and no client meets a
+closed port, so the spread's floor can drop to a few seconds.
+
+## Watching it
+
+- **`/metrics`** answers on `127.0.0.1:9464` inside the container, in
+  Prometheus text: sockets by kind, homes, homes with a connected box, tun
+  messages and bytes each way, drops by reason, push queue depths, Apple's
+  answers, handshake and forward latency histograms, the Go heap and
+  goroutines. Nothing in it names a home or an address. Read it with
+  `docker exec ftw-cloud-ftwcloudd-1 ftwcloudd metrics`.
+- **One line a minute** goes to stdout in CloudWatch's embedded metric
+  format: each counter's rise over the minute, each gauge, and p50, p95 and
+  p99 of each latency in milliseconds. Once the container logs to CloudWatch
+  Logs (the `awslogs` log driver, and `logs:CreateLogStream` and
+  `logs:PutLogEvents` for the instance role, which the owner adds), each
+  field is a metric in the `FTWCloud` namespace, by shard.
+- What to watch: `forward_seconds_*_p99` (time inside the service),
+  `drops_*` (any rise), `push_queued_alert`, `homes_connected`,
+  `go_memory_bytes`.
+
+## Load
+
+`cmd/ftwload` starts a local `ftwcloudd`, connects N boxes and M phones per
+box, and measures. Each box sends a signed `live` every second with the
+readable copy on. Each phone looks at its home and sends a 64-byte `tun`
+every second, which its box sends straight back. The service ran with
+`GOMAXPROCS=2`, as on the host's two vCPUs, on an Apple M5 laptop, in a Linux
+container unless marked macOS. Runs lasted under two minutes. **None of this
+was measured on a t4g.small.**
+
+| Run | Service CPU (100 = one core) | Service RSS | Inside the service, p99 | Phone to box and back, p50 / p99 |
+|---|---|---|---|---|
+| 4,000 boxes, no phones | 34 % | 289 MiB | — | — |
+| 3,000 homes, a phone each | 35 % | 518 MiB | — | 1.6 / 32 ms |
+| 8,000 homes, a phone each (16,000 sockets) | 84 % | 1.43 GiB | envelope ≤ 2.5 ms, tun ≤ 0.25 ms | 6 / 160 ms |
+| 2,000 homes, a phone each, macOS | 33 % | 377 MiB | envelope ≤ 1 ms, tun ≤ 0.1 ms | 0.8 / 27 ms |
+| Storm: 4,000 boxes redial at once | peak 155 % | | | all back in 0.9 s |
+| SIGTERM with 3,000 homes and phones | | | | 6,000 of 6,000 got 4503 with 12 s (before the 15 s floor); exit in 0.11 s |
+
+- **Per 1,000 boxes:** 8.4 % of a core and 69 MiB. The live heap is 22 MiB;
+  goroutine stacks and the collector's headroom make up the rest. Below
+  about 45 MiB the collector runs without pause, so that is the floor. The
+  test boxes sent only `live`; a real home also holds its newest `prices`,
+  `plan`, `lp`, `hb` and `health`, a few kilobytes each, so count about
+  10 MiB more per 1,000 homes.
+- **Per 1,000 phones on top**, each sending a command a second: about 3 % of
+  a core and 100 to 110 MiB. On macOS a phone cost more CPU.
+- **Where box CPU goes,** in a macOS profile: reading the socket, about two
+  thirds; checking each message's signature, a quarter (17 µs each).
+- **Handshakes:** about 4,400 box handshakes a second on two cores,
+  rosters written to SQLite included.
+- **The service is not where latency comes from** at these loads: inside it a
+  message waits at most a few milliseconds at the 99th percentile. The tail
+  end to end is the harness and the laptop, which ran other work.
+
+**On a t4g.small (unmeasured).** These runs were not on the host. A Graviton2 core does
+this work at roughly a third of an M5 core's speed, an estimate from public
+single-core benchmarks, so take 3.5 times the CPU and the same memory, and
+check against `/metrics` once real boxes connect:
+
+| Estimate, unmeasured | Per 1,000 boxes at one message a second |
+|---|---|
+| CPU | about 30 % of a vCPU |
+| Memory | about 70 MiB |
+| Handshakes the next instance takes | about 1,250 a second; `-restart-rate` is 500 |
+
+The first limit is CPU, not memory:
+
+- **About 1,300 boxes** fit in the burst baseline (20 % of each of the two
+  vCPUs). Past that the instance spends CPU credits, which unlimited mode
+  bills.
+- **About 4,500 boxes** keep both vCPUs under 70 %.
+- **About 20,000 boxes**, or about 8,000 homes with a phone connected each,
+  fit in `GOMEMLIMIT` (1,400 MiB).
+
+A box that sends every 5 s, as an unwatched box does today, costs a fraction
+of this.
+
+**When to add a shard.** Add one when any of these holds over a busy day:
+
+- the instance averages more than 60 % of its two vCPUs;
+- more than 4,000 homes have a box connected (`homes_connected`);
+- the runtime holds more than 1.2 GiB (`go_memory_bytes`);
+- a forward p99 inside the service passes 50 ms.
+
+Between about 1,300 and 4,000 boxes, a non-burstable instance with two vCPUs
+is the cheaper first step; it needs no shard.
+
+## Shards
+
+With no `-shards` file one instance holds every home and nothing below
+applies. Each shard is one instance with its own host
+(`s2.cloud.ftw.energy`), volume and registry, and the same service key and
+Noise key as the others, because boxes and phones carry those. Each holds the
+same directory file apart from `self`:
+
+```json
+{
+  "self": "s1",
+  "shards": {"s1": "cloud.ftw.energy", "s2": "s2.cloud.ftw.energy"},
+  "default": "s1",
+  "buckets": {"s2": ["128-255"]},
+  "homes": {}
+}
+```
+
+Homes fall into 256 buckets by a hash of their id. `homes` moves single
+homes and wins over `buckets`. Every host must be `cloud.ftw.energy` or one
+label under it, as clients check. An instance answers a home it does not
+hold with that shard's host (protocol: "Shards and restarts"); clients follow
+once and keep the host. A second shard holds homes only once their boxes list
+`shard` in `hello.caps` (`boxes_following_shards`) and the apps follow 4421.
+
+Moving homes means copying their registry rows to the new shard and then
+switching the directory on every instance. The tool for that comes with the
+second shard, when there is a concrete need for it.
+
+**MCP and OAuth stay on the default host.** Assistants' MCP and OAuth
+clients belong to other parties and follow neither 4421 nor 421. `/mcp` and
+`/oauth/*` stay on `cloud.ftw.energy`; once there is a second shard, that
+instance forwards each call to the shard that holds the home. An agent's
+sessions are drained and counted in the spread like the phones': the part
+that holds them adds itself to the drainers in `cmd/ftwcloudd`.
 
 ## Checking it
 

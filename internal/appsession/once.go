@@ -135,6 +135,12 @@ func (s *Server) ServeOnce(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
+	if host, ours := s.owner(home); !ours {
+		onceWrongShard.Inc()
+		w.Header().Set(cloudwire.ShardHeader, host)
+		w.WriteHeader(cloudwire.StatusWrongShard)
+		return
+	}
 	// The watch sends no Origin. A browser always does, and has no business
 	// here.
 	if r.Header.Get("Origin") != "" {
@@ -159,7 +165,9 @@ func (s *Server) ServeOnce(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer s.once.leaveProcess()
+	start := time.Now()
 	body, status := s.answerOnce(home, msg1)
+	onceHandshake.Since(start)
 	if status != http.StatusOK {
 		s.log.Debug("one-shot read refused", "status", status)
 		w.WriteHeader(status)

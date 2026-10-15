@@ -4,6 +4,8 @@ import (
 	"context"
 	"testing"
 	"time"
+
+	"github.com/srcfl/ftw-cloud/internal/uplink"
 )
 
 // The budget: a burst of calls, then a few a second; a large answer makes
@@ -58,6 +60,9 @@ func TestManyCallsLoseNothing(t *testing.T) {
 	w := newWorld(t, func(w *world) { w.pool.PaceBurst, w.pool.PacePerSecond = 5, 8 })
 	b := w.connectBox()
 	a := w.connect(b, "")
+	// The door's drop counters are process-wide since the metrics landed:
+	// count what this test adds.
+	before := uplink.TunDropped()
 	start := time.Now()
 	const n = 13
 	for i := range n {
@@ -65,7 +70,7 @@ func TestManyCallsLoseNothing(t *testing.T) {
 			t.Fatalf("call %d: %s", i, text)
 		}
 	}
-	if d := w.up.TunDropped.Load(); d != 0 {
+	if d := uplink.TunDropped() - before; d != 0 {
 		t.Fatalf("the door dropped %d messages", d)
 	}
 	if took := time.Since(start); took < 900*time.Millisecond {

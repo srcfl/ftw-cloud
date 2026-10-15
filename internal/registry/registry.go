@@ -6,6 +6,7 @@
 package registry
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -28,7 +29,11 @@ const (
 
 // Registry is the SQLite file.
 type Registry struct {
+	// db is the one connection that writes; rd is a few that only read.
+	// The file is in WAL mode, so readers never wait for the writer, and
+	// a box's reconnect or a token read does not queue behind a write.
 	db *sql.DB
+	rd *sql.DB
 
 	// suspended mirrors the suspensions table, so admission, which runs
 	// under a home's lock, never waits for SQLite. Every write updates it
@@ -52,9 +57,20 @@ type Home struct {
 	GrantID   []byte
 }
 
+// readers is how many connections may read at once.
+const readers = 4
+
 // Open opens or creates the registry at path.
+//
+// synchronous(NORMAL) syncs the file at each checkpoint rather than at each
+// commit. A power cut can lose the last commits but never corrupts the file.
+// What that loses comes back by itself: a box sends its roster again at its
+// next connect, and a phone registers again at its next start. A reconnect
+// storm is then a matter of memory, not of disk syncs. The writes that
+// narrow access, and would widen it again if lost, go through durably.
 func Open(path string) (*Registry, error) {
-	db, err := sql.Open("sqlite", "file:"+path+"?_pragma=journal_mode(WAL)&_pragma=secure_delete(ON)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)")
+	const pragmas = "_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_pragma=secure_delete(ON)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)"
+	db, err := sql.Open("sqlite", "file:"+path+"?"+pragmas+"&_txlock=immediate")
 	if err != nil {
 		return nil, err
 	}
@@ -98,9 +114,15 @@ CREATE TABLE IF NOT EXISTS away (
 		_ = db.Close()
 		return nil, fmt.Errorf("registry: schema: %w", err)
 	}
-	r := &Registry{db: db, suspended: map[suspendKey]uint64{}}
-	if err := r.loadSuspensions(); err != nil {
+	rd, err := sql.Open("sqlite", "file:"+path+"?"+pragmas+"&_pragma=query_only(1)")
+	if err != nil {
 		_ = db.Close()
+		return nil, err
+	}
+	rd.SetMaxOpenConns(readers)
+	r := &Registry{db: db, rd: rd, suspended: map[suspendKey]uint64{}}
+	if err := r.loadSuspensions(); err != nil {
+		_ = r.Close()
 		return nil, fmt.Errorf("registry: suspensions: %w", err)
 	}
 	return r, nil
@@ -134,8 +156,32 @@ func (r *Registry) forgetSuspensions(home string) {
 	}
 }
 
+// durably runs f on the one writing connection with each commit synced to
+// disk, as synchronous(FULL) does: an owner's suspension, a purge, a token
+// dropped or pruned, and a roster with a higher number, which may remove a
+// device. A power cut must not undo any of them.
+func (r *Registry) durably(f func(ctx context.Context, c *sql.Conn) error) error {
+	ctx := context.Background()
+	c, err := r.db.Conn(ctx)
+	if err != nil {
+		return err
+	}
+	defer c.Close()
+	if _, err := c.ExecContext(ctx, `PRAGMA synchronous = FULL`); err != nil {
+		return err
+	}
+	defer func() { _, _ = c.ExecContext(ctx, `PRAGMA synchronous = NORMAL`) }()
+	return f(ctx, c)
+}
+
 // Close closes the file.
-func (r *Registry) Close() error { return r.db.Close() }
+func (r *Registry) Close() error {
+	rdErr := r.rd.Close()
+	if err := r.db.Close(); err != nil {
+		return err
+	}
+	return rdErr
+}
 
 // Claim registers a home at its box's first hello. A home id is a hash of the
 // key, so a second claim with another key is impossible by construction, and
@@ -146,6 +192,14 @@ func (r *Registry) Claim(home string, pk []byte, now time.Time) error {
 			return ErrPurged
 		}
 		return err
+	}
+	// A box that reconnects finds its row and writes nothing.
+	var known int
+	if err := r.rd.QueryRow(`SELECT COUNT(*) FROM homes WHERE home = ?`, home).Scan(&known); err != nil {
+		return err
+	}
+	if known > 0 {
+		return nil
 	}
 	_, err := r.db.Exec(`INSERT INTO homes (home, pk, created_ms) VALUES (?, ?, ?) ON CONFLICT (home) DO NOTHING`,
 		home, pk, now.UnixMilli())
@@ -160,7 +214,7 @@ func (r *Registry) Get(home string) (Home, bool, error) {
 	var h Home
 	var created, rosterMs int64
 	var seq int64
-	err := r.db.QueryRow(`SELECT home, pk, created_ms, roster, roster_seq, roster_ms, grant_id FROM homes WHERE home = ?`, home).
+	err := r.rd.QueryRow(`SELECT home, pk, created_ms, roster, roster_seq, roster_ms, grant_id FROM homes WHERE home = ?`, home).
 		Scan(&h.ID, &h.PK, &created, &h.Roster, &seq, &rosterMs, &h.GrantID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Home{}, false, nil
@@ -179,7 +233,7 @@ func (r *Registry) Get(home string) (Home, bool, error) {
 // admit phones by again after a restart. It is upkeep at start, never a
 // request.
 func (r *Registry) Rosters() ([]Home, error) {
-	rows, err := r.db.Query(`SELECT home, pk, created_ms, roster, roster_seq, roster_ms, grant_id FROM homes WHERE roster IS NOT NULL`)
+	rows, err := r.rd.Query(`SELECT home, pk, created_ms, roster, roster_seq, roster_ms, grant_id FROM homes WHERE roster IS NOT NULL`)
 	if err != nil {
 		return nil, err
 	}
@@ -207,15 +261,19 @@ type Away struct {
 
 // AwaySet records that a home's box went and when box.unreachable is due.
 func (r *Registry) AwaySet(home string, due time.Time) error {
-	_, err := r.db.Exec(`INSERT INTO away (home, due_ms, told) SELECT ?, ?, 0 WHERE EXISTS (SELECT 1 FROM homes WHERE home = ?)
-		ON CONFLICT (home) DO UPDATE SET due_ms = excluded.due_ms, told = 0`, home, due.UnixMilli(), home)
-	return err
+	return r.durably(func(ctx context.Context, c *sql.Conn) error {
+		_, err := c.ExecContext(ctx, `INSERT INTO away (home, due_ms, told) SELECT ?, ?, 0 WHERE EXISTS (SELECT 1 FROM homes WHERE home = ?)
+			ON CONFLICT (home) DO UPDATE SET due_ms = excluded.due_ms, told = 0`, home, due.UnixMilli(), home)
+		return err
+	})
 }
 
 // AwayTold records that box.unreachable went.
 func (r *Registry) AwayTold(home string) error {
-	_, err := r.db.Exec(`UPDATE away SET told = 1 WHERE home = ?`, home)
-	return err
+	return r.durably(func(ctx context.Context, c *sql.Conn) error {
+		_, err := c.ExecContext(ctx, `UPDATE away SET told = 1 WHERE home = ?`, home)
+		return err
+	})
 }
 
 // AwayClear forgets a home's absence: its box is back, or the home is gone.
@@ -226,7 +284,7 @@ func (r *Registry) AwayClear(home string) error {
 
 // AwayAll returns every home recorded as away.
 func (r *Registry) AwayAll() ([]Away, error) {
-	rows, err := r.db.Query(`SELECT home, due_ms, told FROM away`)
+	rows, err := r.rd.Query(`SELECT home, due_ms, told FROM away`)
 	if err != nil {
 		return nil, err
 	}
@@ -246,30 +304,46 @@ func (r *Registry) AwayAll() ([]Away, error) {
 
 // SetRoster keeps the signed roster envelope.
 func (r *Registry) SetRoster(home string, seq uint64, grantID, envelope []byte, now time.Time) error {
-	_, err := r.db.Exec(`UPDATE homes SET roster = ?, roster_seq = ?, roster_ms = ?, grant_id = ? WHERE home = ? AND roster_seq <= ?`,
-		envelope, int64(seq), now.UnixMilli(), grantID, home, int64(seq))
-	return err
+	const q = `UPDATE homes SET roster = ?, roster_seq = ?, roster_ms = ?, grant_id = ? WHERE home = ? AND roster_seq <= ?`
+	args := []any{envelope, int64(seq), now.UnixMilli(), grantID, home, int64(seq)}
+	// The same number renews the time to live and can wait for the next
+	// checkpoint; a higher one may remove a device, so it is synced.
+	var held int64
+	if err := r.rd.QueryRow(`SELECT roster_seq FROM homes WHERE home = ?`, home).Scan(&held); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	if int64(seq) <= held {
+		_, err := r.db.Exec(q, args...)
+		return err
+	}
+	return r.durably(func(ctx context.Context, c *sql.Conn) error {
+		_, err := c.ExecContext(ctx, q, args...)
+		return err
+	})
 }
 
 // Purge deletes a home and leaves a tombstone, so the receipt can be sent
 // again if the first one is lost.
 func (r *Registry) Purge(home string, grantID []byte, now time.Time) error {
-	tx, err := r.db.Begin()
+	err := r.durably(func(ctx context.Context, c *sql.Conn) error {
+		tx, err := c.BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = tx.Rollback() }()
+		if _, err := tx.Exec(`DELETE FROM homes WHERE home = ?`, home); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`DELETE FROM suspensions WHERE home = ?`, home); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`INSERT INTO tombstones (home, grant_id, deleted_ms) VALUES (?, ?, ?)
+			ON CONFLICT (home) DO NOTHING`, home, grantID, now.UnixMilli()); err != nil {
+			return err
+		}
+		return tx.Commit()
+	})
 	if err != nil {
-		return err
-	}
-	defer func() { _ = tx.Rollback() }()
-	if _, err := tx.Exec(`DELETE FROM homes WHERE home = ?`, home); err != nil {
-		return err
-	}
-	if _, err := tx.Exec(`DELETE FROM suspensions WHERE home = ?`, home); err != nil {
-		return err
-	}
-	if _, err := tx.Exec(`INSERT INTO tombstones (home, grant_id, deleted_ms) VALUES (?, ?, ?)
-		ON CONFLICT (home) DO NOTHING`, home, grantID, now.UnixMilli()); err != nil {
-		return err
-	}
-	if err := tx.Commit(); err != nil {
 		return err
 	}
 	r.forgetSuspensions(home)
@@ -279,7 +353,7 @@ func (r *Registry) Purge(home string, grantID []byte, now time.Time) error {
 // Tombstone returns a purged home's grant id and when it was deleted.
 func (r *Registry) Tombstone(home string) (time.Time, bool, error) {
 	var ms int64
-	err := r.db.QueryRow(`SELECT deleted_ms FROM tombstones WHERE home = ?`, home).Scan(&ms)
+	err := r.rd.QueryRow(`SELECT deleted_ms FROM tombstones WHERE home = ?`, home).Scan(&ms)
 	if errors.Is(err, sql.ErrNoRows) {
 		return time.Time{}, false, nil
 	}
@@ -292,7 +366,7 @@ func (r *Registry) Tombstone(home string) (time.Time, bool, error) {
 // TombstoneGrant returns the grant id a purged home was deleted under.
 func (r *Registry) TombstoneGrant(home string) []byte {
 	var id []byte
-	_ = r.db.QueryRow(`SELECT grant_id FROM tombstones WHERE home = ?`, home).Scan(&id)
+	_ = r.rd.QueryRow(`SELECT grant_id FROM tombstones WHERE home = ?`, home).Scan(&id)
 	return id
 }
 
@@ -302,7 +376,7 @@ func (r *Registry) TombstoneGrant(home string) []byte {
 func (r *Registry) Expire(now time.Time) ([]string, error) {
 	newCutoff := now.Add(-NewHomeGrace).UnixMilli()
 	rosterCutoff := now.Add(-RosterGrace).UnixMilli()
-	rows, err := r.db.Query(`SELECT home FROM homes
+	rows, err := r.rd.Query(`SELECT home FROM homes
 		WHERE (roster_ms = 0 AND created_ms < ?) OR (roster_ms > 0 AND roster_ms < ?)`, newCutoff, rosterCutoff)
 	if err != nil {
 		return nil, err
@@ -340,10 +414,12 @@ func (r *Registry) Suspend(home, deviceID string, epoch uint64, now time.Time) e
 	r.susMu.Lock()
 	r.suspended[suspendKey{home, deviceID}] = epoch
 	r.susMu.Unlock()
-	_, err := r.db.Exec(`INSERT INTO suspensions (home, device_id, epoch, since_ms) VALUES (?, ?, ?, ?)
-		ON CONFLICT (home, device_id) DO UPDATE SET epoch = excluded.epoch, since_ms = excluded.since_ms`,
-		home, deviceID, int64(epoch), now.UnixMilli())
-	return err
+	return r.durably(func(ctx context.Context, c *sql.Conn) error {
+		_, err := c.ExecContext(ctx, `INSERT INTO suspensions (home, device_id, epoch, since_ms) VALUES (?, ?, ?, ?)
+			ON CONFLICT (home, device_id) DO UPDATE SET epoch = excluded.epoch, since_ms = excluded.since_ms`,
+			home, deviceID, int64(epoch), now.UnixMilli())
+		return err
+	})
 }
 
 // Unsuspend lifts a suspension.
@@ -369,11 +445,15 @@ func (r *Registry) Suspended(home, deviceID string, epoch uint64) bool {
 // PruneSuspensions drops the suspensions a new roster ended: devices it no
 // longer lists, and devices whose epoch moved.
 func (r *Registry) PruneSuspensions(home string, epochs map[string]uint64) error {
-	rows, err := r.db.Query(`SELECT device_id, epoch FROM suspensions WHERE home = ?`, home)
+	rows, err := r.rd.Query(`SELECT device_id, epoch FROM suspensions WHERE home = ?`, home)
 	if err != nil {
 		return err
 	}
-	var gone []string
+	type entry struct {
+		id    string
+		epoch uint64
+	}
+	var gone []entry
 	for rows.Next() {
 		var id string
 		var epoch int64
@@ -382,14 +462,32 @@ func (r *Registry) PruneSuspensions(home string, epochs map[string]uint64) error
 			return err
 		}
 		if e, ok := epochs[id]; !ok || e != uint64(epoch) {
-			gone = append(gone, id)
+			gone = append(gone, entry{id, uint64(epoch)})
 		}
 	}
 	_ = rows.Close()
-	for _, id := range gone {
-		if err := r.Unsuspend(home, id); err != nil {
+	for _, g := range gone {
+		if err := r.unsuspendAt(home, g.id, g.epoch); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+// unsuspendAt lifts a suspension only if it is still at epoch: an owner who
+// suspended the device again, at its new epoch, while a roster was being
+// pruned keeps that suspension.
+// The file goes first and memory after, each only at epoch, so whichever
+// order a new suspension lands in, it stays; and admission, which reads
+// memory under a home's lock, never waits for the file.
+func (r *Registry) unsuspendAt(home, deviceID string, epoch uint64) error {
+	if _, err := r.db.Exec(`DELETE FROM suspensions WHERE home = ? AND device_id = ? AND epoch = ?`, home, deviceID, int64(epoch)); err != nil {
+		return err
+	}
+	r.susMu.Lock()
+	defer r.susMu.Unlock()
+	if held, ok := r.suspended[suspendKey{home, deviceID}]; ok && held == epoch {
+		delete(r.suspended, suspendKey{home, deviceID})
 	}
 	return nil
 }

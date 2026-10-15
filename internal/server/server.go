@@ -157,19 +157,13 @@ func revision() string {
 func (s *Server) Upkeep(ctx context.Context, every time.Duration) {
 	t := time.NewTicker(every)
 	defer t.Stop()
-	var tunDropped int64
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			// Tunnel messages dropped past a home's limits, as a count for
-			// the whole service; it names no home.
-			if n := s.Uplink.TunDropped.Load(); n > tunDropped {
-				s.Log.Warn("tun dropped past homes' limits", "since_last", n-tunDropped, "total", n)
-				tunDropped = n
-			}
 			s.Store.Sweep()
+			s.Uplink.Sweep()
 			if err := s.Registry.TokenExpire(time.Now()); err != nil {
 				s.Log.Warn("token upkeep failed", "err", err)
 			}

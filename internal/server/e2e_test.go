@@ -64,6 +64,7 @@ type stack struct {
 	apple      *capturedApple
 	up         *uplink.Uplink
 	reg        *registry.Registry
+	app        *appsession.Server
 }
 
 func newStack(t *testing.T) *stack {
@@ -104,7 +105,7 @@ func newStack(t *testing.T) *stack {
 	srv.TLS = &tls.Config{MinVersion: tls.VersionTLS13}
 	srv.StartTLS()
 	t.Cleanup(srv.Close)
-	return &stack{t: t, srv: srv, st: st, serviceKey: serviceKey, noise: noise, apple: apple, up: up, reg: reg}
+	return &stack{t: t, srv: srv, st: st, serviceKey: serviceKey, noise: noise, apple: apple, up: up, reg: reg, app: app}
 }
 
 // testBox is a box's half of the uplink.

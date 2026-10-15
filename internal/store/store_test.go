@@ -185,15 +185,15 @@ func TestASessionMissesNothingAfterItsSnapshot(t *testing.T) {
 	_ = box.Put(cloudwire.MsgLive, []byte("live-3"), 9, false)
 	select {
 	case got := <-sess.C():
-		if string(got) != "live-3" {
-			t.Fatalf("the session got %q", got)
+		if string(got.Env) != "live-3" || got.At <= 0 {
+			t.Fatalf("the session got %q at %v", got.Env, got.At)
 		}
 	default:
 		t.Fatal("nothing reached the session")
 	}
 	select {
 	case got := <-sess.C():
-		t.Fatalf("the session also got %q", got)
+		t.Fatalf("the session also got %q", got.Env)
 	default:
 	}
 }

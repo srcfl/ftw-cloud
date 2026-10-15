@@ -111,6 +111,8 @@ func newRig(t *testing.T) *rig {
 		clock: &timers{now: time.Unix(1_791_820_800, 0)}, home: "fjzyr67buzpyncqmjliwgezvde"}
 	r.svc = New(reg, r.apple, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	r.svc.now, r.svc.after = r.clock.time, r.clock.after
+	// The breaker sleeps in real time; only its own test lets it open.
+	r.svc.breaker.trips = 1 << 30
 	if err := reg.Claim(r.home, []byte("pk"), r.clock.time()); err != nil {
 		t.Fatal(err)
 	}
@@ -131,16 +133,7 @@ func (r *rig) connected() {
 func (r *rig) gone(why string) { r.svc.BoxGone(r.home, why, r.conn) }
 
 // drain runs what the uplink queued, as Run would.
-func (r *rig) drain() {
-	for {
-		select {
-		case job := <-r.svc.work:
-			job(context.Background())
-		default:
-			return
-		}
-	}
-}
+func (r *rig) drain() { r.svc.sendQueued(context.Background()) }
 
 func (r *rig) register(t *testing.T, dev cloudwire.Device, scopes []string, token string) error {
 	t.Helper()
