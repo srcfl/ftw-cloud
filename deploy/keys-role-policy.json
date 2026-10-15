@@ -1,0 +1,20 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "SealAndOpenAgentKeys",
+      "Effect": "Allow",
+      "Action": ["kms:GenerateDataKey", "kms:Decrypt"],
+      "Resource": "arn:aws:kms:eu-north-1:976075258475:key/AGENT-KEY-ID",
+      "Condition": {
+        "StringEquals": { "kms:EncryptionContext:purpose": "ftw-agent-key" }
+      }
+    },
+    {
+      "Sid": "SignOffers",
+      "Effect": "Allow",
+      "Action": ["kms:Sign", "kms:GetPublicKey"],
+      "Resource": "arn:aws:kms:eu-north-1:976075258475:key/OFFER-KEY-ID"
+    }
+  ]
+}

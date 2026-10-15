@@ -36,7 +36,10 @@ import (
 
 	"github.com/srcfl/ftw-cloud/internal/apns"
 	"github.com/srcfl/ftw-cloud/internal/appsession"
+	"github.com/srcfl/ftw-cloud/internal/keys"
+	"github.com/srcfl/ftw-cloud/internal/mcp"
 	"github.com/srcfl/ftw-cloud/internal/metrics"
+	"github.com/srcfl/ftw-cloud/internal/oauth"
 	"github.com/srcfl/ftw-cloud/internal/push"
 	"github.com/srcfl/ftw-cloud/internal/registry"
 	"github.com/srcfl/ftw-cloud/internal/server"
@@ -85,6 +88,7 @@ func serve(args []string) error {
 	apnsWatch := fs.String("apns-watch-topic", "energy.ftw.app.watchkitapp", "the watch app's bundle id")
 	devPush := fs.String("dev-push-listen", "", "loopback address for registering a token by hand (development builds only)")
 	devCapture := fs.String("dev-apns-capture", "", "write each alert to this directory instead of sending it to Apple (development builds only)")
+	keysSocket := fs.String("keys-socket", "/run/ftw-cloud-keys/keys.sock", "ftwkeysd's socket; assistants can connect only while it answers")
 	shardsPath := fs.String("shards", "", "shard directory, JSON; without it this instance holds every home")
 	metricsAddr := fs.String("metrics-listen", defaultMetricsAddr, "loopback address for /metrics; empty turns it off")
 	restartRate := fs.Int("restart-rate", defaultRestartRate, "sockets a second the next instance can take after a restart; sets the spread of the redial")
@@ -138,6 +142,22 @@ func serve(args []string) error {
 	tokens.Shards = shards
 	srv := &server.Server{Store: st, Registry: reg, Uplink: up, Tokens: tokens, Log: log}
 
+	// Assistants: the authorization server, with agent keys in ftwkeysd.
+	agentKeys := keys.Dial(*keysSocket)
+	defer agentKeys.Close()
+	auth, err := oauth.New(filepath.Join(*stateDir, "oauth.db"), agentKeys, log)
+	if err != nil {
+		return err
+	}
+	defer auth.Close()
+	srv.OAuth = auth
+	// Each agent's session goes to its box through the door, as tun, to the
+	// Noise key the box names in the roster it signs. A box that names none
+	// takes no agents yet, and the tools say so.
+	agents := mcp.NewPool(st, up, agentKeys, mcp.RosterBoxKey(reg), log)
+	auth.OnRevoke = agents.Drop
+	srv.MCP = mcp.New(auth, agents, log)
+
 	// Alerts: the box's signed events to its phones through Apple, and
 	// box.unreachable when a box is away. Widgets: a push with no data when
 	// prices or a car change. Without a key the service keeps registrations
@@ -162,8 +182,11 @@ func serve(args []string) error {
 	up.OnRoster = func(home string, r *cloudwire.Roster) {
 		pushSvc.Roster(home, r)
 		tokens.Roster(home, r)
+		auth.Roster(home, r)
 	}
 	up.OnGone = pushSvc.BoxGone
+	// A purged home's agents, their tokens and keys, and its consents go.
+	up.OnPurge = auth.DropHome
 
 	// Phones register their tokens over their app session, so without a
 	// Noise key only the development route registers one.
@@ -225,6 +248,8 @@ func serve(args []string) error {
 	pushCtx, stopPush := context.WithCancel(context.Background())
 	defer stopPush()
 	go pushSvc.Run(pushCtx)
+	go auth.Run(ctx)
+	go agents.Run(ctx)
 	if err := pushSvc.Resume(); err != nil {
 		log.Warn("could not restart the dead man's switch", "err", err)
 	}

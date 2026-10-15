@@ -47,6 +47,10 @@ const (
 	// A household has a few phones; past this the home is busy, as it is at
 	// the relay.
 	MaxSessionsPerHome = 16
+	// MaxAgentSessionsPerHome bounds the agents' sessions apart from the
+	// phones', so assistants never take a phone's place: one per agent row,
+	// of which a box holds at most 16.
+	MaxAgentSessionsPerHome = 16
 	// SessionQueue is how many envelopes may wait for one slow phone. A box
 	// sends a few a second while watched, so a phone this far behind has a
 	// dead socket. It is closed and gets a fresh snapshot when it comes
@@ -87,7 +91,7 @@ type Session struct {
 // sends falls between them. A second session from the same device replaces
 // the first.
 func (x *Handle) Open() (Snapshot, *Session, error) {
-	if x.kind != Device {
+	if x.kind != Device && x.kind != Agent {
 		return Snapshot{}, nil, ErrDenied
 	}
 	x.h.mu.Lock()
@@ -96,13 +100,13 @@ func (x *Handle) Open() (Snapshot, *Session, error) {
 	// under the lock that roster changes take. A pairing hash is spent here,
 	// once the session is sure to open, so a busy home does not burn it.
 	if x.pairing {
-		if len(x.h.sessions) >= MaxSessionsPerHome {
+		if x.h.countLocked(false) >= MaxSessionsPerHome {
 			return Snapshot{}, nil, ErrBusy
 		}
 		if !x.h.spendLocked(x.pair, x.s.now()) {
 			return Snapshot{}, nil, ErrDenied
 		}
-	} else if _, _, ok := x.s.access(x.id, x.h, byKey(x.device.Key)); !ok {
+	} else if _, _, ok := x.s.admit(x.kind, x.id, x.h, byKey(x.device.Key)); !ok {
 		return Snapshot{}, nil, ErrDenied
 	}
 	for sess := range x.h.sessions {
@@ -110,7 +114,8 @@ func (x *Handle) Open() (Snapshot, *Session, error) {
 			sess.endLocked(cloudwire.CloseReplaced)
 		}
 	}
-	if len(x.h.sessions) >= MaxSessionsPerHome {
+	if x.kind == Agent && x.h.countLocked(true) >= MaxAgentSessionsPerHome ||
+		x.kind != Agent && x.h.countLocked(false) >= MaxSessionsPerHome {
 		return Snapshot{}, nil, ErrBusy
 	}
 	sess := &Session{x: x, c: make(chan Out, SessionQueue), tun: make(chan TunOut, TunQueue),
@@ -251,4 +256,16 @@ func (x *Handle) MayRead(class string) bool {
 	x.h.mu.Lock()
 	defer x.h.mu.Unlock()
 	return x.mayRead(class)
+}
+
+// countLocked counts the agents' sessions, or the phones'. The caller holds
+// the home's lock.
+func (h *home) countLocked(agents bool) int {
+	n := 0
+	for sess := range h.sessions {
+		if (sess.x.kind == Agent) == agents {
+			n++
+		}
+	}
+	return n
 }

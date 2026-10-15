@@ -11,12 +11,18 @@ maintains it.
 
 ## Invariants
 
-- **FTW Cloud forwards ciphertext it cannot read, and never chooses an
-  action.** It sends a box only `challenge`, `hello_ok`, `watch`, `resync`,
-  `purged` and `tun` (`internal/uplink/downlink.go`). Commands go from the app
-  to the box inside the phone's own Noise session, which rides here as `tun`
-  under the device id the service's own handshake proved, never one a phone
-  names.
+- **FTW Cloud forwards ciphertext it cannot read. It acts on a home only as
+  an agent its owner approved, within limits the box enforces.** It sends a
+  box only `challenge`, `hello_ok`, `watch`, `resync`, `purged` and `tun`
+  (`internal/uplink/downlink.go`). Commands go from the app to the box inside
+  the phone's own Noise session, which rides here as `tun` under the device
+  id the service's own handshake proved, never one a phone names. An agent's
+  requests ride the agent's own Noise session the same way, and the box
+  admits it only while its signed roster lists the agent's key.
+- **Agent keys live only in `ftwkeysd`** (`internal/keys`, `cmd/ftwkeysd`). It
+  answers on a local unix socket, seals keys at rest under KMS, unseals a key
+  only to open one session, and logs no key. `ftwcloudd` never holds an
+  agent's static key or session keys. Keep it small: nothing else goes in.
 - **One way to a home:** `store.For(principal)`. No listing, no second lookup,
   no principal for staff. A new route needs a row in `server.Routes` and must
   pass `TestNoRouteReadsAHome`. The one other way in is `store.Seed`, called

@@ -35,6 +35,7 @@ for try in $(seq 30); do
   sleep 2
 done
 grep -q '^-----BEGIN PRIVATE KEY-----$' "$new/noise.key"
+# ftw-cloud-own gives it to the user the image runs as, before compose starts.
 chown -R 65532:65532 "$new"
 chmod 0400 "$new/noise.key"
 chmod 0500 "$new"

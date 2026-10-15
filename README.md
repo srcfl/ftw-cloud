@@ -122,6 +122,110 @@ to it yet.
   the roster drops the device, moves its epoch or runs out, an owner
   suspends the device, or the home is purged.
 
+- **The keys part (`ftwkeysd`).** A second process on the same host, as
+  another user, answering only on a unix socket. It makes each assistant's
+  agent key (X25519) when an authorization starts, seals it at rest with a
+  data key from AWS KMS, and keeps it pending until the owner approves. It
+  unseals a key only to open that agent's Noise session to its box, keeps
+  the session's transport keys, and seals and opens each frame for
+  `ftwcloudd`, which carries them as `tun`. Forgetting a key ends its
+  sessions. [deploy/keys.md](deploy/keys.md) has the shape and how to turn
+  it on.
+
+- **Assistants sign in with OAuth, and the owner approves at home.** The
+  authorization server follows the MCP authorization spec, revision
+  2026-07-28: OAuth 2.1 with PKCE S256 only, metadata at
+  `/.well-known/oauth-authorization-server` with `iss` in every
+  authorization response (RFC 9207), protected resource metadata for
+  `https://cloud.ftw.energy/mcp` (RFC 9728), and tokens bound to that
+  resource (RFC 8707). A client names itself by a client ID metadata
+  document, fetched behind a fence (https on 443 to a public address checked
+  as the socket connects, no redirects, no proxy, 16 KiB, 5 s, cached), or
+  registers at `/oauth/register` (RFC 7591), kept for ChatGPT and older
+  clients. There is no account and no password: `/oauth/authorize` asks
+  `ftwkeysd` for a new agent key and has it sign the grant offer
+  (srcfl/ftw `docs/agents.md`), sent as `{o, kid, sig}`: the key, the
+  client, the host it is known by and whether FTW Cloud knows it, the
+  scopes, ops and caps asked for, the page's code, and an end ten minutes
+  out, with no home, since the owner picks it. The page shows the client's name, where the browser goes back, the
+  rights, the code, a QR and `https://app.ftw.energy/a#<request>.<offer>`;
+  the app checks the offer against the offer key it pins by kid, which
+  `/.well-known/ftw-offer-key` serves. The box's page or an owner who types
+  the eight-character code finds the offer once at `/oauth/requests?code=`.
+  A client FTW Cloud knows by the exact URL of its document is shown as
+  verified, and an error goes back to it at once; any other gets a page
+  with a link back. Each endpoint a stranger can call is limited per
+  address and for everyone, before anything is fetched. The owner
+  approves in the app or on the box's page; the box lists the agent's key,
+  for that client, in the roster it signs (an agent row, with no tunnel of
+  its own), and when that roster arrives the
+  page, waiting on a server-sent event, returns to the client with a code.
+  Only the browser that started the request gets it. Access tokens last 10
+  minutes; refresh tokens rotate, a retry within 5 s works once more, and a
+  later reuse revokes the family, as does a code used twice, even after its
+  consent is gone. A token carries its home sealed with a fresh nonce under
+  the route key (`oauth-route.key`, shared by every instance that routes),
+  so any instance can route it and no client sees an id that links its
+  tokens; the service keeps hashes, never tokens. A token allows the scopes it
+  carries that the newest roster still grants, so an owner who narrows a
+  grant narrows it at once, and it stops at the agent's end by the
+  service's own clock. A roster without the agent ends
+  its tokens and its key, and so does a second home listing the same key,
+  or the box purging its home; a key the keys part could not forget stays
+  queued until it has. Only each home's newest roster is applied.
+
+- **MCP at `/mcp`, Streamable HTTP.** It speaks revision 2026-07-28, which
+  is stateless: each request carries its version and capabilities in
+  `_meta`, mirrored in `MCP-Protocol-Version`, `Mcp-Method` and `Mcp-Name`,
+  and a header that disagrees with the body is refused. It also answers
+  clients of 2025-03-26 to 2025-11-25 that start with `initialize`, without
+  session ids or a GET stream. The read tools are `homes_list`, `status`,
+  `chargers_list`, `cars_list`, `plan_get`, `plan_explain`,
+  `history_query`, `health_get`, `events_list`, `logs_tail` (both with
+  before and after cursors), `drivers_status`, `config_get` and
+  `diag_run` (names any model API accepts), each with typed arguments, each one of the box's own reads for
+  agents (`live.get`, `loadpoints.get`, `cars.get`, `plan.get`, `price.get`,
+  `hist.query`, `health.get`, `events.get`, `logs.get`, `config.get`,
+  `diag.run`, `drivers.get`; srcfl/ftw `docs/agents.md`), under the scope
+  the registry names for it. The box names chargers and cars by its agent
+  ids, which the control tools take back. The box refuses the passthrough to agents,
+  and the readable copy is never an agent's: every read goes through the
+  box, which audits it and enforces revoke. An agent row has no tunnel of
+  its own. A call without its scope gets
+  403 `insufficient_scope`, so the client can ask the owner for more. Each
+  call rides the agent's own Noise session: `ftwkeysd` seals each frame and
+  the door carries it as `tun`, one forward to the box. The door admits an
+  agent row only to these sessions, never on `/v1/app` or `/v1/app/once`,
+  and only before its end. A session stays warm for 60 s and calls on one
+  home queue, four at most; a process runs 256 at once, and each agent
+  may send 30 requests, then 10 a second. Agents' sessions have a budget
+  of their own at each home, so an assistant never takes a phone's place. Agents' calls on a
+  home are paced under the box's 60 reads a minute and a quarter of the
+  door's tun limits, which the home's phones share: 15 in a row, then 0.75
+  a second. Results are data: each says it came from the box and is not
+  instructions, and characters that can hide text (controls, format and
+  private-use characters, variation selectors) are removed. The
+  session goes to the Noise key the box names in the roster it signs
+  (`noise`); a box that names none takes no assistants yet, and each such
+  home says so.
+- **Control, capped and temporary.** `ev_charge_now` sends one
+  `loadpoint.hold` with a power and an end (or `clear` with `stop`), the one
+  hold the contract opens to agents: only when the owner's grant lists it,
+  with the arguments the registry allows an agent (`RegistryAgentArgs`) and
+  within the grant's caps (`holdS`, `maxW`), checked here before the box
+  does and never loosened. Control ends when the assistant stops renewing;
+  the service never renews a hold by itself, and another hold on the
+  charger wins. Each `cmd` expects the control revision the chargers'
+  answer named, read first if need be, so the first command spends nothing
+  on a conflict; a stale one is learnt from `E_CONFLICT` and tried once
+  more. A client's retry of the same call within a minute is the same
+  command id, so the box acts once. `goal_request` asks for a lasting
+  change (the mode, the planning style, a charger's solar-only charging, a
+  car's charge level) as `agent.request`, with the assistant's own words for
+  why; the box keeps it until an owner confirms it with Face ID, and
+  `requests_list` shows how it ended. A command the box refused is a tool
+  error, in words.
+
 Not built yet:
 
 | Step | What | Where |

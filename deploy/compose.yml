@@ -21,6 +21,7 @@ services:
       - -service-key=/run/secrets/ftw-cloud-service.key
       - -acme-email=${FTW_CLOUD_ACME_EMAIL:-}
       - -noise-key=/run/secrets/noise/noise.key
+      - -keys-socket=/run/ftw-cloud-keys/keys.sock
     environment:
       # /source publishes it, so anyone can compare it with what CI built.
       FTW_CLOUD_IMAGE: ${FTW_CLOUD_IMAGE}
@@ -41,6 +42,9 @@ services:
       # boot by deploy/noise.sh. Empty means /v1/app is off, and the
       # service runs.
       - /run/ftw-cloud/noise:/run/secrets/noise:ro
+      # The keys part's socket (deploy/keys.md). Without ftwkeysd it holds
+      # nothing, and assistants cannot connect.
+      - /run/ftw-cloud-keys:/run/ftw-cloud-keys
     secrets:
       - ftw-cloud-service.key
     read_only: true
@@ -58,11 +62,59 @@ services:
         max-size: '10m'
         max-file: '3'
 
+  # The keys part: the only process that can act on a home, as an agent its
+  # owner approved (deploy/keys.md). It starts with COMPOSE_PROFILES=agents
+  # in compose.env, once the KMS keys and the keys role exist.
+  ftwkeysd:
+    image: ${FTW_CLOUD_IMAGE:?set FTW_CLOUD_IMAGE to an image digest}
+    profiles: [agents]
+    restart: unless-stopped
+    entrypoint: ['/usr/local/bin/ftwkeysd']
+    command:
+      - -socket=/run/ftw-cloud-keys/keys.sock
+      - -state=/keys
+      - -kms-key=${FTW_CLOUD_KMS_KEY:-}
+      - -offer-kms-key=${FTW_CLOUD_OFFER_KEY:-}
+      - -region=eu-north-1
+      - -aws-credentials=/run/secrets/aws/credentials.json
+      # ftwcloudd's user, the only one allowed on the socket.
+      - -peer-uid=65530
+    # Its own user, in ftwcloudd's group so that ftwcloudd may connect to
+    # the socket and nothing more.
+    user: '65533:65530'
+    # A network of its own, apart from ftwcloudd's. Like every container it
+    # cannot reach the instance's credentials (hop limit 1); it reaches KMS
+    # with the keys role's short-lived credentials, which may use the two
+    # KMS keys and nothing else. It listens on nothing but the unix socket.
+    networks: [keys]
+    volumes:
+      # Agent keys, sealed under KMS. ftwcloudd never mounts this.
+      - ftw-cloud-keys:/keys
+      - /run/ftw-cloud-keys:/run/ftw-cloud-keys
+      # The keys role's credentials, renewed by the host every 15 minutes
+      # (deploy/keys.sh).
+      - /run/ftw-cloud-keys-aws:/run/secrets/aws:ro
+    read_only: true
+    ulimits:
+      core: 0
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: '10m'
+        max-file: '3'
+
 secrets:
   # ftw-cloud-key.service fetches it from Secrets Manager into tmpfs at
   # boot; it is never in the image, the volume or on disk.
   ftw-cloud-service.key:
     file: /run/ftw-cloud/service.key
 
+networks:
+  keys:
+
 volumes:
   ftw-cloud-state:
+  ftw-cloud-keys:

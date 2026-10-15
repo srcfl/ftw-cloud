@@ -43,6 +43,7 @@ if ! get /ftw-cloud/apns/key key.p8 || ! get /ftw-cloud/apns/key-id key-id || ! 
   exit 0
 fi
 grep -q '^-----BEGIN PRIVATE KEY-----$' "$new/key.p8"
+# ftw-cloud-own gives it to the user the image runs as, before compose starts.
 chown -R 65532:65532 "$new"
 chmod 0400 "$new"/*
 chmod 0500 "$new"
