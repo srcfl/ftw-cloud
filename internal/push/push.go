@@ -156,16 +156,22 @@ type Service struct {
 	// registered with app watch. Empty sends them nothing. The iPhone app's
 	// is the sender's own. Set before serving.
 	WatchApp string
+	// Owns reports whether this shard holds a home. Resume starts no
+	// box.unreachable for a home another shard holds, whose rows may still
+	// be here during a move. Nil holds every home. Set before Resume.
+	Owns func(home string) bool
 	// after runs f after d and returns a function that stops it. Tests
 	// replace it.
 	after func(d time.Duration, f func()) (stop func() bool)
 
 	// alerts wait for AlertWorkers; widgets for the one widget worker,
-	// each home once. busy counts the alerts being sent now.
-	alerts  *fifo[alertJob]
-	widgets *fifo[string]
-	busy    atomic.Int64
-	gate    gate
+	// each home once. busy counts the workers taking or sending an alert,
+	// and retrying the alerts waiting to go again.
+	alerts   *fifo[alertJob]
+	widgets  *fifo[string]
+	busy     atomic.Int64
+	retrying atomic.Int64
+	gate     gate
 
 	mu    sync.Mutex
 	homes map[string]*homeState
@@ -246,8 +252,12 @@ func (s *Service) Run(ctx context.Context) {
 
 func (s *Service) alertWorker(ctx context.Context) {
 	for {
+		// busy rises before the pop, so Flush never sees an alert that is
+		// in neither the queue nor a worker.
+		s.busy.Add(1)
 		job, ok := s.alerts.pop()
 		if !ok {
+			s.busy.Add(-1)
 			select {
 			case <-ctx.Done():
 				return
@@ -255,7 +265,6 @@ func (s *Service) alertWorker(ctx context.Context) {
 			}
 			continue
 		}
-		s.busy.Add(1)
 		s.sendAlert(ctx, job)
 		s.busy.Add(-1)
 	}
@@ -282,18 +291,18 @@ func (s *Service) widgetWorker(ctx context.Context) {
 	}
 }
 
-// Flush waits until no alert is queued or being sent, at most d, and
-// returns how many were still queued. Widget pushes may be left; the next
-// change sends them.
+// Flush waits until no alert is queued, being sent or waiting to go again,
+// at most d, and returns how many were left. Widget pushes may be left; the
+// next change sends them.
 func (s *Service) Flush(d time.Duration) int {
 	deadline := time.Now().Add(d)
 	for time.Now().Before(deadline) {
-		if s.alerts.len() == 0 && s.busy.Load() == 0 {
+		if s.alerts.len() == 0 && s.busy.Load() == 0 && s.retrying.Load() == 0 {
 			return 0
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	return s.alerts.len()
+	return s.alerts.len() + int(s.retrying.Load())
 }
 
 // queueAlert hands an alert to the workers without ever blocking the
@@ -547,6 +556,9 @@ func (s *Service) Resume() error {
 	now := s.now()
 	for _, a := range away {
 		seen[a.Home] = true
+		if s.Owns != nil && !s.Owns(a.Home) {
+			continue
+		}
 		if a.Told {
 			s.mu.Lock()
 			st := s.state(a.Home)
@@ -562,7 +574,7 @@ func (s *Service) Resume() error {
 	}
 	wait := time.Duration(cloudwire.UnreachableAfterMs) * time.Millisecond
 	for _, home := range homes {
-		if seen[home] {
+		if seen[home] || (s.Owns != nil && !s.Owns(home)) {
 			continue
 		}
 		if err := s.reg.AwaySet(home, now.Add(wait)); err != nil {
@@ -667,7 +679,11 @@ func (s *Service) sendAlert(ctx context.Context, job alertJob) {
 		return
 	}
 	job.regs = again
-	s.after(wait, func() { s.queueAlert(job) })
+	s.retrying.Add(1)
+	s.after(wait, func() {
+		s.queueAlert(job)
+		s.retrying.Add(-1)
+	})
 }
 
 // sendWidgets posts a widgets push to the home's registered devices, once.

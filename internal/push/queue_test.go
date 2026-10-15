@@ -184,3 +184,21 @@ func TestTheGatePassesItsRate(t *testing.T) {
 		t.Fatalf("22 passes slept %s", slept)
 	}
 }
+
+// Flush counts an alert that waits to go again, so the exit says it is
+// lost rather than dropping it without a word.
+func TestFlushCountsAlertsWaitingToGoAgain(t *testing.T) {
+	r := newRig(t)
+	r.svc.sender = &flakyApple{n: 100, status: 503}
+	_ = r.register(t, r.owner, r.all, "owner-token")
+	r.svc.Event(r.home, []byte{0xa0})
+	r.drain()
+	if n := r.svc.Flush(50 * time.Millisecond); n != 1 {
+		t.Fatalf("Flush left %d, want the one waiting to go again", n)
+	}
+	r.clock.advance(alertRetryAfter)
+	r.svc.alerts.pop()
+	if n := r.svc.Flush(50 * time.Millisecond); n != 0 {
+		t.Fatalf("Flush left %d after the retry was taken", n)
+	}
+}

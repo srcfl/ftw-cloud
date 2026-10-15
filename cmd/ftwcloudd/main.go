@@ -165,6 +165,7 @@ func serve(args []string) error {
 	}
 	pushSvc := push.New(reg, sender, log)
 	pushSvc.WatchApp = *apnsWatch
+	pushSvc.Owns = shards.Ours
 	up.OnHeld = pushSvc.Held
 	up.OnRoster = func(home string, r *cloudwire.Roster) {
 		pushSvc.Roster(home, r)
@@ -263,16 +264,20 @@ func serve(args []string) error {
 		}
 		spread := restartSpread(up.Boxes()+phones, *restartRate, *restartMin)
 		reason := strconv.FormatInt(spread.Milliseconds(), 10)
-		boxes := up.Drain(reason)
+		// The phones first: their sessions close on their own goroutines
+		// while the boxes' closes go out here.
 		if app != nil {
 			app.Drain(reason)
+		}
+		boxes := up.Drain(reason)
+		if app != nil {
 			if left := app.WaitClosed(2 * time.Second); left > 0 {
 				log.Warn("app sessions still open at exit", "count", left)
 			}
 		}
 		log.Info("drained for a restart", "boxes", boxes, "phones", phones, "spread", spread)
 		if left := pushSvc.Flush(3 * time.Second); left > 0 {
-			log.Warn("alerts still queued at exit", "count", left)
+			log.Warn("alerts queued or waiting to go again at exit; they are lost", "count", left)
 		}
 		stopPush()
 	}()

@@ -201,3 +201,32 @@ func TestAStuckBoxDoesNotHoldUpAnotherHome(t *testing.T) {
 		}
 	}
 }
+
+// One box whose socket is stuck does not hold up the drain of the others.
+func TestAStuckBoxDoesNotHoldUpTheDrain(t *testing.T) {
+	s := newService(t)
+	stuck := tunConnect(t, s) // never reads again
+	live := newBox(t)
+	if _, err := live.connect(s, nil); err != nil {
+		t.Fatal(err)
+	}
+	wait(t, "both boxes are their homes'", func() bool { return s.up.Boxes() == 2 })
+	big := make([]byte, cloudwire.TunDataMax)
+	for range 4 {
+		go func() {
+			for range 64 {
+				s.up.Tun(stuck.home, cloudwire.Tun{Dev: "owner", Sid: 1, D: big})
+			}
+		}()
+	}
+	time.Sleep(300 * time.Millisecond)
+	start := time.Now()
+	s.up.Drain("1000")
+	if d := time.Since(start); d > drainWait+500*time.Millisecond {
+		t.Fatalf("the drain took %s", d)
+	}
+	_, _, err := live.conn.ReadMessage()
+	if code, _ := closeCode(err); code != cloudwire.CloseRestart {
+		t.Fatalf("the live box heard %v", err)
+	}
+}

@@ -90,3 +90,21 @@ func TestALateEndOfAnOlderConnectionSaysNothing(t *testing.T) {
 		t.Fatalf("an absence was recorded: %+v", away)
 	}
 }
+
+// A home another shard holds, whose rows are still here during a move,
+// gets no box.unreachable from this shard's restart.
+func TestARestartLeavesAnotherShardsHomesAlone(t *testing.T) {
+	r := newRig(t)
+	_ = r.register(t, r.owner, r.all, "tok")
+	r.connected()
+	r.svc = New(r.reg, r.apple, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	r.svc.now, r.svc.after = r.clock.time, r.clock.after
+	r.svc.Owns = func(home string) bool { return home != r.home }
+	if err := r.svc.Resume(); err != nil {
+		t.Fatal(err)
+	}
+	r.clock.advance(time.Hour)
+	if n := unreachableSent(t, r); n != 0 {
+		t.Fatalf("sent %d for a home of another shard", n)
+	}
+}

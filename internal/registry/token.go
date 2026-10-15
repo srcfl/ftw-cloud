@@ -1,6 +1,7 @@
 package registry
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"time"
@@ -62,8 +63,10 @@ func (r *Registry) TokenLookup(hash []byte, now time.Time) (TokenRow, bool, erro
 
 // TokenDrop forgets a device's token, as when an owner suspends it.
 func (r *Registry) TokenDrop(home, deviceID string) error {
-	_, err := r.db.Exec(`DELETE FROM tokens WHERE home = ? AND device_id = ?`, home, deviceID)
-	return err
+	return r.durably(func(ctx context.Context, c *sql.Conn) error {
+		_, err := c.ExecContext(ctx, `DELETE FROM tokens WHERE home = ? AND device_id = ?`, home, deviceID)
+		return err
+	})
 }
 
 // TokenDropHash forgets one token by its hash.
@@ -95,14 +98,19 @@ func (r *Registry) TokenPrune(home string, keep func(deviceID string, epoch uint
 		}
 	}
 	_ = rows.Close()
+	if len(gone) == 0 {
+		return nil
+	}
 	// The epoch is part of the match, so a token the device got at its new
 	// epoch meanwhile stays.
-	for _, e := range gone {
-		if _, err := r.db.Exec(`DELETE FROM tokens WHERE home = ? AND device_id = ? AND epoch = ?`, home, e.id, e.epoch); err != nil {
-			return err
+	return r.durably(func(ctx context.Context, c *sql.Conn) error {
+		for _, e := range gone {
+			if _, err := c.ExecContext(ctx, `DELETE FROM tokens WHERE home = ? AND device_id = ? AND epoch = ?`, home, e.id, e.epoch); err != nil {
+				return err
+			}
 		}
-	}
-	return nil
+		return nil
+	})
 }
 
 // TokenExpire forgets the tokens that have expired.

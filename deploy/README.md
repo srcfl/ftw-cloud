@@ -155,8 +155,11 @@ service makes that short and spreads the return:
    phone with 4503 and a spread: the sockets it holds at 500 a second
    (`-restart-rate`), at least 5 s (`-restart-spread-min`, about how long the
    next container takes to start) and at most 60 s. 4,000 boxes get 8 s.
-3. It waits up to 2 s for the phones' closes to go out, and up to 3 s for
-   queued alerts. A box closed this way starts no `box.unreachable`.
+3. It closes the boxes side by side, so a stuck socket holds up none of
+   the others, waits up to 2 s for the phones' closes to go out, and up to
+   3 s for queued alerts. An alert still queued or waiting to go again is
+   lost, and the log says how many. A box closed this way starts no
+   `box.unreachable`.
 4. It exits, in about 0.1 s in the load test.
 5. The new container reads every signed roster back and checks the
    signatures on all cores before it listens: 0.35 s for 10,000 homes on
@@ -292,16 +295,25 @@ and keep the host. A second shard holds homes only once their boxes list
 2. Take `to-s2.db` to s2's volume and merge it into s2's registry, before
    s2 starts: `ftwcloudd move -registry to-s2.db -to /state/registry.db -shards <s2's file> -shard s2`.
 3. Start s2 with its file, and point `s2.cloud.ftw.energy` at it.
-4. Deploy s1 with the new file. It drains, and from then on its boxes and
-   phones of those homes hear 4421 and go to s2.
+4. Within ten minutes of step 3, deploy s1 with the new file. It drains,
+   and from then on its boxes and phones of those homes hear 4421 and go to
+   s2. (s2 starts the wait for `box.unreachable` for each moved home with
+   alert registrations; a box that has not arrived in ten minutes would
+   raise a false alarm. s1 starts none for the homes it no longer holds.)
 5. On s1, run step 1 again with `-drop`, so what changed between step 1 and
    step 4 follows and s1 forgets the homes. Merge that file into s2 as in
    step 2, then deploy s2 again so it reads the merged suspensions.
 
 A merge never makes a row older: a roster is taken only with a higher
 `rosterSeq`, other rows only where they are missing, and a tombstone deletes
-its home. Extension tokens keep working, because their hashes move with the
-rows and each token names its home.
+its home. It adds and never deletes, so a row s1 deleted between steps 1
+and 4 stays on s2. A box's roster at its first connect to s2 prunes the
+tokens and push registrations it no longer allows, and a withdrawn copy
+prunes every token again; what is left is a token dropped by a suspension
+in that window and a push token a phone unregistered in it. Keep steps 1
+to 4 short. Extension tokens keep working, because their hashes move with
+the rows and each token names its home; tokens from before this change
+named none, and no app read them.
 
 ## Checking it
 

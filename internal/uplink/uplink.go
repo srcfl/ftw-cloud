@@ -72,6 +72,9 @@ const (
 	// limitsIdle is how long a home's limits outlive its last connection,
 	// longer than any of its buckets takes to fill again.
 	limitsIdle = 2 * time.Minute
+	// drainWait bounds Drain: the closes of stuck sockets are left to the
+	// process's exit.
+	drainWait = 2 * time.Second
 )
 
 // What the uplink counts, summed over all homes.
@@ -228,8 +231,21 @@ func (u *Uplink) Drain(reason string) int {
 		conns = append(conns, c)
 	}
 	u.mu.Unlock()
+	// Side by side, and at most drainWait in all: a box whose socket is
+	// stuck must not hold up the others' closes, nor the phones'.
+	var wg sync.WaitGroup
 	for _, c := range conns {
-		c.closeWith(cloudwire.CloseRestart, reason)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			c.closeWith(cloudwire.CloseRestart, reason)
+		}()
+	}
+	done := make(chan struct{})
+	go func() { wg.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(drainWait):
 	}
 	return len(conns)
 }
@@ -454,11 +470,11 @@ func (c *boxConn) writeFrame(frame []byte) error {
 	return err
 }
 
-// closeWith ends the uplink with a close code and reason.
+// closeWith ends the uplink with a close code and reason. gorilla lets
+// WriteControl run beside a data write, so a write stuck on a full socket
+// does not hold the close back.
 func (c *boxConn) closeWith(code int, reason string) {
-	c.writeMu.Lock()
 	_ = c.conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(code, reason), time.Now().Add(time.Second))
-	c.writeMu.Unlock()
 	_ = c.conn.Close()
 }
 

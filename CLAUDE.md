@@ -69,17 +69,17 @@ maintains it.
   | Part | Lines |
   |---|---|
   | `internal/appsession` (app session, one-shot read) | 1,103 (1,020) |
-  | `internal/uplink` | 930 (719) |
-  | `internal/registry` | 884 (694) |
-  | `internal/push` | 877 (542) |
+  | `internal/uplink` | 953 (719) |
+  | `internal/registry` | 930 (694) |
+  | `internal/push` | 893 (542) |
   | `internal/store` | 854 (807) |
-  | `cmd/ftwcloudd` | 719 (553) |
+  | `cmd/ftwcloudd` | 724 (553) |
   | `internal/metrics` | 448 (new) |
   | `internal/apns` | 299 (299) |
   | `internal/token` | 214 (170) |
   | `internal/server` | 199 (205) |
   | `internal/shard` | 187 (new) |
-  | All | 6,714 (5,009) |
+  | All | 6,804 (5,009) |
 
   `cmd/ftwload`, the load harness, is a tool and not the service (1,938).
 - Nothing is deployed from here without the owner. `deploy/` describes the
