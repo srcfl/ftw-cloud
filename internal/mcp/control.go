@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"regexp"
 	"slices"
@@ -337,6 +338,9 @@ func (cc *callCtx) command(ctx context.Context, op string, args map[string]any) 
 		cmd := protocol.Cmd{CmdID: id, Op: op, Args: args, NotValidAfterMs: uptime + cmdValidFor.Milliseconds(),
 			Expect: protocol.Expect{Rev: rev, Guards: []protocol.Guard{}}}
 		res, ack, err := c.cmd(ctx, cmd)
+		if errors.Is(err, errAnswerLost) {
+			return lostReport(ack, uptime), nil
+		}
 		if err != nil {
 			return nil, words(err)
 		}
@@ -404,7 +408,14 @@ func (k *cmdIDs) forget(key string) {
 	delete(k.m, key)
 }
 
-// cmd sends one command and collects its ack and result.
+// errAnswerLost is a command the box was sent whose answer never came: the
+// session ended, for a restart, a reconnect or the box, or the call ran out
+// of time. The box may or may not have acted.
+var errAnswerLost = errors.New("mcp: the command's answer was lost")
+
+// cmd sends one command and collects its ack and result. Once it is sent, a
+// session that ends or a call that runs out loses the answer, not the
+// command: errAnswerLost.
 func (c *agentConn) cmd(ctx context.Context, cmd protocol.Cmd) (*protocol.CmdResult, *protocol.CmdAck, error) {
 	ch := make(chan appwire.Envelope, 8)
 	id := c.newID()
@@ -446,11 +457,25 @@ func (c *agentConn) cmd(ctx context.Context, cmd protocol.Cmd) (*protocol.CmdRes
 			// Heard, perhaps, but not confirmed: say so rather than guess.
 			return nil, ack, nil
 		case <-c.done:
-			return nil, ack, c.closeErr
+			return nil, ack, errAnswerLost
 		case <-ctx.Done():
-			return nil, ack, errTimeout
+			return nil, ack, errAnswerLost
 		}
 	}
+}
+
+// lostReport says a command's outcome is unknown, never that it failed: the
+// box may have acted before its answer was lost.
+func lostReport(ack *protocol.CmdAck, uptime int64) map[string]any {
+	out := commandReport(nil, ack, uptime)
+	out["state"] = "unknown"
+	out["note"] = "Unknown, not failed: the connection to the box ended before it answered, so it may or may not " +
+		"have acted. Check status (chargers_list) before trying again."
+	if ack != nil {
+		out["note"] = "Unknown, not failed: the box accepted the command, then the connection ended before it " +
+			"confirmed the result. Check status (chargers_list) before trying again."
+	}
+	return out
 }
 
 // commandReport says what the box did, never more than it confirmed.

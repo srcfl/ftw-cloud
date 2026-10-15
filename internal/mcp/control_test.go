@@ -352,3 +352,43 @@ func TestUUIDv7(t *testing.T) {
 		t.Fatalf("%s %s", a, b)
 	}
 }
+
+// A command whose answer a restart cut off is unknown, not failed: the box
+// may have acted. The model is told to check status, and the same holds
+// for an answer that does not come before the call runs out.
+func TestALostAnswerIsUnknownNotFailed(t *testing.T) {
+	w, b, a := withControl(t)
+	b.mu.Lock()
+	b.cmdReply = func(protocol.Cmd) []any { return nil } // heard, never answered
+	b.mu.Unlock()
+	type reply struct {
+		res   map[string]any
+		isErr bool
+		text  string
+	}
+	done := make(chan reply, 1)
+	go func() {
+		res, isErr, text := a.call("ev_charge_now", map[string]any{"loadpoint": "lpA1", "power_w": 2000, "minutes": 5})
+		done <- reply{res, isErr, text}
+	}()
+	waitFor(t, func() bool { b.mu.Lock(); defer b.mu.Unlock(); return len(b.cmds) == 1 })
+	w.pool.Drain("1500")
+	r := <-done
+	sc, _ := r.res["structuredContent"].(map[string]any)
+	data, _ := sc["data"].(map[string]any)
+	if r.isErr || data["state"] != "unknown" || !strings.Contains(r.text, "Unknown, not failed") ||
+		!strings.Contains(r.text, "chargers_list") || strings.Contains(r.text, "did not do it") {
+		t.Fatalf("a lost answer: %v %v %s", r.isErr, data, r.text)
+	}
+
+	// Ran out of time with nothing heard back: unknown too.
+	_, b2, a2 := withControl(t)
+	b2.mu.Lock()
+	b2.cmdReply = func(protocol.Cmd) []any { return nil }
+	b2.mu.Unlock()
+	a2.w.pool.Call = 300 * time.Millisecond
+	if res, isErr, text := a2.call("ev_charge_now", map[string]any{"loadpoint": "lpA1", "power_w": 2000, "minutes": 5}); isErr ||
+		!strings.Contains(text, "Unknown, not failed") {
+		t.Fatalf("a call that ran out: %v %v %s", isErr, res, text)
+	}
+}
