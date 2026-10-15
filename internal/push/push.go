@@ -29,14 +29,19 @@
 package push
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"log/slog"
+	"math/rand/v2"
+	"net/http"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/srcfl/ftw-cloud/internal/apns"
+	"github.com/srcfl/ftw-cloud/internal/metrics"
 	"github.com/srcfl/ftw-cloud/internal/registry"
 	"github.com/srcfl/ftw/go/protocol"
 	"github.com/srcfl/ftw/go/protocol/cloudwire"
@@ -65,11 +70,59 @@ const (
 	// the next change.
 	unreachableExpiry = time.Hour
 	widgetsExpiry     = time.Hour
-	// queueSize bounds the alerts waiting to be sent.
-	queueSize = 256
 	// expireEvery is how often registrations of long-silent homes go.
 	expireEvery = time.Hour
+
+	// AlertWorkers send alerts side by side over Apple's HTTP/2
+	// connections, so one slow answer from Apple holds up one alert, not
+	// every home's.
+	AlertWorkers = 4
+	// MaxAlertsQueued bounds the alerts waiting. It is far above a burst
+	// of box.unreachable for every home at once; past it an alert is
+	// dropped, logged and counted, never silently.
+	MaxAlertsQueued = 50_000
+	// An alert Apple or the network could not take goes again until it
+	// expires, after a wait that doubles from alertRetryAfter up to
+	// alertRetryMax, each between three quarters and all of it so retries
+	// from many homes do not arrive together.
+	alertRetryAfter = 2 * time.Second
+	alertRetryMax   = 5 * time.Minute
+	// WidgetWorkers send widget pushes side by side, within the one rate.
+	WidgetWorkers = 3
+	// widgetRetryAfter is when a widgets push Apple could not take goes
+	// once more.
+	widgetRetryAfter = 30 * time.Second
+	// WidgetHomesPerSecond and widgetBurst bound widget pushes over all
+	// homes. Tomorrow's prices reach every box within a minute or so;
+	// this turns that into a steady stream to Apple, which keeps alerts
+	// quick, and Apple budgets widget reloads per phone anyway.
+	WidgetHomesPerSecond = 20
+	widgetBurst          = 40
+	// maxWidgetsQueued bounds the homes waiting for a widgets push. A home
+	// waits at most once: a second change before its push goes is the
+	// same push.
+	maxWidgetsQueued = 100_000
 )
+
+// Drops, queue depths and Apple's answers, summed over all homes.
+var (
+	alertsQueued   = metrics.Default.Gauge("ftwcloud_push_queued", "Pushes waiting for a worker.", "kind", "alert")
+	widgetsQueued  = metrics.Default.Gauge("ftwcloud_push_queued", "Pushes waiting for a worker.", "kind", "widgets")
+	alertsDropped  = metrics.Drop("push_alert_queue_full")
+	widgetsDropped = metrics.Drop("push_widgets_queue_full")
+	widgetsMerged  = metrics.Default.Counter("ftwcloud_push_coalesced_total", "Widget pushes merged into one already waiting.")
+	pushCapped     = metrics.Drop("push_home_cap")
+	apnsResults    = map[string]map[string]*metrics.Counter{}
+)
+
+func init() {
+	for _, k := range []string{cloudwire.PushKindAlert, KindWidgets} {
+		apnsResults[k] = map[string]*metrics.Counter{}
+		for _, r := range []string{"ok", "gone", "refused", "retry", "failed"} {
+			apnsResults[k][r] = metrics.Default.Counter("ftwcloud_apns_total", "Apple's answers per device, by kind and result.", "kind", k, "result", r)
+		}
+	}
+}
 
 // KindWidgets registers a widget's push token. cloudwire names only
 // PushKindAlert so far; the protocol's Push section names widgets.
@@ -111,14 +164,43 @@ type Service struct {
 	// registered with app watch. Empty sends them nothing. The iPhone app's
 	// is the sender's own. Set before serving.
 	WatchApp string
+	// Owns reports whether this shard holds a home. Resume starts no
+	// box.unreachable for a home another shard holds, whose rows may still
+	// be here during a move. Nil holds every home. Set before Resume.
+	Owns func(home string) bool
 	// after runs f after d and returns a function that stops it. Tests
 	// replace it.
 	after func(d time.Duration, f func()) (stop func() bool)
 
-	work chan func(context.Context)
+	// alerts wait for AlertWorkers; widgets for the one widget worker,
+	// each home once. busy counts the workers taking or sending an alert,
+	// and retrying the alerts waiting to go again.
+	alerts   *fifo[alertJob]
+	widgets  *fifo[string]
+	busy     atomic.Int64
+	retrying atomic.Int64
+	gate     gate
+	breaker  breaker
 
 	mu    sync.Mutex
 	homes map[string]*homeState
+	// widgetWaiting is the homes queued in widgets; widgetRetry the homes
+	// whose push failed once and goes once more.
+	widgetWaiting map[string]bool
+	widgetRetry   map[string]bool
+}
+
+// alertJob is one alert to a home's phones. On a retry, regs holds the
+// registrations Apple did not take, and tries how often it went.
+// unreachable marks box.unreachable, which is recorded as told only once a
+// phone took it.
+type alertJob struct {
+	home        string
+	payload     []byte
+	expires     time.Time
+	tries       int
+	regs        []registry.PushReg
+	unreachable bool
 }
 
 // homeState is one home's box connection, as the dead man's switch sees it,
@@ -149,23 +231,32 @@ func New(reg *registry.Registry, sender Sender, log *slog.Logger) *Service {
 	}
 	return &Service{
 		reg: reg, sender: sender, log: log, now: time.Now,
-		after: func(d time.Duration, f func()) func() bool { return time.AfterFunc(d, f).Stop },
-		work:  make(chan func(context.Context), queueSize),
-		homes: map[string]*homeState{},
+		after:         func(d time.Duration, f func()) func() bool { return time.AfterFunc(d, f).Stop },
+		alerts:        newFIFO[alertJob](MaxAlertsQueued, alertsQueued),
+		widgets:       newFIFO[string](maxWidgetsQueued, widgetsQueued),
+		gate:          gate{rate: WidgetHomesPerSecond, burst: widgetBurst, tokens: widgetBurst},
+		homes:         map[string]*homeState{},
+		widgetWaiting: map[string]bool{},
+		widgetRetry:   map[string]bool{},
 	}
 }
 
-// Run sends queued alerts and drops long-silent registrations until ctx
-// ends.
+// Run sends queued pushes and drops long-silent registrations until ctx
+// ends: AlertWorkers send alerts, and one worker sends widget pushes at
+// WidgetHomesPerSecond.
 func (s *Service) Run(ctx context.Context) {
+	for range AlertWorkers {
+		go s.alertWorker(ctx)
+	}
+	for range WidgetWorkers {
+		go s.widgetWorker(ctx)
+	}
 	t := time.NewTicker(expireEvery)
 	defer t.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case job := <-s.work:
-			job(ctx)
 		case <-t.C:
 			if n, err := s.reg.PushExpire(s.now()); err != nil {
 				s.log.Warn("push upkeep failed", "err", err)
@@ -176,14 +267,103 @@ func (s *Service) Run(ctx context.Context) {
 	}
 }
 
-// enqueue hands a job to Run without ever blocking the caller, which is a
-// box's uplink. A full queue drops the job.
-func (s *Service) enqueue(job func(context.Context)) {
-	select {
-	case s.work <- job:
-	default:
-		s.log.Warn("push queue full; an alert was dropped")
+func (s *Service) alertWorker(ctx context.Context) {
+	for {
+		// busy rises before the pop, so Flush never sees an alert that is
+		// in neither the queue nor a worker.
+		s.busy.Add(1)
+		job, ok := s.alerts.pop()
+		if !ok {
+			s.busy.Add(-1)
+			select {
+			case <-ctx.Done():
+				return
+			case <-s.alerts.wake:
+			}
+			continue
+		}
+		s.sendAlert(ctx, job)
+		s.busy.Add(-1)
 	}
+}
+
+func (s *Service) widgetWorker(ctx context.Context) {
+	for {
+		home, ok := s.widgets.pop()
+		if !ok {
+			select {
+			case <-ctx.Done():
+				return
+			case <-s.widgets.wake:
+			}
+			continue
+		}
+		retried := s.takeWidgets(home)
+		if !s.gate.wait(ctx) || !s.breaker.wait(ctx) {
+			return
+		}
+		if !s.sendWidgets(ctx, home) && !retried {
+			s.retryWidgets(home)
+		}
+	}
+}
+
+// takeWidgets marks a home's widgets push as taken from the queue, and
+// reports whether it is the one retry.
+func (s *Service) takeWidgets(home string) (retried bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.widgetWaiting, home)
+	retried = s.widgetRetry[home]
+	delete(s.widgetRetry, home)
+	return retried
+}
+
+// retryWidgets queues a home's failed widgets push once more, later.
+func (s *Service) retryWidgets(home string) {
+	s.mu.Lock()
+	s.widgetRetry[home] = true
+	s.mu.Unlock()
+	s.after(widgetRetryAfter, func() { s.queueWidgets(home) })
+}
+
+// Flush waits until no alert is queued, being sent or waiting to go again,
+// at most d, and returns how many were left. Widget pushes may be left; the
+// next change sends them.
+func (s *Service) Flush(d time.Duration) int {
+	deadline := time.Now().Add(d)
+	for time.Now().Before(deadline) {
+		if s.alerts.len() == 0 && s.busy.Load() == 0 && s.retrying.Load() == 0 {
+			return 0
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	return s.alerts.len() + int(s.retrying.Load())
+}
+
+// queueAlert hands an alert to the workers without ever blocking the
+// caller, which is a box's uplink.
+func (s *Service) queueAlert(job alertJob) {
+	if !s.alerts.push(job) {
+		alertsDropped.Inc()
+		s.log.Error("push: the alert queue is full; an alert was dropped", "queued", s.alerts.len())
+	}
+}
+
+// queueWidgets asks for a widgets push to a home, once however many changes
+// arrive before it goes.
+func (s *Service) queueWidgets(home string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.widgetWaiting[home] {
+		widgetsMerged.Inc()
+		return
+	}
+	if !s.widgets.push(home) {
+		widgetsDropped.Inc()
+		return
+	}
+	s.widgetWaiting[home] = true
 }
 
 // --------------------------------------------------------------------------
@@ -249,7 +429,7 @@ func (s *Service) Held(home, class string, envelope []byte) {
 		s.Event(home, envelope)
 	case cloudwire.MsgPrices, cloudwire.MsgLP:
 		if s.widgetsChanged(home, class, envelope) {
-			s.enqueue(func(ctx context.Context) { s.send(ctx, home, KindWidgets, widgetsPayload, widgetsExpiry) })
+			s.queueWidgets(home)
 		}
 	}
 }
@@ -261,7 +441,7 @@ func (s *Service) Event(home string, envelope []byte) {
 	if err != nil {
 		return
 	}
-	s.enqueue(func(ctx context.Context) { s.send(ctx, home, cloudwire.PushKindAlert, payload, eventExpiry) })
+	s.queueAlert(alertJob{home: home, payload: payload, expires: s.now().Add(eventExpiry)})
 }
 
 // widgetsChanged reports whether prices now reach further than before, or a
@@ -412,6 +592,9 @@ func (s *Service) Resume() error {
 	now := s.now()
 	for _, a := range away {
 		seen[a.Home] = true
+		if s.Owns != nil && !s.Owns(a.Home) {
+			continue
+		}
 		if a.Told {
 			s.mu.Lock()
 			st := s.state(a.Home)
@@ -427,7 +610,7 @@ func (s *Service) Resume() error {
 	}
 	wait := time.Duration(cloudwire.UnreachableAfterMs) * time.Millisecond
 	for _, home := range homes {
-		if seen[home] {
+		if seen[home] || (s.Owns != nil && !s.Owns(home)) {
 			continue
 		}
 		if err := s.reg.AwaySet(home, now.Add(wait)); err != nil {
@@ -447,15 +630,14 @@ func (s *Service) unreachable(home string, gen uint64) {
 	}
 	st.told, st.stop = true, nil
 	s.mu.Unlock()
-	if err := s.reg.AwayTold(home); err != nil {
-		s.log.Warn("could not record box.unreachable as sent", "err", err)
-	}
 	s.log.Info("a box is out of reach; telling its phones")
 	payload, err := cloudwire.AlertPayload(cloudwire.Alert{Home: home, Kind: protocol.PushBoxUnreachable})
 	if err != nil {
 		return
 	}
-	s.enqueue(func(ctx context.Context) { s.send(ctx, home, cloudwire.PushKindAlert, payload, unreachableExpiry) })
+	// Told on disk only once a phone took it: an alert lost to a failure
+	// or an exit goes again after a restart.
+	s.queueAlert(alertJob{home: home, payload: payload, expires: s.now().Add(unreachableExpiry), unreachable: true})
 }
 
 func (s *Service) state(home string) *homeState {
@@ -487,33 +669,134 @@ func (s *Service) allow(home, kindName string) bool {
 	return true
 }
 
-// send posts one payload to every device of the home registered for a kind,
-// and forgets the tokens Apple says are gone.
-func (s *Service) send(ctx context.Context, home, kindName string, payload []byte, expiry time.Duration) {
+// regs is a home's registrations of a kind that may get a push now. A
+// device an owner has suspended keeps its tokens, so lifting the suspension
+// brings its pushes back, but gets nothing meanwhile. A watch's token waits
+// for the watch app's topic.
+func (s *Service) regs(home, kindName string) ([]registry.PushReg, error) {
+	regs, err := s.reg.PushRegs(home, kindName)
+	if err != nil {
+		return nil, err
+	}
+	return slices.DeleteFunc(regs, func(r registry.PushReg) bool {
+		return s.reg.Suspended(home, r.DeviceID, r.Epoch) || (r.App == cloudwire.PushAppWatch && s.WatchApp == "")
+	}), nil
+}
+
+// sendAlert posts an alert to the home's registered devices. What Apple or
+// the network could not take goes again later, while the alert is worth
+// showing, and only to devices that may still get it; a gone token is
+// forgotten.
+func (s *Service) sendAlert(ctx context.Context, job alertJob) {
 	if s.sender == nil {
 		return
 	}
-	regs, err := s.reg.PushRegs(home, kindName)
+	fresh, err := s.regs(job.home, cloudwire.PushKindAlert)
 	if err != nil {
-		s.log.Warn("could not read push registrations", "err", err)
+		s.log.Warn("could not read push registrations; the alert goes again", "err", err)
+		s.retryAlert(job, nil)
 		return
 	}
-	// A device an owner has suspended keeps its tokens, so lifting the
-	// suspension brings its alerts back, but gets nothing meanwhile. A
-	// watch's token waits for the watch app's topic.
-	regs = slices.DeleteFunc(regs, func(r registry.PushReg) bool {
-		return s.reg.Suspended(home, r.DeviceID, r.Epoch) || (r.App == cloudwire.PushAppWatch && s.WatchApp == "")
+	if job.tries == 0 {
+		job.regs = fresh
+		if len(job.regs) == 0 {
+			s.told(job)
+			return
+		}
+		if !s.allow(job.home, cloudwire.PushKindAlert) {
+			pushCapped.Inc()
+			s.log.Warn("a home passed its push cap; push dropped", "kind", cloudwire.PushKindAlert, "cap_per_hour", MaxAlertsPerHour)
+			s.told(job)
+			return
+		}
+	} else {
+		// A device suspended, dropped by a roster or unregistered since
+		// the last try gets nothing.
+		job.regs = slices.DeleteFunc(job.regs, func(r registry.PushReg) bool {
+			return !slices.ContainsFunc(fresh, func(f registry.PushReg) bool { return bytes.Equal(f.Token, r.Token) })
+		})
+		if len(job.regs) == 0 {
+			s.told(job)
+			return
+		}
+	}
+	if !s.breaker.wait(ctx) {
+		return
+	}
+	job.tries++
+	took, again := s.deliver(ctx, job.home, cloudwire.PushKindAlert, job.payload, job.expires, job.regs)
+	if took > 0 || len(again) == 0 {
+		s.told(job)
+	}
+	if len(again) > 0 {
+		s.retryAlert(job, again)
+	}
+}
+
+// retryAlert sends job again after its next wait, to again when it is not
+// nil, unless the alert has expired by then.
+func (s *Service) retryAlert(job alertJob, again []registry.PushReg) {
+	wait := min(alertRetryAfter<<min(max(job.tries-1, 0), 16), alertRetryMax)
+	wait -= time.Duration(rand.Int64N(int64(wait/4) + 1))
+	if !s.now().Add(wait).Before(job.expires) {
+		apnsResults[cloudwire.PushKindAlert]["failed"].Add(int64(max(len(again), 1)))
+		s.log.Warn("push: an alert could not reach Apple before it expired; given up", "tries", job.tries)
+		return
+	}
+	if again != nil {
+		job.regs = again
+	}
+	s.retrying.Add(1)
+	s.after(wait, func() {
+		s.queueAlert(job)
+		s.retrying.Add(-1)
 	})
+}
+
+// told records box.unreachable as sent, once a phone took it or nobody was
+// left to tell, so a restart does not send it again.
+func (s *Service) told(job alertJob) {
+	if !job.unreachable {
+		return
+	}
+	if err := s.reg.AwayTold(job.home); err != nil {
+		s.log.Warn("could not record box.unreachable as sent", "err", err)
+	}
+}
+
+// sendWidgets posts a widgets push to the home's registered devices, once.
+// False means Apple or the network failed for a device, and it may go once
+// more.
+func (s *Service) sendWidgets(ctx context.Context, home string) bool {
+	if s.sender == nil {
+		return true
+	}
+	regs, err := s.regs(home, KindWidgets)
+	if err != nil {
+		return false
+	}
 	if len(regs) == 0 {
-		return
+		return true
 	}
+	if !s.allow(home, KindWidgets) {
+		pushCapped.Inc()
+		return true
+	}
+	if _, again := s.deliver(ctx, home, KindWidgets, widgetsPayload, s.now().Add(widgetsExpiry), regs); len(again) > 0 {
+		apnsResults[KindWidgets]["failed"].Add(int64(len(again)))
+		return false
+	}
+	return true
+}
+
+// deliver posts one payload to each registration and returns how many Apple
+// took, and those Apple or the network failed for now: an error, 429 or a
+// 5xx.
+func (s *Service) deliver(ctx context.Context, home, kindName string, payload []byte, exp time.Time, regs []registry.PushReg) (int, []registry.PushReg) {
 	k := kinds[kindName]
-	if !s.allow(home, kindName) {
-		s.log.Warn("a home passed its push cap; push dropped", "kind", kindName, "cap_per_hour", k.perHour)
-		return
-	}
+	results := apnsResults[kindName]
+	var again []registry.PushReg
 	var sent, gone, failed int
-	exp := s.now().Add(expiry)
 	for _, r := range regs {
 		// A watch and its phone get the same payload, so Apple shows one
 		// alert when both are near; only the topic differs.
@@ -523,20 +806,46 @@ func (s *Service) send(ctx context.Context, home, kindName string, payload []byt
 		}
 		res, err := s.sender.Send(ctx, apns.Notification{Environment: r.Environment, DeviceToken: r.Token,
 			App: app, Type: k.pushType, Payload: payload, Expiration: exp})
+		transient := err != nil || res.Status == http.StatusTooManyRequests || res.Status >= 500
+		s.breaker.result(transient)
 		switch {
-		case err != nil:
+		case transient:
 			failed++
+			results["retry"].Inc()
+			again = append(again, r)
 		case res.OK():
 			sent++
+			results["ok"].Inc()
 		case res.Gone:
 			gone++
+			results["gone"].Inc()
 			if err := s.reg.PushGone(home, r.Token, kindName, res.GoneSince); err != nil {
 				s.log.Warn("could not forget a gone token", "err", err)
 			}
 		default:
 			failed++
+			results["refused"].Inc()
 			s.log.Warn("APNs refused a push", "kind", kindName, "status", res.Status, "reason", res.Reason)
 		}
 	}
-	s.log.Info("push sent", "kind", kindName, "devices", sent, "gone", gone, "failed", failed)
+	s.log.Debug("push sent", "kind", kindName, "devices", sent, "gone", gone, "failed", failed)
+	return sent, again
+}
+
+// sendQueued sends everything queued now, here, without the widget rate.
+// Tests use it in place of the workers.
+func (s *Service) sendQueued(ctx context.Context) {
+	for {
+		if job, ok := s.alerts.pop(); ok {
+			s.sendAlert(ctx, job)
+			continue
+		}
+		home, ok := s.widgets.pop()
+		if !ok {
+			return
+		}
+		if retried := s.takeWidgets(home); !s.sendWidgets(ctx, home) && !retried {
+			s.retryWidgets(home)
+		}
+	}
 }

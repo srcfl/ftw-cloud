@@ -22,12 +22,16 @@ import (
 	"log/slog"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/srcfl/ftw-cloud/internal/metrics"
 	"github.com/srcfl/ftw-cloud/internal/push"
 	"github.com/srcfl/ftw-cloud/internal/registry"
+	"github.com/srcfl/ftw-cloud/internal/shard"
 	"github.com/srcfl/ftw-cloud/internal/store"
+	"github.com/srcfl/ftw-cloud/internal/wsclose"
 	"github.com/srcfl/ftw/go/protocol/appwire"
 	"github.com/srcfl/ftw/go/protocol/cloudwire"
 )
@@ -78,6 +82,17 @@ type Tunneler interface {
 	Tun(home string, t cloudwire.Tun) bool
 }
 
+// What the app sessions count, summed over all homes.
+var (
+	appSockets     = metrics.Sockets("app")
+	appHandshake   = metrics.Handshake("app")
+	onceHandshake  = metrics.Handshake("once")
+	envelopeOut    = metrics.Forward("envelope")
+	tunUp          = metrics.Forward("tun_up")
+	appWrongShard  = metrics.WrongShard("app")
+	onceWrongShard = metrics.WrongShard("once")
+)
+
 // WebOrigin is the one browser origin the service accepts on /v1/app: the
 // web app's. The phone and the box send no Origin.
 const WebOrigin = "https://app.ftw.energy"
@@ -108,6 +123,16 @@ type Server struct {
 	// Tunnel carries the phones' sessions to their boxes. Nil answers every
 	// tun with its end. Set before serving.
 	Tunnel Tunneler
+	// Shards says which homes this instance holds. Nil holds every home.
+	// Set before serving.
+	Shards *shard.Directory
+
+	// sockets are every phone's socket from its upgrade on, so a drain
+	// reaches those still in their handshake. draining is set once Drain
+	// starts; restartReason is what its close says.
+	sockets       wsclose.Set
+	draining      atomic.Bool
+	restartReason atomic.Value
 
 	mu      sync.Mutex
 	looking map[string]*look
@@ -130,11 +155,11 @@ type Tokens interface {
 	Drop(home, deviceID string) error
 }
 
-// look is one home's phones that can see it, and the loop that keeps the
+// look is one home's phones that can see it, and the timer that keeps the
 // box's watch in force while there is at least one.
 type look struct {
-	n    int
-	stop chan struct{}
+	n     int
+	timer *time.Timer
 }
 
 // New builds the handler. key is the service's Noise static key; the app
@@ -156,6 +181,9 @@ var upgrader = websocket.Upgrader{
 		o := r.Header.Get("Origin")
 		return o == "" || o == WebOrigin
 	},
+	// A phone's socket is idle between messages; it borrows a write buffer
+	// only while it writes.
+	WriteBufferPool: &sync.Pool{},
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -173,20 +201,76 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer conn.Close()
+	appSockets.Add(1)
+	defer appSockets.Add(-1)
 	conn.SetReadLimit(maxPhoneMessage)
-	code, err := s.serve(conn, home)
+	sock := s.sockets.Add(conn)
+	defer s.sockets.Remove(sock)
+	// Drain sets draining before it takes the set, so a socket it did not
+	// see sees draining here.
+	if s.draining.Load() {
+		reason, _ := s.restartReason.Load().(string)
+		sock.Close(cloudwire.CloseRestart, reason)
+		sock.AwaitPeer()
+		return
+	}
+	// The close goes before message 1 is read: a browser cannot see the
+	// status of a refused upgrade, but every client reads a close. The
+	// phone's answer is awaited, so it reads the code rather than a reset.
+	if host, ours := s.owner(home); !ours {
+		appWrongShard.Inc()
+		sock.Close(cloudwire.CloseWrongShard, host)
+		sock.AwaitPeer()
+		return
+	}
+	var reading <-chan struct{}
+	code, err := s.serve(conn, home, &reading)
 	if err != nil {
 		s.log.Debug("app session closed", "err", err)
 	}
-	if code != 0 {
-		_ = conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(code, ""), time.Now().Add(time.Second))
+	if code == 0 {
+		return
+	}
+	sock.Close(code, "")
+	if reading != nil {
+		<-reading // the session's reader takes the phone's answer
+	} else {
+		sock.AwaitPeer()
 	}
 }
 
+// owner is the host of the shard that holds home, and whether it is this
+// instance.
+func (s *Server) owner(home string) (string, bool) {
+	if s.Shards == nil {
+		return "", true
+	}
+	return s.Shards.Owner(home)
+}
+
+// Sockets is how many phone sockets are open, handshakes included.
+func (s *Server) Sockets() int { return s.sockets.Len() }
+
+// Drain closes every phone's socket with cloudwire.CloseRestart and reason,
+// the spread in milliseconds, those still in their handshake too, and every
+// socket that comes after.
+func (s *Server) Drain(reason string) {
+	s.restartReason.Store(reason)
+	s.draining.Store(true)
+	s.sockets.CloseAll(cloudwire.CloseRestart, reason)
+}
+
+// WaitClosed waits, at most d, until every phone has answered the drain's
+// close or timed out, and returns how many sockets are still open.
+func (s *Server) WaitClosed(d time.Duration) int { return s.sockets.WaitEmpty(d) }
+
 var errProtocol = errors.New("appsession: the phone broke the protocol")
 
-// serve runs one session and returns the close code to end it with.
-func (s *Server) serve(conn *websocket.Conn, home string) (int, error) {
+// serve runs one session and returns the close code to end it with. Once the
+// session's reader runs, reading is set to a channel that closes when it
+// stops, and only that reader may read the socket.
+func (s *Server) serve(conn *websocket.Conn, home string, reading *<-chan struct{}) (int, error) {
+	start := time.Now()
 	_ = conn.SetReadDeadline(time.Now().Add(handshakeTimeout))
 	kind, msg1, err := conn.ReadMessage()
 	if err != nil {
@@ -246,6 +330,7 @@ func (s *Server) serve(conn *websocket.Conn, home string) (int, error) {
 	if err := c.write(msg2); err != nil {
 		return 0, err
 	}
+	appHandshake.Since(start)
 	keys, err := hs.Split()
 	if err != nil {
 		return websocket.CloseInternalServerErr, err
@@ -259,6 +344,8 @@ func (s *Server) serve(conn *websocket.Conn, home string) (int, error) {
 
 	c.setLooking(hz >= cloudwire.HzLooking)
 	defer c.stopLooking()
+	c.readDone = make(chan struct{})
+	*reading = c.readDone
 	return c.run(sess)
 }
 
@@ -305,28 +392,24 @@ func (s *Server) setLooking(home string, delta int) {
 	}
 	l.n += delta
 	switch {
-	case l.n > 0 && l.stop == nil:
-		l.stop = make(chan struct{})
-		go s.renew(home, l.stop)
+	case l.n > 0 && l.timer == nil:
+		// A timer, not a goroutine per home: it renews the watch every
+		// renewEvery while this look is the home's.
+		var renew func()
+		renew = func() {
+			s.watcher.Watch(home)
+			s.mu.Lock()
+			defer s.mu.Unlock()
+			if s.looking[home] == l && l.n > 0 {
+				l.timer = time.AfterFunc(s.renewEvery, renew)
+			}
+		}
+		l.timer = time.AfterFunc(0, renew)
 	case l.n <= 0:
-		if l.stop != nil {
-			close(l.stop)
+		if l.timer != nil {
+			l.timer.Stop()
 		}
 		delete(s.looking, home)
-	}
-}
-
-func (s *Server) renew(home string, stop <-chan struct{}) {
-	s.watcher.Watch(home)
-	t := time.NewTicker(s.renewEvery)
-	defer t.Stop()
-	for {
-		select {
-		case <-stop:
-			return
-		case <-t.C:
-			s.watcher.Watch(home)
-		}
 	}
 }
 
@@ -383,6 +466,8 @@ type phoneConn struct {
 	// goroutine is done.
 	replies chan []byte
 	quit    chan struct{}
+	// readDone closes when the reader stops.
+	readDone chan struct{}
 
 	// sess is the store's session; tunSid the box session this phone ran
 	// last through the tunnel, when hasTun. Touched by the read loop and,
@@ -450,6 +535,7 @@ func (c *phoneConn) run(sess *store.Session) (int, error) {
 	}
 	read := make(chan result, 1)
 	go func() {
+		defer close(c.readDone)
 		code, err := c.readLoop()
 		read <- result{code, err}
 	}()
@@ -457,22 +543,24 @@ func (c *phoneConn) run(sess *store.Session) (int, error) {
 	defer ping.Stop()
 	for {
 		select {
-		case env := <-sess.C():
-			if err := c.forward(env); err != nil {
+		case out := <-sess.C():
+			if err := c.forward(out.Env); err != nil {
 				return 0, err
 			}
+			envelopeOut.Observe(out.Waited())
 		case env := <-c.replies:
 			if err := c.forward(env); err != nil {
 				return 0, err
 			}
 		case t := <-sess.Tun():
-			env, err := cloudwire.Unsigned(cloudwire.MsgTun, t)
+			env, err := cloudwire.Unsigned(cloudwire.MsgTun, t.AppTun)
 			if err != nil {
 				return 0, err
 			}
 			if err := c.forward(env); err != nil {
 				return 0, err
 			}
+			tunUp.Observe(t.Waited())
 		case <-sess.Done():
 			return sess.Code(), nil
 		case r := <-read:

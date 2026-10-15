@@ -98,3 +98,58 @@ func TestASuspensionHoldsUntilTheRosterMovesPastIt(t *testing.T) {
 		t.Fatal("a purge left the suspension")
 	}
 }
+
+// The writes that narrow access are synced, and the writer goes back to
+// NORMAL after each, so a reconnect storm still costs no syncs.
+func TestDurableWritesLeaveTheWriterAtNormal(t *testing.T) {
+	r, err := Open(filepath.Join(t.TempDir(), "registry.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	now := time.Now()
+	home := "aaaaaaaaaaaaaaaaaaaaaaaaaa"
+	if err := r.Claim(home, []byte("pk"), now); err != nil {
+		t.Fatal(err)
+	}
+	for name, write := range map[string]func() error{
+		"a higher roster": func() error { return r.SetRoster(home, 2, nil, []byte("roster"), now) },
+		"a suspension":    func() error { return r.Suspend(home, "phone", 1, now) },
+		"a dropped token": func() error { return r.TokenDrop(home, "phone") },
+		"a purge":         func() error { return r.Purge(home, nil, now) },
+	} {
+		if err := write(); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		var mode int
+		if err := r.db.QueryRow(`PRAGMA synchronous`).Scan(&mode); err != nil || mode != 1 {
+			t.Fatalf("after %s the writer is at synchronous %d, %v; want 1 (NORMAL)", name, mode, err)
+		}
+	}
+}
+
+// A roster prune lifts a suspension only at the epoch it read: an owner who
+// suspended the device again at its new epoch meanwhile keeps it.
+func TestAPruneDoesNotLiftASuspensionMadeSinceItRead(t *testing.T) {
+	r, err := Open(filepath.Join(t.TempDir(), "registry.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	home, now := "aaaaaaaaaaaaaaaaaaaaaaaaaa", time.Now()
+	_ = r.Claim(home, []byte("pk"), now)
+	_ = r.Suspend(home, "phone", 1, now)
+	// The prune read epoch 1; the owner suspends epoch 2 before it deletes.
+	_ = r.Suspend(home, "phone", 2, now)
+	if err := r.unsuspendAt(home, "phone", 1); err != nil {
+		t.Fatal(err)
+	}
+	if !r.Suspended(home, "phone", 2) {
+		t.Fatal("the suspension at the new epoch was lifted in memory")
+	}
+	var n int
+	_ = r.rd.QueryRow(`SELECT COUNT(*) FROM suspensions WHERE home = ? AND epoch = 2`, home).Scan(&n)
+	if n != 1 {
+		t.Fatal("the suspension at the new epoch was lifted on disk")
+	}
+}

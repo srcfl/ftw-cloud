@@ -2,9 +2,44 @@ package store
 
 import (
 	"bytes"
+	"time"
 
+	"github.com/srcfl/ftw-cloud/internal/metrics"
 	"github.com/srcfl/ftw/go/protocol/cloudwire"
 )
+
+// What the store drops, summed over all homes.
+var (
+	dropSlowPhone = metrics.Drop("phone_too_slow")
+	dropPhoneTun  = metrics.Drop("phone_tun_queue_full")
+)
+
+// Out is one envelope for a phone and when its box frame arrived, so the
+// time it waited here can be measured. At is on the monotonic clock since
+// the process started, eight bytes where a time.Time is 24: each phone's
+// queues hold hundreds.
+type Out struct {
+	Env []byte
+	At  time.Duration
+}
+
+// TunOut is one tun for a phone and when it arrived.
+type TunOut struct {
+	cloudwire.AppTun
+	At time.Duration
+}
+
+// epoch starts the clock Out and TunOut are stamped with.
+var epoch = time.Now()
+
+// stamp is now on that clock.
+func stamp() time.Duration { return time.Since(epoch) }
+
+// Waited is how long the envelope has waited since it arrived.
+func (o Out) Waited() time.Duration { return stamp() - o.At }
+
+// Waited is how long the tun has waited since it arrived.
+func (t TunOut) Waited() time.Duration { return stamp() - t.At }
 
 // Limits on the phones reading one home.
 const (
@@ -34,9 +69,9 @@ const (
 // them. The store ends it when the device's access changes.
 type Session struct {
 	x *Handle
-	c chan []byte
+	c chan Out
 	// tun carries the box's side of the phone's own session.
-	tun chan cloudwire.AppTun
+	tun chan TunOut
 	// sid is the box session the phone runs now, when hasSid.
 	sid    uint32
 	hasSid bool
@@ -78,17 +113,17 @@ func (x *Handle) Open() (Snapshot, *Session, error) {
 	if len(x.h.sessions) >= MaxSessionsPerHome {
 		return Snapshot{}, nil, ErrBusy
 	}
-	sess := &Session{x: x, c: make(chan []byte, SessionQueue), tun: make(chan cloudwire.AppTun, TunQueue),
+	sess := &Session{x: x, c: make(chan Out, SessionQueue), tun: make(chan TunOut, TunQueue),
 		done: make(chan struct{})}
 	x.h.sessions[sess] = struct{}{}
 	return x.snapshotLocked(), sess, nil
 }
 
 // C carries the envelopes to forward.
-func (s *Session) C() <-chan []byte { return s.c }
+func (s *Session) C() <-chan Out { return s.c }
 
 // Tun carries the box's tun messages for this phone.
-func (s *Session) Tun() <-chan cloudwire.AppTun { return s.tun }
+func (s *Session) Tun() <-chan TunOut { return s.tun }
 
 // SetSid records the box session the phone runs now, so the end of the
 // box's uplink reaches it.
@@ -107,8 +142,9 @@ func (s *Session) Ended(sid uint32) {
 		return
 	}
 	select {
-	case s.tun <- cloudwire.AppTun{Sid: sid}:
+	case s.tun <- TunOut{AppTun: cloudwire.AppTun{Sid: sid}, At: stamp()}:
 	default:
+		dropPhoneTun.Inc()
 	}
 }
 
@@ -125,8 +161,9 @@ func (x *Handle) Tun(t cloudwire.Tun) bool {
 			continue
 		}
 		select {
-		case sess.tun <- cloudwire.AppTun{Sid: t.Sid, D: t.D}:
+		case sess.tun <- TunOut{AppTun: cloudwire.AppTun{Sid: t.Sid, D: t.D}, At: stamp()}:
 		default:
+			dropPhoneTun.Inc()
 		}
 		return true
 	}
@@ -141,8 +178,9 @@ func (h *home) tunGoneLocked() {
 			continue
 		}
 		select {
-		case sess.tun <- cloudwire.AppTun{Sid: sess.sid}:
+		case sess.tun <- TunOut{AppTun: cloudwire.AppTun{Sid: sess.sid}, At: stamp()}:
 		default:
+			dropPhoneTun.Inc()
 		}
 		sess.hasSid = false
 	}
@@ -167,13 +205,14 @@ func (s *Session) Close() {
 
 // deliver queues one envelope without ever blocking the box. The caller holds
 // the home's lock.
-func (s *Session) deliver(env []byte) {
+func (s *Session) deliver(env []byte, at time.Duration) {
 	if s.ended {
 		return
 	}
 	select {
-	case s.c <- env:
+	case s.c <- Out{Env: env, At: at}:
 	default:
+		dropSlowPhone.Inc()
 		s.endLocked(closeSlow)
 	}
 }

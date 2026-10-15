@@ -30,6 +30,14 @@ to it yet.
   and when an away box's alert is due. A box whose owner turns the readable
   copy off gets that copy deleted and a signed receipt (`purged {what:
   "copy"}`); a box whose link ends gets its home deleted and a receipt.
+- **Room to grow.** Each home lives on one shard; an instance that does not
+  hold a home names the host that does, and clients follow once
+  (`internal/shard`, protocol "Shards and restarts"). With no `-shards` file
+  one instance holds every home. A deploy closes every socket with 4503 and
+  a spread, so boxes and phones come back over seconds rather than at once.
+  `/metrics` on loopback and one log line a minute count what the service
+  does without naming a home. `deploy/README.md` has the load numbers and
+  when to add a shard.
 - **A restart forgets no one.** At start the service reads every signed
   roster back from the registry and checks it with the home's key, so a
   home's phones are admitted before its box reconnects, and the wait for
@@ -206,7 +214,13 @@ go test -run XXX -fuzz FuzzPhoneMessage -fuzztime 30s ./internal/appsession
 go test -run TestTheSnapshotArrivesFast -v ./internal/appsession   # loopback p50/p95
 go test -run XXX -bench BenchmarkSnapshot ./internal/appsession
 bash scripts/check-imports.sh
+go build -o /tmp/ftwload/ftwcloudd ./cmd/ftwcloudd   # then, briefly and on a quiet machine:
+go run ./cmd/ftwload -ftwcloudd /tmp/ftwload/ftwcloudd -homes 1000 -phones 1 -duration 45s
 ```
+
+`cmd/ftwload` starts its own `ftwcloudd`, drives simulated boxes and phones
+against it, prints latencies (its own and the service's from `/metrics`),
+CPU and memory, and exits by itself.
 
 The wire types come from `github.com/srcfl/ftw/go/protocol`, Apache-2.0,
 pinned to a commit in `go.mod`. A wire change is a pair of pull requests:

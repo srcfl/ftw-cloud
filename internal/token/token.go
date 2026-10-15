@@ -2,8 +2,12 @@
 // GET /v1/now with it. docs/protocol-cloud.md in srcfl/ftw, "Extension
 // token", is the wire format.
 //
-// A token is 32 random bytes, base64url without padding. The registry keeps
-// its SHA-256 and the roster entry it is bound to, never the token. A read
+// A token is the home id, a dot, and 32 random bytes in base64url without
+// padding. The home id lets any instance of the service tell which shard
+// holds the token and send the reader there (421 with Ftw-Shard). The
+// registry keeps the SHA-256 of the random bytes and the roster entry they
+// are bound to, never the token, and a token whose home is not its row's is
+// refused. A read
 // reaches the home only through store.For with that roster entry, so a token
 // stops working the moment the roster drops the device, moves its epoch or
 // runs out, an owner suspends the device, or the grant ends. It reads the
@@ -23,7 +27,9 @@ import (
 	"time"
 
 	"github.com/fxamacker/cbor/v2"
+	"github.com/srcfl/ftw-cloud/internal/metrics"
 	"github.com/srcfl/ftw-cloud/internal/registry"
+	"github.com/srcfl/ftw-cloud/internal/shard"
 	"github.com/srcfl/ftw-cloud/internal/store"
 	"github.com/srcfl/ftw/go/protocol/cloudwire"
 )
@@ -50,6 +56,29 @@ type Service struct {
 	reg   *registry.Registry
 	log   *slog.Logger
 	now   func() time.Time
+
+	// Shards says which homes this instance holds. Nil holds every home.
+	// Set before serving.
+	Shards *shard.Directory
+}
+
+var wrongShard = metrics.WrongShard("now")
+
+// errWrongShard is a token another shard holds; host is that shard's.
+type errWrongShard struct{ host string }
+
+func (e errWrongShard) Error() string { return "token: another shard holds this home" }
+
+// Split reads a token as its home id and its secret. A token from before
+// shards has no home id. ok is false when the token cannot be one.
+func Split(tok string) (home, secret string, ok bool) {
+	home, secret, dotted := strings.Cut(tok, ".")
+	if !dotted {
+		home, secret = "", tok
+	} else if !cloudwire.ValidHome(home) {
+		return "", "", false
+	}
+	return home, secret, secret != ""
 }
 
 // New builds the service.
@@ -82,7 +111,7 @@ func (s *Service) Issue(home string, dev cloudwire.Device) (cloudwire.Token, err
 		}
 		return cloudwire.Token{}, store.ErrDenied
 	}
-	return cloudwire.Token{Token: base64.RawURLEncoding.EncodeToString(raw), ExpiresInS: int64(Life / time.Second)}, nil
+	return cloudwire.Token{Token: home + "." + base64.RawURLEncoding.EncodeToString(raw), ExpiresInS: int64(Life / time.Second)}, nil
 }
 
 // Drop forgets a device's token, as when an owner suspends it.
@@ -122,7 +151,13 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	body, err := s.read(r.Header.Get("Authorization"))
+	var moved errWrongShard
 	switch {
+	case errors.As(err, &moved):
+		wrongShard.Inc()
+		w.Header().Set(cloudwire.ShardHeader, moved.host)
+		w.WriteHeader(cloudwire.StatusWrongShard)
+		return
 	case errors.Is(err, store.ErrDenied):
 		w.Header().Set("WWW-Authenticate", "Bearer")
 		w.WriteHeader(http.StatusUnauthorized)
@@ -142,7 +177,16 @@ func (s *Service) read(auth string) ([]byte, error) {
 	if !ok || !strings.EqualFold(scheme, "Bearer") {
 		return nil, store.ErrDenied
 	}
-	raw, err := base64.RawURLEncoding.DecodeString(strings.TrimSpace(value))
+	home, secret, ok := Split(strings.TrimSpace(value))
+	if !ok {
+		return nil, store.ErrDenied
+	}
+	if home != "" && s.Shards != nil {
+		if host, ours := s.Shards.Owner(home); !ours {
+			return nil, errWrongShard{host}
+		}
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(secret)
 	if err != nil || len(raw) != tokenBytes {
 		return nil, store.ErrDenied
 	}
@@ -151,7 +195,7 @@ func (s *Service) read(auth string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	if !ok {
+	if !ok || (home != "" && row.Home != home) {
 		return nil, store.ErrDenied
 	}
 	x, err := s.store.For(store.Principal{Kind: store.Token, Home: row.Home, DeviceID: row.DeviceID, Epoch: row.Epoch})

@@ -1,6 +1,7 @@
 package registry
 
 import (
+	"context"
 	"database/sql"
 	"time"
 
@@ -61,7 +62,7 @@ CREATE TABLE IF NOT EXISTS push (
 
 // PushHomes lists the homes with a registration of a kind.
 func (r *Registry) PushHomes(kind string) ([]string, error) {
-	rows, err := r.db.Query(`SELECT DISTINCT home FROM push WHERE kind = ?`, kind)
+	rows, err := r.rd.Query(`SELECT DISTINCT home FROM push WHERE kind = ?`, kind)
 	if err != nil {
 		return nil, err
 	}
@@ -84,23 +85,29 @@ func (r *Registry) PushRegister(reg PushReg) error {
 	if app == "" {
 		app = cloudwire.PushAppIPhone
 	}
-	_, err := r.db.Exec(`INSERT INTO push (home, device_id, epoch, token, environment, kind, app, registered_ms)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-		ON CONFLICT (home, token, kind) DO UPDATE SET device_id = excluded.device_id, epoch = excluded.epoch,
-			environment = excluded.environment, app = excluded.app, registered_ms = excluded.registered_ms`,
-		reg.Home, reg.DeviceID, int64(reg.Epoch), reg.Token, reg.Environment, reg.Kind, app, reg.At.UnixMilli())
-	return err
+	// A phone registers rarely and does not register again until its next
+	// start, so the write is synced.
+	return r.durably(func(ctx context.Context, c *sql.Conn) error {
+		_, err := c.ExecContext(ctx, `INSERT INTO push (home, device_id, epoch, token, environment, kind, app, registered_ms)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+			ON CONFLICT (home, token, kind) DO UPDATE SET device_id = excluded.device_id, epoch = excluded.epoch,
+				environment = excluded.environment, app = excluded.app, registered_ms = excluded.registered_ms`,
+			reg.Home, reg.DeviceID, int64(reg.Epoch), reg.Token, reg.Environment, reg.Kind, app, reg.At.UnixMilli())
+		return err
+	})
 }
 
 // PushUnregister forgets one of a device's tokens.
 func (r *Registry) PushUnregister(home, deviceID string, token []byte) error {
-	_, err := r.db.Exec(`DELETE FROM push WHERE home = ? AND device_id = ? AND token = ?`, home, deviceID, token)
-	return err
+	return r.durably(func(ctx context.Context, c *sql.Conn) error {
+		_, err := c.ExecContext(ctx, `DELETE FROM push WHERE home = ? AND device_id = ? AND token = ?`, home, deviceID, token)
+		return err
+	})
 }
 
 // PushRegs returns a home's registrations of one kind.
 func (r *Registry) PushRegs(home, kind string) ([]PushReg, error) {
-	rows, err := r.db.Query(`SELECT device_id, epoch, token, environment, app, registered_ms FROM push
+	rows, err := r.rd.Query(`SELECT device_id, epoch, token, environment, app, registered_ms FROM push
 		WHERE home = ? AND kind = ? ORDER BY registered_ms`, home, kind)
 	if err != nil {
 		return nil, err
@@ -144,7 +151,7 @@ func (r *Registry) PushTrim(home, deviceID, kind string, keep int) error {
 // PushPrune keeps only the registrations keep allows: a device at its epoch,
 // for one kind, as a new roster says.
 func (r *Registry) PushPrune(home string, keep func(deviceID string, epoch uint64, kind string) bool) error {
-	rows, err := r.db.Query(`SELECT DISTINCT device_id, epoch, kind FROM push WHERE home = ?`, home)
+	rows, err := r.rd.Query(`SELECT DISTINCT device_id, epoch, kind FROM push WHERE home = ?`, home)
 	if err != nil {
 		return err
 	}
