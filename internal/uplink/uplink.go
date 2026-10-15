@@ -539,7 +539,14 @@ func (c *boxConn) run() error {
 			_ = old.conn.Close()
 		}
 		c.u.conns[c.home] = c
+		// Drain sets draining before it takes the list under this lock, so
+		// a connection it did not see sees draining here.
+		drained := c.u.draining.Load()
 		c.u.mu.Unlock()
+		if drained {
+			reason, _ := c.u.restartReason.Load().(string)
+			c.closeWith(cloudwire.CloseRestart, reason)
+		}
 		defer func() {
 			c.u.mu.Lock()
 			current := c.u.conns[c.home] == c
