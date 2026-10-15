@@ -327,7 +327,8 @@ func TestASecondUplinkReplacesTheFirst(t *testing.T) {
 func TestDownlinkIsTheProtocolsClosedSet(t *testing.T) {
 	s := newService(t)
 	all := []down{challenge{V: 1, Nonce: make([]byte, 32)}, helloOK{Have: map[string]string{}},
-		watch{Hz: 1}, resync{What: []string{cloudwire.ResyncFull}}, purged{What: cloudwire.PurgedHome}}
+		watch{Hz: 1}, resync{What: []string{cloudwire.ResyncFull}}, purged{What: cloudwire.PurgedHome},
+		tun{Dev: "q5Lw0Zb1", Sid: 1, D: []byte{1}}}
 	var names []string
 	for _, m := range all {
 		frame, err := s.up.encodeDown("home", m)
@@ -378,5 +379,32 @@ func FuzzBoxMessage(f *testing.F) {
 			return
 		}
 		_, _ = c.apply(env)
+	})
+}
+
+// Whatever tun body a box sends, the service routes it, ends it or closes,
+// and never panics.
+func FuzzBoxTun(f *testing.F) {
+	key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	pk, _ := cloudwire.PublicKeyBytesOf(&key.PublicKey)
+	home := cloudwire.HomeID(pk)
+	for _, seed := range []any{
+		cloudwire.Tun{Dev: "owner", Sid: 1, D: []byte{1}},
+		cloudwire.Tun{Dev: "owner", Sid: 1},
+		map[string]any{"dev": 7, "sid": "x", "d": "y"},
+	} {
+		body, _ := cloudwire.Marshal(seed)
+		f.Add(body)
+	}
+	f.Fuzz(func(t *testing.T, body []byte) {
+		st := store.New(nil)
+		u := New(st, nil, key, slog.New(slog.NewTextHandler(io.Discard, nil)))
+		handle, _ := st.For(store.Principal{Kind: store.Box, Home: home})
+		now := time.Now()
+		c := &boxConn{u: u, home: home, pub: &key.PublicKey, handle: handle, tun: true,
+			write:  func([]byte) error { return nil },
+			upMsgs: newBucket(tunMsgBurst, tunMsgPerSec, now), upBytes: newBucket(tunByteBurst, tunBytePerSec, now),
+			upHardMsgs: newBucket(2*tunMsgBurst, 2*tunMsgPerSec, now), upHardBytes: newBucket(2*tunByteBurst, 2*tunBytePerSec, now)}
+		_ = c.fromBox(cloudwire.Envelope{T: cloudwire.MsgTun, B: body})
 	})
 }

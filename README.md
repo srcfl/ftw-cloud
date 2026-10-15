@@ -1,8 +1,10 @@
 # FTW Cloud
 
-FTW Cloud keeps a signed, readable copy of each home that turns it on, and
-serves it to that home's phones. It reads and never controls. The box opens
-the connection, picks and signs every message, and can revoke at any time.
+FTW Cloud is the one door between a home's phones and its box. It carries
+each phone's own Noise session with the box as ciphertext it cannot read or
+forge, and keeps a signed, readable copy of each home whose owner turns that
+on. It never chooses an action. The box opens the connection, picks and signs
+every message but the phones' ciphertext, and can revoke at any time.
 
 This is `ftwcloudd`, the service. The decision is
 [ADR 0008](https://github.com/srcfl/ftw/blob/master/docs/adr/0008-ftw-cloud.md)
@@ -21,10 +23,40 @@ to it yet.
 - Each home's newest message of each class lives in memory, as the exact bytes
   the box sent. Readings are dropped an hour after the box goes quiet and are
   never written to disk.
+- What the service holds follows the newest roster's grant, never `hello`:
+  the readable copy can turn on or off while the uplink stays up.
 - The registry (SQLite) holds the home id, the box key, the signed roster,
-  owners' suspensions, APNs registrations and the hashes of extension
-  tokens. A box that turns FTW Cloud off gets its home deleted
-  and a signed receipt.
+  owners' suspensions, APNs registrations, the hashes of extension tokens
+  and when an away box's alert is due. A box whose owner turns the readable
+  copy off gets that copy deleted and a signed receipt (`purged {what:
+  "copy"}`); a box whose link ends gets its home deleted and a receipt.
+- **A restart forgets no one.** At start the service reads every signed
+  roster back from the registry and checks it with the home's key, so a
+  home's phones are admitted before its box reconnects, and the wait for
+  `box.unreachable` resumes where it was. A connection becomes the home's
+  only after `hello_ok` has gone, so nothing reaches a box ahead of it.
+- **The tunnel.** A box that lists `tun` in `hello.caps` takes its phones'
+  sessions: a phone sends `tun {sid, d}` on its app session, where `d` is its
+  `ftw.session.v1` session with the box byte for byte; the service adds the
+  device id of the roster entry its own handshake matched and sends `tun
+  {dev, sid, d}` down `/v1/box`, and the box's answers come back the same
+  way. The box session's first message may ride in the app session's message
+  1 (`now.tun`), so it is up one round trip after TLS. An empty `d` ends a
+  session: the box hears when the phone's app session ends, and the phone
+  when the box's uplink does, or when the box dials again. From the box,
+  tun rides a queue of its own per phone session, apart from the readings;
+  from a phone it is written straight to the box's socket. Each direction
+  has limits per home: 240 messages then 60 a second, 4 MiB then 512 KiB a
+  second. Past them the service drops and counts, and logs the count each
+  minute; a box at twice them is closed, and so is a phone. A roster device
+  needs `tun` or a readable copy to be admitted at all.
+- **Pairing through the service.** While a QR code is on the box's screen,
+  its roster lists the code's hash. A new phone proves the hash in `now.pair`
+  and is admitted once, as a device that may only open a tunnel; the box
+  checks the code itself inside the phone's handshake. When the roster lists
+  the new phone its session takes that entry and stays open.
+- The web app may open `/v1/app` from `https://app.ftw.energy`; any other
+  `Origin` is refused.
 - `/source` serves the source of the running build, as AGPL-3.0 asks, and
   names its commit and image digest.
 - A phone reads its home at `/v1/app?home=<id>`: Noise IK to the service's
@@ -95,7 +127,7 @@ Not built yet:
 box ──wss, TLS 1.3, signed frames──▶ /v1/box ──▶ store (memory) ◀── store.For(principal) ◀── /v1/app ◀──Noise IK── phone
                                          │                                  ◀── /v1/app/once ◀──Noise IK in one POST── watch
                                          │                                  ◀── /v1/now ◀──token──── widget
-                                         └────▶ registry (SQLite: key, roster, tombstones, suspensions, APNs, token hashes)
+                                         └────▶ registry (SQLite: key, roster, tombstones, suspensions, APNs, token hashes, away)
 ```
 
 - **The home id is a hash of the box's key.** It comes from the key that
@@ -107,13 +139,15 @@ box ──wss, TLS 1.3, signed frames──▶ /v1/box ──▶ store (memory) 
   principal reads only `live`, `prices` and `hb` within that same scope. There is no
   listing and no principal for staff; `TestNoRouteReadsAHome` checks every
   route.
-- **A phone or a watch can narrow and nothing else.** A phone can say
-  whether it is looking, and an owner can suspend a device in the roster. A
-  watch can read, ask for its token and register for push. Commands go to
-  the box over the relay, never through here.
-- **The service sends five things.** `challenge`, `hello_ok`, `watch`,
-  `resync` and `purged` are the whole downlink, and none asks the box to act.
-  The box closes the uplink on anything else.
+- **A phone or a watch can narrow, and talk to its own box.** A phone can
+  say whether it is looking, an owner can suspend a device in the roster, and
+  a phone sends its box session as `tun`, which the service cannot read. A
+  watch can read, ask for its token and register for push.
+- **The service sends six things.** `challenge`, `hello_ok`, `watch`,
+  `resync`, `purged` and `tun` are the whole downlink. The first five ask
+  the box for nothing; `tun` carries a phone's ciphertext, which the box
+  judges as it judges the same session over the relay. The box closes the
+  uplink on anything else.
 - **No TLS terminator in front.** Box and service bind the handshake to the
   TLS session, so `ftwcloudd` ends TLS itself. A TCP load balancer is fine.
 - **Root on the host can read memory.** The privacy notice says so.

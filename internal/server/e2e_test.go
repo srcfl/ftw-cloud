@@ -62,6 +62,8 @@ type stack struct {
 	serviceKey *ecdsa.PrivateKey
 	noise      appwire.KeyPair
 	apple      *capturedApple
+	up         *uplink.Uplink
+	reg        *registry.Registry
 }
 
 func newStack(t *testing.T) *stack {
@@ -82,16 +84,16 @@ func newStack(t *testing.T) *stack {
 	pushSvc.WatchApp = "energy.ftw.app.watchkitapp"
 	tokens := token.New(st, reg, log)
 	app := appsession.New(st, reg, up, noise, log)
-	app.Push, app.Tokens = pushSvc, tokens
+	app.Push, app.Tokens, app.Tunnel = pushSvc, tokens, up
 	up.OnHeld = pushSvc.Held
 	up.OnRoster = func(home string, r *cloudwire.Roster) {
 		pushSvc.Roster(home, r)
 		tokens.Roster(home, r)
 	}
 	up.OnGone = pushSvc.BoxGone
-	up.OnConnect = func(home string) {
+	up.OnConnect = func(home string, conn uint64) {
 		app.BoxConnected(home)
-		pushSvc.BoxConnected(home)
+		pushSvc.BoxConnected(home, conn)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -102,7 +104,7 @@ func newStack(t *testing.T) *stack {
 	srv.TLS = &tls.Config{MinVersion: tls.VersionTLS13}
 	srv.StartTLS()
 	t.Cleanup(srv.Close)
-	return &stack{t: t, srv: srv, st: st, serviceKey: serviceKey, noise: noise, apple: apple}
+	return &stack{t: t, srv: srv, st: st, serviceKey: serviceKey, noise: noise, apple: apple, up: up, reg: reg}
 }
 
 // testBox is a box's half of the uplink.

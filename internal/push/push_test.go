@@ -94,6 +94,7 @@ type rig struct {
 	apple  *fakeApple
 	clock  *timers
 	home   string
+	conn   uint64
 	owner  cloudwire.Device
 	viewer cloudwire.Device
 	all    []string
@@ -119,6 +120,15 @@ func newRig(t *testing.T) *rig {
 		Scopes: []string{protocol.ScopeLiveRead}, Epoch: 1}
 	return r
 }
+
+// connected and gone are the uplink's hooks for one connection after
+// another.
+func (r *rig) connected() {
+	r.conn++
+	r.svc.BoxConnected(r.home, r.conn)
+}
+
+func (r *rig) gone(why string) { r.svc.BoxGone(r.home, why, r.conn) }
 
 // drain runs what the uplink queued, as Run would.
 func (r *rig) drain() {
@@ -222,7 +232,7 @@ func TestASuspendedDeviceGetsNothingUntilTheSuspensionEnds(t *testing.T) {
 		t.Fatalf("while suspended, sent to %v", got)
 	}
 	// box.unreachable takes the same road.
-	r.svc.BoxGone(r.home, "")
+	r.gone("")
 	r.clock.advance(10 * time.Minute)
 	if got := tokens(); len(got) != 1 || got[0] != "owner-token" {
 		t.Fatalf("unreachable went to %v", got)
@@ -301,8 +311,8 @@ func unreachableSent(t *testing.T, r *rig) int {
 func TestBoxUnreachableAfterTenMinutesOncePerOutage(t *testing.T) {
 	r := newRig(t)
 	_ = r.register(t, r.owner, r.all, "tok")
-	r.svc.BoxConnected(r.home)
-	r.svc.BoxGone(r.home, "")
+	r.connected()
+	r.gone("")
 	r.clock.advance(599 * time.Second)
 	if n := unreachableSent(t, r); n != 0 {
 		t.Fatal("before ten minutes")
@@ -316,8 +326,8 @@ func TestBoxUnreachableAfterTenMinutesOncePerOutage(t *testing.T) {
 		t.Fatalf("sent %d over one outage", n)
 	}
 	// Back and away again is a new outage.
-	r.svc.BoxConnected(r.home)
-	r.svc.BoxGone(r.home, cloudwire.ByeShutdown)
+	r.connected()
+	r.gone(cloudwire.ByeShutdown)
 	r.clock.advance(601 * time.Second)
 	if n := unreachableSent(t, r); n != 2 {
 		t.Fatalf("sent %d over two outages", n)
@@ -327,10 +337,10 @@ func TestBoxUnreachableAfterTenMinutesOncePerOutage(t *testing.T) {
 func TestABoxBackInTimeSaysNothing(t *testing.T) {
 	r := newRig(t)
 	_ = r.register(t, r.owner, r.all, "tok")
-	r.svc.BoxConnected(r.home)
-	r.svc.BoxGone(r.home, "")
+	r.connected()
+	r.gone("")
 	r.clock.advance(5 * time.Minute)
-	r.svc.BoxConnected(r.home)
+	r.connected()
 	r.clock.advance(time.Hour)
 	if n := unreachableSent(t, r); n != 0 {
 		t.Fatalf("sent %d for a box that came back", n)
@@ -342,19 +352,19 @@ func TestABoxBackInTimeSaysNothing(t *testing.T) {
 func TestAPlannedUpdateHoldsItBackForAnHour(t *testing.T) {
 	r := newRig(t)
 	_ = r.register(t, r.owner, r.all, "tok")
-	r.svc.BoxConnected(r.home)
-	r.svc.BoxGone(r.home, cloudwire.ByeUpdate)
+	r.connected()
+	r.gone(cloudwire.ByeUpdate)
 	r.clock.advance(20 * time.Minute)
 	if n := unreachableSent(t, r); n != 0 {
 		t.Fatal("an update was reported as out of reach")
 	}
-	r.svc.BoxConnected(r.home)
+	r.connected()
 	r.clock.advance(2 * time.Hour)
 	if n := unreachableSent(t, r); n != 0 {
 		t.Fatal("an update that came back was reported")
 	}
 
-	r.svc.BoxGone(r.home, cloudwire.ByeUpdate)
+	r.gone(cloudwire.ByeUpdate)
 	r.clock.advance(time.Hour + time.Second)
 	if n := unreachableSent(t, r); n != 1 {
 		t.Fatalf("an update still away after an hour: %d", n)
@@ -364,8 +374,8 @@ func TestAPlannedUpdateHoldsItBackForAnHour(t *testing.T) {
 func TestARevokedHomeHasNoDeadMan(t *testing.T) {
 	r := newRig(t)
 	_ = r.register(t, r.owner, r.all, "tok")
-	r.svc.BoxConnected(r.home)
-	r.svc.BoxGone(r.home, cloudwire.ByeRevoked)
+	r.connected()
+	r.gone(cloudwire.ByeRevoked)
 	r.clock.advance(2 * time.Hour)
 	if n := unreachableSent(t, r); n != 0 {
 		t.Fatal("a revoked home was reported out of reach")

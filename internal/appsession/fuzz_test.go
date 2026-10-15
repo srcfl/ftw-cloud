@@ -8,13 +8,28 @@ import (
 	"github.com/srcfl/ftw/go/protocol/cloudwire"
 )
 
+// tunRecorder is the uplink, as the fuzz sees it: what reached the box.
+type tunRecorder struct{ got []cloudwire.Tun }
+
+func (r *tunRecorder) Tun(_ string, t cloudwire.Tun) bool {
+	r.got = append(r.got, t)
+	return true
+}
+
 // Whatever a phone sends after the handshake, the service neither panics nor
 // does more than the protocol allows: a phone can change whether it looks,
-// and an owner can suspend a device in the roster. Nothing else changes.
+// an owner can suspend a device in the roster, and a tun reaches the box
+// under the device the handshake proved, never one the phone named. Nothing
+// else changes.
 func FuzzPhoneMessage(f *testing.F) {
 	h := newHarness(f)
 	h.live(true)
+	rec := &tunRecorder{}
+	h.app.Tunnel = rec
 	for _, seed := range [][]byte{
+		mustFrame(cloudwire.MsgTun, cloudwire.AppTun{Sid: 1, D: []byte{1, 2, 3}}),
+		mustFrame(cloudwire.MsgTun, map[string]any{"dev": "owner", "sid": 2, "d": []byte{4}}),
+		mustFrame(cloudwire.MsgTun, cloudwire.AppTun{Sid: 3}),
 		mustFrame(cloudwire.MsgWatch, cloudwire.Watch{Hz: 1}),
 		mustFrame(cloudwire.MsgWatch, cloudwire.Watch{Hz: 0}),
 		mustFrame(cloudwire.MsgSuspend, cloudwire.Suspend{DeviceID: "viewer"}),
@@ -32,10 +47,17 @@ func FuzzPhoneMessage(f *testing.F) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			c := &phoneConn{s: h.app, dev: dev, home: h.home, tokens: rateBurst, refilled: h.app.now()}
+			c := &phoneConn{s: h.app, dev: dev, home: h.home, tokens: rateBurst, refilled: h.app.now(),
+				tunTokens: tunBurst, tunAt: h.app.now()}
+			rec.got = nil
 			code, err := c.apply(frame)
 			if err != nil && code != cloudwire.CloseProtocol && code != 0 {
 				t.Fatalf("closed with %d", code)
+			}
+			for _, sent := range rec.got {
+				if sent.Dev != dev.Device().ID || !dev.Device().Tun {
+					t.Fatalf("a tun reached the box as %q from %q", sent.Dev, dev.Device().ID)
+				}
 			}
 			c.stopLooking()
 			// Only the owner may suspend, and only the viewer exists to be
@@ -59,6 +81,9 @@ func FuzzPhoneMessage(f *testing.F) {
 func FuzzNow(f *testing.F) {
 	now, _ := cloudwire.Unsigned(cloudwire.MsgNow, cloudwire.Now{Hz: 1})
 	f.Add(now)
+	pair, _ := cloudwire.Unsigned(cloudwire.MsgNow, cloudwire.Now{Hz: 1, Pair: make([]byte, 32),
+		Tun: &cloudwire.AppTun{Sid: 1, D: []byte{1}}})
+	f.Add(pair)
 	f.Add([]byte{0xa0})
 	f.Fuzz(func(t *testing.T, payload []byte) {
 		_, _ = parseNow(payload)

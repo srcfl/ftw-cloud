@@ -59,6 +59,24 @@ CREATE TABLE IF NOT EXISTS push (
 	return nil
 }
 
+// PushHomes lists the homes with a registration of a kind.
+func (r *Registry) PushHomes(kind string) ([]string, error) {
+	rows, err := r.db.Query(`SELECT DISTINCT home FROM push WHERE kind = ?`, kind)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var h string
+		if err := rows.Scan(&h); err != nil {
+			return nil, err
+		}
+		out = append(out, h)
+	}
+	return out, rows.Err()
+}
+
 // PushRegister keeps a device's token. A token already registered for the
 // home moves to this device: a phone that paired again keeps its token.
 func (r *Registry) PushRegister(reg PushReg) error {
