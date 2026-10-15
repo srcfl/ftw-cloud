@@ -1,7 +1,6 @@
 package uplink
 
 import (
-	"sync"
 	"bytes"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -14,6 +13,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
