@@ -23,6 +23,7 @@ import (
 	"github.com/srcfl/ftw-cloud/internal/appsession"
 	"github.com/srcfl/ftw-cloud/internal/push"
 	"github.com/srcfl/ftw-cloud/internal/registry"
+	"github.com/srcfl/ftw-cloud/internal/relay"
 	"github.com/srcfl/ftw-cloud/internal/store"
 	"github.com/srcfl/ftw-cloud/internal/token"
 	"github.com/srcfl/ftw-cloud/internal/uplink"
@@ -97,7 +98,8 @@ func newStack(t *testing.T) *stack {
 	t.Cleanup(cancel)
 	go pushSvc.Run(ctx)
 
-	s := &Server{Store: st, Registry: reg, Uplink: up, App: app, Tokens: tokens, Log: log}
+	s := &Server{Store: st, Registry: reg, Uplink: up, App: app, Tokens: tokens,
+		Relay: relay.New(relay.Options{Log: log, BoxKeys: reg}), Log: log}
 	srv := httptest.NewUnstartedServer(s.Handler())
 	srv.TLS = &tls.Config{MinVersion: tls.VersionTLS13}
 	srv.StartTLS()

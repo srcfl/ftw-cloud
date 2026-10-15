@@ -25,7 +25,8 @@ services:
       # /source publishes it, so anyone can compare it with what CI built.
       FTW_CLOUD_IMAGE: ${FTW_CLOUD_IMAGE}
     volumes:
-      # The registry and certificates. No readings are ever written here.
+      # The registry, certificates, and sealed dead-man rows (deadman.json).
+      # No readings are ever written here.
       - ftw-cloud-state:/state
       # Apple's push key, read from Parameter Store into tmpfs at boot by
       # deploy/apns.sh. Empty means no alerts, and the service runs.

@@ -15,6 +15,7 @@ import (
 
 	"github.com/srcfl/ftw-cloud/internal/appsession"
 	"github.com/srcfl/ftw-cloud/internal/registry"
+	"github.com/srcfl/ftw-cloud/internal/relay"
 	"github.com/srcfl/ftw-cloud/internal/store"
 	"github.com/srcfl/ftw-cloud/internal/token"
 	"github.com/srcfl/ftw-cloud/internal/uplink"
@@ -35,7 +36,7 @@ func newServer(t *testing.T) (*Server, string) {
 	up := uplink.New(st, reg, key, log)
 	noise, _ := appwire.GenerateKeyPair()
 	s := &Server{Store: st, Registry: reg, Uplink: up, App: appsession.New(st, reg, up, noise, log),
-		Tokens: token.New(st, reg, log), Log: log}
+		Tokens: token.New(st, reg, log), Relay: relay.New(relay.Options{Log: log, BoxKeys: reg}), Log: log}
 
 	// A home with readings in it, held the way a box's uplink holds them.
 	const home = "canaryhomecanaryhomecanary"
@@ -68,6 +69,22 @@ func TestNoRouteReadsAHome(t *testing.T) {
 				t.Fatalf("%s %s has no source link", m, p)
 			}
 		}
+	}
+}
+
+// A command posted at the exchange door is not a reading, and the reading
+// the service holds is not an answer.
+func TestACommandIsNotServedAsAReading(t *testing.T) {
+	s, _ := newServer(t)
+	body := bytes.Repeat([]byte{0x11}, 536)
+	copy(body, []byte("COMMAND-MARKER"))
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest(http.MethodPost, "/x/1/0123456789abcdef0123456789abcdef", bytes.NewReader(body))
+	r.Header.Set("Content-Type", "application/octet-stream")
+	r.RemoteAddr = "192.0.2.8:80"
+	s.Handler().ServeHTTP(w, r)
+	if bytes.Contains(w.Body.Bytes(), []byte("CANARY")) || bytes.Contains(w.Body.Bytes(), []byte("COMMAND-MARKER")) {
+		t.Fatalf("exchange body %q", w.Body.Bytes())
 	}
 }
 

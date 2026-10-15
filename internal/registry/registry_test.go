@@ -1,10 +1,15 @@
 package registry
 
 import (
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"errors"
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/srcfl/ftw/go/protocol/cloudwire"
 )
 
 func open(t *testing.T) *Registry {
@@ -32,6 +37,38 @@ func TestAHomeIsClaimedOnceAndKeepsItsRoster(t *testing.T) {
 	h, ok, err := r.Get("h1")
 	if err != nil || !ok || h.RosterSeq != 3 || string(h.Roster) != "signed roster" || !h.CreatedAt.Equal(now) {
 		t.Fatalf("home %+v, %v, %v", h, ok, err)
+	}
+}
+
+func TestRecognizesBoxKeyIsTheRegisteredKeyOnly(t *testing.T) {
+	r := open(t)
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pk, err := key.PublicKey.Bytes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.RecognizesBoxKey(pk) {
+		t.Fatal("an unregistered key was recognised")
+	}
+	if err := r.Claim(cloudwire.HomeID(pk), pk, time.UnixMilli(1_700_000_000_000)); err != nil {
+		t.Fatal(err)
+	}
+	if !r.RecognizesBoxKey(pk) {
+		t.Fatal("the registered key was not recognised")
+	}
+	other := append([]byte(nil), pk...)
+	other[len(other)-1] ^= 0xff
+	if r.RecognizesBoxKey(other) || r.RecognizesBoxKey(nil) || r.RecognizesBoxKey(pk[:8]) {
+		t.Fatal("a key that is not the home's was recognised")
+	}
+	if err := r.Purge(cloudwire.HomeID(pk), nil, time.UnixMilli(1_700_000_000_000)); err != nil {
+		t.Fatal(err)
+	}
+	if r.RecognizesBoxKey(pk) {
+		t.Fatal("a purged home's key was still recognised")
 	}
 }
 
