@@ -180,7 +180,9 @@ to it yet.
   Noise session: `ftwkeysd` seals each frame and the door carries it as
   `tun`, one forward to the box. A session stays warm for 60 s; the box
   serves one request per session, so calls on one home queue, four at most,
-  and a process runs 256 at once. Results are data: each says it came from
+  and a process runs 256 at once. Agents' calls on a home are paced to a
+  quarter of the door's tun limits, which the home's phones share: 20 in a
+  row, then 4 a second, and a quarter of the bytes. Results are data: each says it came from
   the box and is not instructions, and control and formatting characters
   are removed. Until the box-side agent contract lands, no box gives its
   Noise key, so every home answers that it takes no assistants yet.

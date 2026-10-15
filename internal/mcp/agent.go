@@ -58,6 +58,7 @@ type Pool struct {
 
 	mu    sync.Mutex
 	conns map[connKey]*agentConn
+	paces map[string]*pacer
 }
 
 type connKey struct{ home, agent string }
@@ -79,7 +80,8 @@ func NewPool(st *store.Store, door Door, keys Keys, boxKey BoxKey, log *slog.Log
 		log = slog.Default()
 	}
 	return &Pool{store: st, door: door, keys: keys, boxKey: boxKey, log: log, now: time.Now,
-		Handshake: 5 * time.Second, Idle: 60 * time.Second, Call: 15 * time.Second, conns: map[connKey]*agentConn{}}
+		Handshake: 5 * time.Second, Idle: 60 * time.Second, Call: 15 * time.Second, conns: map[connKey]*agentConn{},
+		paces: map[string]*pacer{}}
 }
 
 type pool = Pool
@@ -109,6 +111,7 @@ func (p *Pool) sweep() {
 			delete(p.conns, k)
 		}
 	}
+	p.forgetFullPacesLocked(now)
 	p.mu.Unlock()
 	for _, c := range idle {
 		c.close(errIdle)
@@ -455,6 +458,9 @@ func (c *agentConn) take(ctx context.Context) (func(), error) {
 		c.used = c.p.now()
 		c.mu.Unlock()
 	}()
+	if err := c.p.pace(c.home).wait(ctx, c.p.now); err != nil {
+		return nil, err
+	}
 	select {
 	case c.turn <- struct{}{}:
 		return func() {
@@ -576,6 +582,7 @@ func (c *agentConn) api(ctx context.Context, method, path string, query map[stri
 				}
 				ans.Body = append(ans.Body, ck.Data...)
 			case protocol.MsgAPIEnd:
+				c.p.pace(c.home).spend(len(ans.Body), c.p.now())
 				var end protocol.APIEnd
 				if cbor.Unmarshal(env.B, &end) == nil && end.Truncated {
 					return ans, userError("The box's answer is too large. Ask for less.")
