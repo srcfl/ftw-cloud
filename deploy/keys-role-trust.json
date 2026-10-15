@@ -1,0 +1,11 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "TheHostFetchesCredentialsForFtwkeysd",
+      "Effect": "Allow",
+      "Principal": { "AWS": "arn:aws:iam::976075258475:role/ftw-cloud-host" },
+      "Action": "sts:AssumeRole"
+    }
+  ]
+}

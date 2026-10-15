@@ -3,6 +3,10 @@ package keys
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
@@ -15,6 +19,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/srcfl/ftw/go/protocol"
 	"github.com/srcfl/ftw/go/protocol/appwire"
 )
 
@@ -513,30 +518,92 @@ func TestManySessionsAtOnce(t *testing.T) {
 	wg.Wait()
 }
 
-// The offer key: made once, sealed, the same after a restart, and it signs
-// only offers. A signature verifies with its public half and nothing else
-// does.
-func TestTheOfferKeySignsOffers(t *testing.T) {
+// offerFor is a well-formed offer for key pub, as FTW Cloud makes one.
+func offerFor(t *testing.T, pub []byte, edit func(*protocol.GrantOffer)) []byte {
+	t.Helper()
+	o := protocol.GrantOffer{
+		V: protocol.GrantOfferVersion, Key: pub, Role: protocol.RoleAgent,
+		Client: "Claude", ClientID: "https://claude.ai/oauth/mcp-oauth-client-metadata", ClientHost: "claude.ai",
+		Scopes: []string{"ftw.live.read"}, TTLS: 3600, Ticket: "t", Code: "ABCD-EFGH",
+		ExpMs: time.Now().Add(5 * time.Minute).UnixMilli(),
+	}
+	if edit != nil {
+		edit(&o)
+	}
+	raw, err := encMode.Marshal(o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return raw
+}
+
+// The offer key: made once, sealed, the same after a restart. It signs an
+// offer only for a key that the keys part made and that waits for approval,
+// for the agent role and for no longer than an offer may live. What it signs
+// opens with the box's own check.
+func TestTheOfferKeySignsOnlyOffersItCanVouchFor(t *testing.T) {
 	s, sealer, logs := newTestServer(t)
 	c := s.Local()
 	pub, err := c.OfferKey(ctx)
 	if err != nil || len(pub) != 65 || pub[0] != 4 {
 		t.Fatalf("offer key: %x %v", pub, err)
 	}
-	offer := []byte{0xa1, 0x61, 0x76, 0x01} // {"v": 1}
-	sig, err := c.SignOffer(ctx, offer)
+	kid, agent, _ := c.New(ctx)
+	other, otherPub, _ := c.New(ctx)
+	offer := offerFor(t, agent, nil)
+	sig, err := c.SignOffer(ctx, kid, offer)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := VerifyOffer(pub, offer, sig); err != nil {
 		t.Fatal(err)
 	}
-	if VerifyOffer(pub, []byte{0xa1, 0x61, 0x76, 0x02}, sig) == nil {
+	so := protocol.SignedOffer{O: offer, Kid: OfferKid(pub), Sig: sig}
+	if _, err := protocol.OpenOffer(map[string][]byte{OfferKid(pub): pub}, so, time.Now().UnixMilli()); err != nil {
+		t.Fatalf("the box does not open the offer: %v", err)
+	}
+	if VerifyOffer(pub, offerFor(t, agent, func(o *protocol.GrantOffer) { o.Code = "OTHER" }), sig) == nil {
 		t.Fatal("a signature verified for another offer")
 	}
-	if _, err := c.SignOffer(ctx, nil); !errors.Is(err, ErrRefused) {
-		t.Fatalf("an empty offer: %v", err)
+
+	type extra struct {
+		protocol.GrantOffer
+		X int `cbor:"x"`
 	}
+	withExtra, _ := encMode.Marshal(extra{GrantOffer: protocol.GrantOffer{
+		V: 1, Key: agent, Role: protocol.RoleAgent, ExpMs: time.Now().Add(time.Minute).UnixMilli()}, X: 1})
+	refused := map[string]struct {
+		kid   string
+		offer []byte
+	}{
+		"empty":               {kid, nil},
+		"not CBOR":            {kid, []byte("{}")},
+		"an unknown field":    {kid, withExtra},
+		"another pending key": {other, offer},
+		"another key's offer": {kid, offerFor(t, otherPub, nil)},
+		"a made-up key":       {kid, offerFor(t, bytes.Repeat([]byte{1}, 32), nil)},
+		"no kid":              {"", offer},
+		"the support role":    {kid, offerFor(t, agent, func(o *protocol.GrantOffer) { o.Role = protocol.RoleSupport })},
+		"the owner role":      {kid, offerFor(t, agent, func(o *protocol.GrantOffer) { o.Role = protocol.RoleOwner })},
+		"another version":     {kid, offerFor(t, agent, func(o *protocol.GrantOffer) { o.V = 2 })},
+		"an expired offer":    {kid, offerFor(t, agent, func(o *protocol.GrantOffer) { o.ExpMs = time.Now().UnixMilli() - 1 })},
+		"an offer for too long": {kid, offerFor(t, agent, func(o *protocol.GrantOffer) {
+			o.ExpMs = time.Now().UnixMilli() + protocol.OfferTTLMs + 60_000
+		})},
+	}
+	for name, r := range refused {
+		if _, err := c.SignOffer(ctx, r.kid, r.offer); !errors.Is(err, ErrRefused) {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+	// A key the owner approved is no longer offered.
+	if err := c.Keep(ctx, kid); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.SignOffer(ctx, kid, offer); !errors.Is(err, ErrRefused) {
+		t.Fatalf("a kept key's offer: %v", err)
+	}
+
 	// A restart reads the same key back; it is not on disk in the clear.
 	s2, err := NewServer(s.dir, sealer, nil)
 	if err != nil {
@@ -547,7 +614,7 @@ func TestTheOfferKeySignsOffers(t *testing.T) {
 		t.Fatal("the offer key changed across a restart")
 	}
 	raw, _ := os.ReadFile(filepath.Join(s.dir, "offer.key"))
-	d, _ := s.offer.Bytes()
+	d, _ := s.offer.(*localOfferKey).key.Bytes()
 	if bytes.Contains(raw, d) || bytes.Contains(logs.Bytes(), d) || bytes.Contains(logs.Bytes(), []byte(hex.EncodeToString(d))) {
 		t.Fatal("the offer key's secret is on disk or in the log")
 	}
@@ -556,6 +623,90 @@ func TestTheOfferKeySignsOffers(t *testing.T) {
 	_ = decMode.Unmarshal(raw, &rec)
 	if _, err := sealer.Unwrap(ctx, "AAAAAAAAAAAAAAAAAAAAAA", rec.DEK); err == nil {
 		t.Fatal("the offer key's data key opens under an agent kid")
+	}
+}
+
+// fakeSigner stands in for an asymmetric KMS key.
+type fakeSigner struct {
+	key   *ecdsa.PrivateKey
+	wrong bool
+	calls int
+}
+
+func (f *fakeSigner) PublicKey(_ context.Context, keyID string) ([]byte, error) {
+	if keyID != "alias/ftw-cloud-offer-key" {
+		return nil, errors.New("NotFoundException")
+	}
+	return x509.MarshalPKIXPublicKey(&f.key.PublicKey)
+}
+
+func (f *fakeSigner) Sign(_ context.Context, _ string, digest []byte) ([]byte, error) {
+	f.calls++
+	if f.wrong {
+		digest = bytes.Repeat([]byte{1}, 32)
+	}
+	return ecdsa.SignASN1(rand.Reader, f.key, digest)
+}
+
+// In production the offer key is in KMS: the keys part asks KMS to sign,
+// checks the answer and never holds the private half.
+func TestTheOfferKeyCanLiveInKMS(t *testing.T) {
+	priv, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	signer := &fakeSigner{key: priv}
+	k, err := NewKMSOfferKey(ctx, signer, "alias/ftw-cloud-offer-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sealer, _ := FileSealerFromKey(bytes.Repeat([]byte{7}, dataKeyBytes))
+	s, err := NewServer(t.TempDir(), sealer, nil, WithOfferKey(k))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(s.dir, "offer.key")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("a local offer key was made beside the KMS one")
+	}
+	c := s.Local()
+	pub, _ := c.OfferKey(ctx)
+	want, _ := priv.PublicKey.Bytes()
+	if !bytes.Equal(pub, want) {
+		t.Fatal("the public half is not KMS's")
+	}
+	kid, agent, _ := c.New(ctx)
+	offer := offerFor(t, agent, nil)
+	sig, err := c.SignOffer(ctx, kid, offer)
+	if err != nil || VerifyOffer(pub, offer, sig) != nil || signer.calls != 1 {
+		t.Fatalf("signed through KMS: %v (%d calls)", err, signer.calls)
+	}
+	// A refused offer never reaches KMS, and a wrong answer from KMS is not
+	// passed on.
+	_, _ = c.SignOffer(ctx, kid, offerFor(t, agent, func(o *protocol.GrantOffer) { o.Role = protocol.RoleSupport }))
+	if signer.calls != 1 {
+		t.Fatal("a refused offer reached KMS")
+	}
+	signer.wrong = true
+	if _, err := c.SignOffer(ctx, kid, offer); err == nil {
+		t.Fatal("a signature that does not verify was passed on")
+	}
+	if _, err := NewKMSOfferKey(ctx, signer, "alias/another"); err == nil {
+		t.Fatal("a missing key was taken")
+	}
+}
+
+// Only a unix socket's peer is served.
+func TestServeRefusesAConnectionThatIsNotUnix(t *testing.T) {
+	s, _, _ := newTestServer(t)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() { _ = s.Serve(ln) }()
+	c := newClient(func() (net.Conn, error) { return net.Dial("tcp", ln.Addr().String()) })
+	defer c.Close()
+	tctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	if _, _, err := c.New(tctx); err == nil {
+		t.Fatal("a TCP peer was served")
 	}
 }
 

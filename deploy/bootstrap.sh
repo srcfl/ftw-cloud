@@ -67,6 +67,7 @@ for try in $(seq 30); do
   sleep 2
 done
 grep -q '^-----BEGIN EC PRIVATE KEY-----$' "$tmp"
+# ftw-cloud-own gives it to the user the image runs as, before compose starts.
 chown 65532:65532 "$tmp"
 chmod 0400 "$tmp"
 mv -f "$tmp" /run/ftw-cloud/service.key
@@ -101,12 +102,39 @@ Wants=network-online.target
 Type=oneshot
 RemainAfterExit=yes
 WorkingDirectory=/opt/ftw-cloud/deploy
+ExecStartPre=/usr/local/sbin/ftw-cloud-own
 ExecStart=/usr/bin/docker compose --env-file /etc/ftw-cloud/compose.env up -d
 ExecStop=/usr/bin/docker compose --env-file /etc/ftw-cloud/compose.env down
 
 [Install]
 WantedBy=multi-user.target
 UNIT
+
+# ftwcloudd's files belong to the user its image runs as: the state volume
+# and the secrets in tmpfs. Images before 65530 ran as distroless's nonroot,
+# 65532, so a deploy either way, or back, finds its files its own.
+cat > /usr/local/sbin/ftw-cloud-own <<'OWN'
+#!/bin/bash
+# Give ftwcloudd's files to the user the configured image runs as.
+set -euo pipefail
+image=$(sed -n 's/^FTW_CLOUD_IMAGE=//p' /etc/ftw-cloud/compose.env)
+[ -n "$image" ] || exit 0
+user=$(docker image inspect -f '{{.Config.User}}' "$image")
+case "$user" in
+  nonroot|nonroot:nonroot) user=65532:65532 ;;
+esac
+if ! [[ $user =~ ^[0-9]+:[0-9]+$ ]]; then
+  echo "$image runs as '$user', not uid:gid" >&2
+  exit 1
+fi
+vol=$(docker volume inspect -f '{{.Mountpoint}}' ftw-cloud_ftw-cloud-state 2>/dev/null || true)
+for p in "$vol" /run/ftw-cloud/service.key /run/ftw-cloud/apns /run/ftw-cloud/noise; do
+  if [ -n "$p" ] && [ -e "$p" ]; then
+    chown -R "$user" "$p"
+  fi
+done
+OWN
+chmod 0755 /usr/local/sbin/ftw-cloud-own
 
 # One command updates the host to an image CI built, named by its digest.
 cat > /usr/local/sbin/ftw-cloud-deploy <<'DEPLOY'
@@ -142,7 +170,10 @@ if ! [[ $rev =~ ^[0-9a-f]{40}$ ]] || ! git merge-base --is-ancestor "$rev" origi
 fi
 git checkout --quiet --detach "$rev"
 
-printf 'FTW_CLOUD_IMAGE=%s\n' "$image" > "$env"
+# Only the image line changes; what keys.sh set stays.
+touch "$env"
+sed -i '/^FTW_CLOUD_IMAGE=/d' "$env"
+printf 'FTW_CLOUD_IMAGE=%s\n' "$image" >> "$env"
 # One transaction, in order: the key comes fresh from Secrets Manager, so a
 # new version takes effect, then ftw-cloud.service takes the container down
 # and starts a new one. Always a new container: a file mounted on its own,

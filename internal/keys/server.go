@@ -3,7 +3,6 @@ package keys
 import (
 	"context"
 	"crypto/ecdh"
-	"crypto/ecdsa"
 	"crypto/rand"
 	"encoding/base64"
 	"errors"
@@ -58,7 +57,16 @@ type Server struct {
 	mu       sync.Mutex
 	sessions map[string]*session
 	// offer signs consent offers (offer.go).
-	offer *ecdsa.PrivateKey
+	offer OfferSigner
+}
+
+// An Option sets up a Server.
+type Option func(*Server)
+
+// WithOfferKey signs offers with k. Without it, the server makes a local
+// offer key in its state directory, which is for development and tests.
+func WithOfferKey(k OfferSigner) Option {
+	return func(s *Server) { s.offer = k }
 }
 
 type session struct {
@@ -71,7 +79,7 @@ type session struct {
 
 // NewServer keeps sealed keys under dir: pending/ until the owner approves,
 // then kept/.
-func NewServer(dir string, sealer Sealer, log *slog.Logger) (*Server, error) {
+func NewServer(dir string, sealer Sealer, log *slog.Logger, opts ...Option) (*Server, error) {
 	if log == nil {
 		log = slog.Default()
 	}
@@ -81,13 +89,21 @@ func NewServer(dir string, sealer Sealer, log *slog.Logger) (*Server, error) {
 		}
 	}
 	s := &Server{dir: dir, sealer: sealer, log: log, now: time.Now, PeerUID: -1, sessions: map[string]*session{}}
-	if err := s.loadOfferKey(); err != nil {
-		return nil, err
+	for _, o := range opts {
+		o(s)
+	}
+	if s.offer == nil {
+		k, err := LocalOfferKey(dir, sealer, log)
+		if err != nil {
+			return nil, err
+		}
+		s.offer = k
 	}
 	return s, nil
 }
 
-// Serve accepts connections until ln closes. Each must come from PeerUID.
+// Serve accepts connections until ln closes. Each must be a unix connection
+// from PeerUID.
 func (s *Server) Serve(ln net.Listener) error {
 	for {
 		conn, err := ln.Accept()
@@ -97,12 +113,16 @@ func (s *Server) Serve(ln net.Listener) error {
 			}
 			return err
 		}
-		if uc, ok := conn.(*net.UnixConn); ok {
-			if err := checkPeer(uc, s.PeerUID); err != nil {
-				s.log.Warn("refused a connection from another user")
-				_ = conn.Close()
-				continue
-			}
+		uc, ok := conn.(*net.UnixConn)
+		if !ok {
+			s.log.Warn("refused a connection that is not a unix socket's")
+			_ = conn.Close()
+			continue
+		}
+		if err := checkPeer(uc, s.PeerUID); err != nil {
+			s.log.Warn("refused a connection from another user")
+			_ = conn.Close()
+			continue
 		}
 		go s.serveConn(conn)
 	}
@@ -171,7 +191,7 @@ func (s *Server) handle(req request) response {
 	case opOfferPub:
 		resp.Pub, err = s.offerPub()
 	case opOfferSign:
-		resp.D, err = s.signOffer(req.D)
+		resp.D, err = s.signOffer(req.Kid, req.D)
 	default:
 		err = ErrRefused
 	}
@@ -384,7 +404,7 @@ func (s *Server) finish(sess string, msg2 []byte) ([]byte, error) {
 		}
 		split, err := x.init.Split()
 		if err != nil {
-			return err
+			return ErrRefused
 		}
 		x.init, x.tr, payload = nil, appwire.NewTransport(split), p
 		return nil

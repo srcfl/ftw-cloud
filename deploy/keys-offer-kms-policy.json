@@ -1,0 +1,52 @@
+{
+  "Version": "2012-10-17",
+  "Id": "ftw-cloud-offer-key",
+  "Statement": [
+    {
+      "Sid": "AdministerButNotSign",
+      "Effect": "Allow",
+      "Principal": { "AWS": "arn:aws:iam::976075258475:root" },
+      "Action": [
+        "kms:CreateAlias",
+        "kms:Describe*",
+        "kms:Enable*",
+        "kms:List*",
+        "kms:Put*",
+        "kms:Update*",
+        "kms:Revoke*",
+        "kms:Disable*",
+        "kms:Get*",
+        "kms:Delete*",
+        "kms:TagResource",
+        "kms:UntagResource",
+        "kms:ScheduleKeyDeletion",
+        "kms:CancelKeyDeletion"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "OnlyTheKeysRoleSignsOffers",
+      "Effect": "Allow",
+      "Principal": { "AWS": "arn:aws:iam::976075258475:role/ftw-cloud-keys" },
+      "Action": "kms:Sign",
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": { "kms:SigningAlgorithm": "ECDSA_SHA_256", "kms:MessageType": "DIGEST" }
+      }
+    },
+    {
+      "Sid": "TheKeysRoleReadsThePublicHalf",
+      "Effect": "Allow",
+      "Principal": { "AWS": "arn:aws:iam::976075258475:role/ftw-cloud-keys" },
+      "Action": "kms:GetPublicKey",
+      "Resource": "*"
+    },
+    {
+      "Sid": "NoGrants",
+      "Effect": "Deny",
+      "Principal": { "AWS": "*" },
+      "Action": "kms:CreateGrant",
+      "Resource": "*"
+    }
+  ]
+}

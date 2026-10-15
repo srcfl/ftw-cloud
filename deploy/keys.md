@@ -13,9 +13,9 @@ and turns `ftwkeysd` on.
 
 | | `ftwcloudd` | `ftwkeysd` |
 |---|---|---|
-| User | 65532 (`nonroot`) | 65533, group 65532 |
-| Network | bridge, 443 published | the host's, listens on nothing |
-| Reaches | boxes, phones, assistants | KMS, through the instance role |
+| User | 65530, its own (not distroless's shared `nonroot`) | 65533, group 65530 |
+| Network | the default bridge, 443 published | a bridge of its own, listens on nothing |
+| Reaches | boxes, phones, assistants | KMS, as the `ftw-cloud-keys` role |
 | State | `ftw-cloud-state` (registry, OAuth token hashes) | `ftw-cloud-keys` (sealed agent keys) |
 | Socket | connects to `/run/ftw-cloud-keys/keys.sock` | owns it, mode 0660, checks the peer's uid |
 
@@ -34,34 +34,44 @@ and turns `ftwkeysd` on.
   deleted after an hour.
 - **Revoking deletes the key.** When the box's roster drops an agent, or it
   expires, `ftwcloudd` asks `ftwkeysd` to forget the key, which ends its
-  sessions too.
-- **The offer key.** One P-256 key signs every grant offer the consent page
-  hands the owner's app, so the app can tell an offer from FTW Cloud from a
-  copy. It is made at the first start, sealed like an agent key (its data
-  key's context names `offer-key`), and kept in memory while `ftwkeysd`
-  runs. It signs only arrays that start with `ftw.offer.v1`. Core and the
-  apps pin it by its kid, the first 16 characters of the base64url SHA-256
-  of its public half. `ftwkeysd` logs both when it makes the key,
-  `ftwkeysd offerkey` prints them, and `ftwcloudd` serves them at
-  `/.well-known/ftw-offer-key`. Losing the volume makes a new offer key,
-  which Core and the apps must then pin beside the old one.
+  sessions too. `ftwcloudd` keeps asking, across restarts, until `ftwkeysd`
+  has done it.
+- **A second KMS key signs offers.** The consent page hands the owner's app a
+  grant offer, and the app must tell an offer from FTW Cloud from a copy. An
+  asymmetric KMS key (`ECC_NIST_P256`, `SIGN_VERIFY`) signs every offer with
+  `kms:Sign`; its private half never leaves KMS. `ftwkeysd` signs only an
+  offer it can vouch for: a well-formed offer for the agent role, good for at
+  most ten minutes, whose key is one that `ftwkeysd` made and that waits for
+  approval. So `ftwcloudd` cannot get an owner to approve a key `ftwcloudd`
+  holds. Core and the apps pin the offer key by its kid, the first 16
+  characters of the base64url SHA-256 of its public half.
 - **Nothing logs a key.** Errors on the socket are a few fixed words.
 - **The volume is not backed up.** Losing it means every assistant must be
   approved again; no home is exposed by it.
 
-### Only `ftwkeysd` reaches KMS
+A production build of `ftwkeysd` has no file key and no local offer key. A
+development build (`-tags ftwclouddev`) has both; see Development below.
 
-The instance role can call KMS, so the separation rests on who can reach the
-role's credentials. The instance metadata service answers IMDSv2 token
-requests one network hop away when the hop limit is 1. A container on Docker's
-bridge network is two hops away and gets no credentials; `ftwkeysd` uses the
-host's network and gets them. `ftwcloudd` needs no AWS credentials: the host
-fetches its secrets before Docker starts.
+### Only `ftwkeysd` reaches KMS, and it reaches nothing else
 
-The KMS key's policy lets only the host role use it, and only with the
-`ftw-agent-key` purpose. The account root can administer the key but not use
-it, so another role in the shared account cannot be granted decrypt by IAM
-alone.
+The instance role reads the service key and the parameters at boot, so no
+container may hold its credentials. The instance metadata service answers
+IMDSv2 token requests one network hop away when the hop limit is 1; every
+container sits on a Docker bridge, two hops away, and gets nothing.
+
+`ftwkeysd` uses a role of its own, `ftw-cloud-keys`, which may use the two KMS
+keys and nothing else. The host assumes it every 15 minutes and leaves the
+hour-long credentials in tmpfs, readable only by `ftwkeysd`'s user, which
+mounts them read-only.
+
+Each KMS key's policy lets only `ftw-cloud-keys` use it: the agent key only
+with the `ftw-agent-key` purpose, the offer key only to sign SHA-256 digests
+and read its public half. An explicit deny on `kms:CreateGrant` means no grant
+opens either key beside its policy. The account root may administer the keys
+but not use them, so another role in the shared account gains nothing from
+IAM alone. This guards against mistakes; it is not a wall: whoever may put a
+key's policy (`kms:PutKeyPolicy`) can write themselves in, and that change
+shows in CloudTrail.
 
 If the cloud is fully broken into, the attacker can act as the existing
 agents, within the limits their boxes enforce, until the owners revoke them
@@ -70,30 +80,60 @@ cannot read the apps' sessions with their boxes.
 
 ## Turning it on
 
-1. **The KMS key** (once, from a workstation with admin rights):
+0. **The host's tooling.** This image runs `ftwcloudd` as 65530, and
+   `ftw-cloud-deploy` now keeps the lines `keys.sh` adds to `compose.env`.
+   Re-run [`bootstrap.sh`](bootstrap.sh) through SSM before deploying it; it
+   installs `ftw-cloud-own`, which gives `ftwcloudd`'s state and secrets to
+   the user its image runs as at every start, so deploying this image, or
+   going back to an older one, finds its files its own.
+
+1. **The keys role** (once, from a workstation with admin rights):
 
    ```bash
-   key=$(aws kms create-key --region eu-north-1 \
+   aws iam create-role --role-name ftw-cloud-keys \
+     --assume-role-policy-document file://deploy/keys-role-trust.json \
+     --max-session-duration 3600 --tags Key=Project,Value=ftw-cloud
+   aws iam put-role-policy --role-name ftw-cloud-host --policy-name ftw-cloud-keys-assume \
+     --policy-document file://deploy/keys-host-policy.json
+   ```
+
+2. **The two KMS keys:**
+
+   ```bash
+   agent=$(aws kms create-key --region eu-north-1 \
      --description 'FTW Cloud agent keys (ftwkeysd)' \
      --key-spec SYMMETRIC_DEFAULT --key-usage ENCRYPT_DECRYPT \
      --policy file://deploy/keys-kms-policy.json \
      --tags TagKey=Project,TagValue=ftw-cloud \
      --query KeyMetadata.Arn --output text)
    aws kms create-alias --region eu-north-1 --alias-name alias/ftw-cloud-agent-keys \
-     --target-key-id "$key"
-   aws kms enable-key-rotation --region eu-north-1 --key-id "$key"
-   echo "$key"
+     --target-key-id "$agent"
+   aws kms enable-key-rotation --region eu-north-1 --key-id "$agent"
+
+   offer=$(aws kms create-key --region eu-north-1 \
+     --description 'FTW Cloud grant offers (ftwkeysd)' \
+     --key-spec ECC_NIST_P256 --key-usage SIGN_VERIFY \
+     --policy file://deploy/keys-offer-kms-policy.json \
+     --tags TagKey=Project,TagValue=ftw-cloud \
+     --query KeyMetadata.Arn --output text)
+   aws kms create-alias --region eu-north-1 --alias-name alias/ftw-cloud-offer-key \
+     --target-key-id "$offer"
+   echo "$agent $offer"
    ```
 
-2. **The role's policy.** Put the key's id into
-   [`keys-host-policy.json`](keys-host-policy.json) in place of `KEY-ID`, then:
+   An asymmetric key does not rotate. A new offer key is a new key, pinned
+   beside the old one until every build has it.
+
+3. **The role's policy.** Put the two keys' ids into
+   [`keys-role-policy.json`](keys-role-policy.json) in place of `AGENT-KEY-ID`
+   and `OFFER-KEY-ID`, then:
 
    ```bash
-   aws iam put-role-policy --role-name ftw-cloud-host --policy-name ftw-cloud-agent-keys \
-     --policy-document file://deploy/keys-host-policy.json
+   aws iam put-role-policy --role-name ftw-cloud-keys --policy-name ftw-cloud-keys \
+     --policy-document file://deploy/keys-role-policy.json
    ```
 
-3. **One hop to the metadata service**, so no bridged container gets the
+4. **One hop to the metadata service**, so no container gets the instance
    role's credentials:
 
    ```bash
@@ -107,27 +147,49 @@ cannot read the apps' sessions with their boxes.
    http://169.254.169.254/latest/api/token -H 'X-aws-ec2-metadata-token-ttl-seconds: 60'`
    must time out or fail.
 
-4. **The host.** Through SSM, with the key's ARN:
+5. **The host.** Through SSM, with both keys' ARNs:
 
    ```bash
    aws ssm send-command --region eu-north-1 --instance-ids i-0ecac4cbc6b5f8adc \
      --document-name AWS-RunShellScript \
-     --parameters "$(jq -n --rawfile s deploy/keys.sh --arg k "$key" \
-       '{commands: ["set -- \($k)", $s]}')"
+     --parameters "$(jq -n --rawfile s deploy/keys.sh --arg a "$agent" --arg o "$offer" \
+       '{commands: ["set -- \($a) \($o)", $s]}')"
    ```
 
    SSM runs the lines as one script, so `set --` hands the script its
-   argument. It makes `/run/ftw-cloud-keys` at every boot and sets
-   `FTW_CLOUD_KMS_KEY` and `COMPOSE_PROFILES=agents` in
+   arguments. It makes `/run/ftw-cloud-keys` at every boot, installs the
+   timer that renews the keys role's credentials in
+   `/run/ftw-cloud-keys-aws`, and sets `FTW_CLOUD_KMS_KEY`,
+   `FTW_CLOUD_OFFER_KEY` and `COMPOSE_PROFILES=agents` in
    `/etc/ftw-cloud/compose.env`.
 
-5. **Deploy** as usual (`ftw-cloud-deploy sha256:<digest>`). Compose starts
-   `ftwkeysd` beside `ftwcloudd`. Its log says `ftwkeysd listening`, and on
-   its first start, `made the offer key` with the kid and public half.
+6. **Deploy** as usual (`ftw-cloud-deploy sha256:<digest>`). Compose starts
+   `ftwkeysd` beside `ftwcloudd`. Its log says `ftwkeysd listening` with the
+   offer key's kid.
 
-6. **Pin the offer key** in Core and the apps (srcfl/ftw `docs/agents.md`,
-   "The grant offer"): until a build pins it, no offer opens. Read it from
-   `https://cloud.ftw.energy/.well-known/ftw-offer-key` or the log.
+7. **Pin the offer key** in Core and the apps (srcfl/ftw `docs/agents.md`,
+   "The grant offer"): until a build pins it, no offer opens. Take the kid and
+   public half from `ftwkeysd` on the host, through SSM, not from the public
+   `/.well-known/ftw-offer-key`:
+
+   ```bash
+   id=$(aws ssm send-command --region eu-north-1 --instance-ids i-0ecac4cbc6b5f8adc \
+     --document-name AWS-RunShellScript \
+     --parameters 'commands=["cd /opt/ftw-cloud/deploy && docker compose --env-file /etc/ftw-cloud/compose.env exec -T ftwkeysd /usr/local/bin/ftwkeysd offerkey -offer-kms-key=alias/ftw-cloud-offer-key -aws-credentials=/run/secrets/aws/credentials.json"]' \
+     --query Command.CommandId --output text)
+   aws ssm get-command-invocation --region eu-north-1 --instance-id i-0ecac4cbc6b5f8adc \
+     --command-id "$id" --query StandardOutputContent --output text
+   ```
+
+   It prints `kid …` and `pub …`. KMS gives the same public half to an
+   admin, as a cross-check that needs no host:
+
+   ```bash
+   aws kms get-public-key --region eu-north-1 --key-id alias/ftw-cloud-offer-key \
+     --query PublicKey --output text | python3 -c 'import base64,hashlib,sys
+   p=base64.b64decode(sys.stdin.read())[-65:]; b=lambda x: base64.urlsafe_b64encode(x).rstrip(b"=").decode()
+   print("kid", b(hashlib.sha256(p).digest())[:16]); print("pub", b(p))'
+   ```
 
 To turn assistants off again, remove `COMPOSE_PROFILES=agents` and deploy.
 Approved agents stay sealed in the volume and work again when it comes back,
@@ -136,9 +198,12 @@ unless their owners revoked them meanwhile.
 ## Development
 
 ```bash
-go run ./cmd/ftwkeysd filekey -out dev-keys.key
-go run ./cmd/ftwkeysd -socket /tmp/ftwkeys/keys.sock -state /tmp/ftwkeys/state -file-key dev-keys.key
+go run -tags ftwclouddev ./cmd/ftwkeysd filekey -out dev-keys.key
+go run -tags ftwclouddev ./cmd/ftwkeysd -socket /tmp/ftwkeys/keys.sock \
+  -state /tmp/ftwkeys/state -file-key dev-keys.key
 ```
 
-A file key is for development only: whoever reads it and the state directory
-has every agent key.
+A development build seals keys with the file key and signs offers with a
+local key in the state directory. Whoever reads the file and the state
+directory has every agent key, so a production build refuses both: it needs
+`-kms-key` and `-offer-kms-key`.

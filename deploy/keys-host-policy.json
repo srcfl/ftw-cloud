@@ -2,13 +2,10 @@
   "Version": "2012-10-17",
   "Statement": [
     {
-      "Sid": "SealAndOpenAgentKeys",
+      "Sid": "FetchCredentialsForFtwkeysd",
       "Effect": "Allow",
-      "Action": ["kms:GenerateDataKey", "kms:Decrypt"],
-      "Resource": "arn:aws:kms:eu-north-1:976075258475:key/KEY-ID",
-      "Condition": {
-        "StringEquals": { "kms:EncryptionContext:purpose": "ftw-agent-key" }
-      }
+      "Action": "sts:AssumeRole",
+      "Resource": "arn:aws:iam::976075258475:role/ftw-cloud-keys"
     }
   ]
 }

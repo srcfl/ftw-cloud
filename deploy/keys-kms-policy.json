@@ -3,11 +3,11 @@
   "Id": "ftw-cloud-agent-keys",
   "Statement": [
     {
-      "Sid": "AdministerButNeverUse",
+      "Sid": "AdministerButNotUse",
       "Effect": "Allow",
       "Principal": { "AWS": "arn:aws:iam::976075258475:root" },
       "Action": [
-        "kms:Create*",
+        "kms:CreateAlias",
         "kms:Describe*",
         "kms:Enable*",
         "kms:List*",
@@ -25,15 +25,22 @@
       "Resource": "*"
     },
     {
-      "Sid": "TheHostSealsAndOpensAgentKeys",
+      "Sid": "OnlyTheKeysRoleSealsAndOpensAgentKeys",
       "Effect": "Allow",
-      "Principal": { "AWS": "arn:aws:iam::976075258475:role/ftw-cloud-host" },
+      "Principal": { "AWS": "arn:aws:iam::976075258475:role/ftw-cloud-keys" },
       "Action": ["kms:GenerateDataKey", "kms:Decrypt"],
       "Resource": "*",
       "Condition": {
         "StringEquals": { "kms:EncryptionContext:purpose": "ftw-agent-key" },
         "ForAllValues:StringEquals": { "kms:EncryptionContextKeys": ["purpose", "kid"] }
       }
+    },
+    {
+      "Sid": "NoGrants",
+      "Effect": "Deny",
+      "Principal": { "AWS": "*" },
+      "Action": "kms:CreateGrant",
+      "Resource": "*"
     }
   ]
 }

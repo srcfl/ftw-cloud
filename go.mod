@@ -8,7 +8,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/kms v1.61.4
 	github.com/fxamacker/cbor/v2 v2.9.4
 	github.com/gorilla/websocket v1.5.3
-	github.com/srcfl/ftw/go/protocol v0.0.0-20261015164244-f5cdb92058c1
+	github.com/srcfl/ftw/go/protocol v0.0.0-20261015184016-e25596322c66
 	golang.org/x/crypto v0.57.0
 	golang.org/x/sys v0.48.0
 	modernc.org/sqlite v1.59.0
