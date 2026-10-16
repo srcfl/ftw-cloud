@@ -14,7 +14,7 @@ the uplink (srcfl/ftw#1595), after its owner decides to.
 | Instance | `i-0ecac4cbc6b5f8adc`, `t4g.small`, Amazon Linux 2023 arm64, IMDSv2 required, no key pair |
 | Disk | `vol-0760cad0e8551e5e4`, 20 GB gp3, encrypted with `aws/ebs` |
 | Elastic IP | `13.50.84.149` (`eipalloc-0085f3e68b6f36da4`) |
-| Security group | `sg-098992ad382ecf94a` `ftw-cloud`: 443/tcp from anywhere, nothing else in |
+| Security group | `sg-098992ad382ecf94a` `ftw-cloud`: 443/tcp from anywhere, and 443/udp for HTTP/3 ([http3.md](http3.md)); nothing else in |
 | Instance role | `ftw-cloud-host`, with `AmazonSSMManagedInstanceCore` and the inline policy `ftw-cloud-service-key` ([`host-policy.json`](host-policy.json)): read one secret, nothing else |
 | Secret | `ftw-cloud/service-key` in Secrets Manager, eu-north-1, encrypted with `aws/secretsmanager` |
 | DNS | `cloud.ftw.energy` A `13.50.84.149` in the Cloudflare zone `ftw.energy`, grey cloud (record `22d28943eea9f6b8584214e1a8256ef1`) |
@@ -71,8 +71,8 @@ secret the same way.
   pipes cores to `/bin/false`, systemd-coredump stores nothing, `compose.yml`
   sets `ulimits: core: 0`, and `ftwcloudd` marks itself not dumpable.
   Household readings exist only in this process's memory.
-- Nothing comes in but 443. There is no SSH and no key pair; administration
-  is through SSM. Session logs to a separate account are not set up yet.
+- Nothing comes in but 443, TCP and UDP. There is no SSH and no key pair;
+  administration is through SSM. Session logs to a separate account are not set up yet.
 - Outbound is open. The host now needs only GitHub and `ghcr.io` (the image
   and `compose.yml`), AWS endpoints (SSM, Secrets Manager), Let's Encrypt
   and, from C4, APNs. Narrowing it is still to do.
@@ -317,9 +317,12 @@ that holds them adds itself to the drainers in `cmd/ftwcloudd`.
 ```bash
 curl -s https://cloud.ftw.energy/healthz
 curl -sI https://cloud.ftw.energy/source
+go run ./cmd/ftwcloudd health https://cloud.ftw.energy/healthz
 ```
 
-`ok` means DNS, the certificate and the service all work. `/source` returns
+`ok` means DNS, the certificate and the service all work. The last line
+checks TCP and HTTP/3 ([http3.md](http3.md)); on the host,
+`docker compose ps` shows the container's own check of both. `/source` returns
 the source archive, and its headers name the commit (`X-Source-Revision`) and
 the image digest (`X-Source-Image`), which should match what CI built.
 `/v1/app` answers 501 on a host without the Noise key, and `/v1/now` answers
@@ -368,7 +371,8 @@ Cloud data; the images on `ghcr.io` hold only code.
 ## Not here yet
 
 The APNs key ([apns.md](apns.md)) and the Noise key phones dial
-([noise.md](noise.md)) come from Parameter Store. Widget tokens need no
+([noise.md](noise.md)) come from Parameter Store. HTTP/3 needs UDP 443 in the
+security group ([http3.md](http3.md)). Widget tokens need no
 secret: the registry holds their hashes. Statistics (C7–C8) add secrets,
 egress and storage when they land. The erase test, canary homes
 and the external heartbeat that pages Sourceful belong with the first homes.

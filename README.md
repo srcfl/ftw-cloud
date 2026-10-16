@@ -93,6 +93,12 @@ to it yet.
   most 4 KiB, the answer within 10 s.
 - Limits per home: 16 sessions, one per device, 256 envelopes queued per
   phone, and a small message rate from each phone.
+- **HTTP/3.** The plain HTTPS routes, `/v1/app/once`, `/v1/now`,
+  `/healthz` and `/source`, also answer over HTTP/3 on UDP 443, with the
+  same certificate (`internal/quicdoor`). TCP responses say so in
+  `Alt-Svc`, except a WebSocket upgrade's. The sockets stay on TCP. A read
+  on a new connection takes two round trips instead of three; under loss
+  the gap is larger (`scripts/netem-once.sh`, [deploy/http3.md](deploy/http3.md)).
 - **Alerts (C4).** A box's signed `event` goes to its phones through APNs,
   wrapped unchanged: the phone checks the signature, writes its own words and
   picks the buttons from the verified kind. Every alert has the same aps,
@@ -261,7 +267,8 @@ box ──wss, TLS 1.3, signed frames──▶ /v1/box ──▶ store (memory) 
   judges as it judges the same session over the relay. The box closes the
   uplink on anything else.
 - **No TLS terminator in front.** Box and service bind the handshake to the
-  TLS session, so `ftwcloudd` ends TLS itself. A TCP load balancer is fine.
+  TLS session, so `ftwcloudd` ends TLS itself. A TCP load balancer is fine,
+  and so is a UDP one that forwards packets; nothing may end QUIC.
 - **Root on the host can read memory.** The privacy notice says so.
 
 ## Run it locally

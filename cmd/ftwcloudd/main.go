@@ -5,6 +5,7 @@
 //	ftwcloudd keygen -out service.key          make the service key; prints its public half
 //	ftwcloudd keygen -noise -out noise.key     make the Noise key phones dial; prints its public half
 //	ftwcloudd metrics                          print the running service's counts, from inside its container
+//	ftwcloudd health https://host/healthz      check /healthz over TCP and HTTP/3
 //	ftwcloudd [flags]                          serve
 package main
 
@@ -41,6 +42,7 @@ import (
 	"github.com/srcfl/ftw-cloud/internal/metrics"
 	"github.com/srcfl/ftw-cloud/internal/oauth"
 	"github.com/srcfl/ftw-cloud/internal/push"
+	"github.com/srcfl/ftw-cloud/internal/quicdoor"
 	"github.com/srcfl/ftw-cloud/internal/registry"
 	"github.com/srcfl/ftw-cloud/internal/server"
 	"github.com/srcfl/ftw-cloud/internal/shard"
@@ -53,8 +55,12 @@ import (
 )
 
 func main() {
-	if len(os.Args) > 1 && os.Args[1] == "keygen" {
-		if err := keygen(os.Args[2:]); err != nil {
+	if len(os.Args) > 1 && (os.Args[1] == "keygen" || os.Args[1] == "health") {
+		run := keygen
+		if os.Args[1] == "health" {
+			run = health
+		}
+		if err := run(os.Args[2:]); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
@@ -93,6 +99,7 @@ func serve(args []string) error {
 	metricsAddr := fs.String("metrics-listen", defaultMetricsAddr, "loopback address for /metrics; empty turns it off")
 	restartRate := fs.Int("restart-rate", defaultRestartRate, "sockets a second the next instance can take after a restart; sets the spread of the redial")
 	restartMin := fs.Duration("restart-spread-min", 15*time.Second, "the shortest spread: longer than the port stays closed while the next container starts")
+	h3 := fs.Bool("h3", true, "also serve HTTP/3 on the same address over UDP, and say so in Alt-Svc")
 	_ = fs.Parse(args)
 
 	harden()
@@ -226,6 +233,28 @@ func serve(args []string) error {
 		tlsConfig.NextProtos = append(tlsConfig.NextProtos, "acme-tls/1")
 	}
 
+	// HTTP/3 on UDP, beside TCP, for the plain HTTPS routes. The sockets
+	// stay on TCP. The UDP port is bound before Alt-Svc says it is there,
+	// and a port that will not bind leaves TCP serving alone: QUIC is the
+	// fast path, never the only one.
+	var door *quicdoor.Door
+	var udp net.PacketConn
+	if *h3 {
+		port, err := quicdoor.PortOf(*listen)
+		if err != nil {
+			return err
+		}
+		if udp, err = net.ListenPacket("udp", *listen); err != nil {
+			log.Error("HTTP/3 is off: UDP did not bind; TCP serves alone", "err", err)
+		} else {
+			srv.AltSvc = quicdoor.AltSvc(port)
+			door = quicdoor.New(srv.Handler(), log)
+			if door.ResetKey, err = quicdoor.ResetKeyFile(filepath.Join(*stateDir, "quic-reset.key")); err != nil {
+				log.Warn("no stateless resets: a client waits out its idle timeout after a restart", "err", err)
+			}
+		}
+	}
+
 	httpSrv := &http.Server{
 		Addr:              *listen,
 		Handler:           srv.Handler(),
@@ -303,9 +332,16 @@ func serve(args []string) error {
 		}
 		stopPush()
 	}()
+	if door != nil {
+		go func() {
+			if err := door.Serve(ctx, udp, tlsConfig); err != nil {
+				log.Error("HTTP/3 stopped; TCP serves on", "err", err)
+			}
+		}()
+	}
 
 	pub, _ := cloudwire.PublicKeyBytesOf(&key.PublicKey)
-	log.Info("ftwcloudd listening", "addr", *listen, "shard", shards.Self(), "shards", shards.Shards(),
+	log.Info("ftwcloudd listening", "addr", *listen, "h3", door != nil, "shard", shards.Self(), "shards", shards.Shards(),
 		"service_key", base64.RawURLEncoding.EncodeToString(pub), "noise_key", base64.RawURLEncoding.EncodeToString(noise.Public()))
 	err = httpSrv.ListenAndServeTLS("", "")
 	if err != nil && !errors.Is(err, http.ErrServerClosed) {

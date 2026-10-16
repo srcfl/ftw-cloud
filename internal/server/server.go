@@ -10,6 +10,9 @@
 //	/oauth/*, /.well-known/oauth-*  the authorization server for assistants (package oauth)
 //	/mcp      the MCP server, for assistants with a token (package mcp)
 //
+// The same handler serves HTTP/3 (package quicdoor), where the sockets do not
+// open: they are WebSockets over TCP.
+//
 // There is no route for staff. Reading a home needs its box's key, a phone in
 // its roster, or a token bound to one.
 package server
@@ -56,6 +59,11 @@ type Server struct {
 	OAuth *oauth.Server
 	MCP   http.Handler
 	Log   *slog.Logger
+	// AltSvc, when set, is the Alt-Svc header that points TCP clients at
+	// HTTP/3 (package quicdoor). It goes on plain responses only: a client
+	// that learns HTTP/3 from a WebSocket upgrade might try the socket over
+	// HTTP/3 next time, and the sockets are TCP only.
+	AltSvc string
 }
 
 // Handler is the whole HTTP surface.
@@ -90,6 +98,9 @@ func (s *Server) Handler() http.Handler {
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Link", `</source>; rel="copyright"; title="AGPL-3.0 source"`)
+		if s.AltSvc != "" && r.ProtoMajor < 3 && r.Header.Get("Upgrade") == "" {
+			w.Header().Set("Alt-Svc", s.AltSvc)
+		}
 		mux.ServeHTTP(w, r)
 	})
 }
