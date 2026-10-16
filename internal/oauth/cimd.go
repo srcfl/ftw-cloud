@@ -200,6 +200,11 @@ func checkCIMDURL(raw string) (*url.URL, error) {
 	if _, err := netip.ParseAddr(strings.Trim(host, "[]")); err == nil {
 		return nil, errCIMDURL // an address, not a name
 	}
+	// The document's URL names its host as the owner will see it: in
+	// lower case ASCII already.
+	if a, ok := asciiHost(host); !ok || a != host {
+		return nil, errCIMDURL
+	}
 	if u.Path == "" || u.Path == "/" {
 		return nil, errCIMDURL
 	}
@@ -226,7 +231,7 @@ func (f *fetcher) get(ctx context.Context, clientID string) (clientMetadata, err
 			return e.md, e.err
 		}
 	}
-	host := strings.ToLower(u.Hostname())
+	host, _ := asciiHost(u.Hostname())
 	hl := f.hosts[host]
 	if hl == nil {
 		if len(f.hosts) >= cimdHosts {

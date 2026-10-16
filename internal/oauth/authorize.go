@@ -84,7 +84,7 @@ func (s *Server) serveAuthorize(w http.ResponseWriter, r *http.Request) {
 		}
 		u, _ := url.Parse(redirect)
 		s.authorizePage(w, http.StatusBadRequest, pageError{Title: "This request cannot go on",
-			Text: "FTW Cloud cannot connect this assistant: " + desc + ".", Back: back, BackHost: u.Host})
+			Text: "FTW Cloud cannot connect this assistant: " + desc + ".", Back: back, BackHost: asciiHostPort(u)})
 	}
 	if len(req.state) > 1024 {
 		fail("invalid_request", "state is too long")
@@ -136,7 +136,8 @@ func (s *Server) serveAuthorize(w http.ResponseWriter, r *http.Request) {
 	host := c.Host
 	if !isCIMD(c.ID) {
 		if u, err := url.Parse(redirect); err == nil {
-			host = u.Hostname()
+			// In ASCII: checkRedirect refused a host without that form.
+			host, _ = asciiHost(u.Hostname())
 		}
 	}
 	con := consent{ClientID: c.ID, ClientName: c.Name, ClientHost: host, Verified: c.Verified, RedirectURI: redirect,
@@ -276,7 +277,7 @@ func (s *Server) view(c consent) requestView {
 	}
 	return requestView{Offer: c.Offer, Status: status, Code: c.Code,
 		Client:   clientView{ID: c.ClientID, Name: c.ClientName, Host: c.ClientHost, Verified: c.Verified},
-		Redirect: redirectView{Host: u.Hostname(), Local: u.Scheme == "http" && isLoopback(u.Hostname())},
+		Redirect: redirectView{Host: redirectHost(u), Local: u.Scheme == "http" && isLoopback(u.Hostname())},
 		Scopes:   splitScope(c.Scope),
 		Agent:    agentKeyView{Key: base64.RawURLEncoding.EncodeToString(c.AgentKey), ID: cloudwire.DeviceID(c.AgentKey)},
 		Expires:  c.Expires.UnixMilli()}
@@ -463,4 +464,10 @@ func (s *Server) event(w http.ResponseWriter, rid, browser string, c consent) (e
 		_, _ = fmt.Fprintf(w, "event: pending\ndata: {\"expiresAtMs\":%d}\n\n", c.Expires.UnixMilli())
 		return false
 	}
+}
+
+// redirectHost is a redirect's host alone, in ASCII.
+func redirectHost(u *url.URL) string {
+	h, _ := asciiHost(u.Hostname())
+	return h
 }

@@ -44,7 +44,7 @@ type pageError struct {
 func (s *Server) consentPage(w http.ResponseWriter, rid string, c consent) {
 	u, _ := url.Parse(c.RedirectURI)
 	d := pageData{Nonce: randomToken(16), RID: rid, Name: c.ClientName, Host: c.ClientHost, Verified: c.Verified, FromDocument: isCIMD(c.ClientID),
-		RedirectHost: u.Host, Local: u.Scheme == "http" && isLoopback(u.Hostname()),
+		RedirectHost: asciiHostPort(u), Local: u.Scheme == "http" && isLoopback(u.Hostname()),
 		Code: showCode(c.Code), Link: appLink(rid, c.Offer)}
 	for _, sc := range splitScope(c.Scope) {
 		d.Scopes = append(d.Scopes, scopeWords[sc])

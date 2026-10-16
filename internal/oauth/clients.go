@@ -47,7 +47,8 @@ func (s *Server) resolveClient(ctx context.Context, id string) (client, error) {
 			return client{}, err
 		}
 		u, _ := url.Parse(id)
-		return client{ID: id, Name: md.ClientName, Host: u.Hostname(), Verified: verifiedClient(id), RedirectURIs: md.RedirectURIs,
+		host, _ := asciiHost(u.Hostname()) // checkCIMDURL refused one without
+		return client{ID: id, Name: md.ClientName, Host: host, Verified: verifiedClient(id), RedirectURIs: md.RedirectURIs,
 			AuthMethod: authNone}, nil
 	}
 	c, ok, err := s.st.client(id)
@@ -59,18 +60,22 @@ func (s *Server) resolveClient(ctx context.Context, id string) (client, error) {
 	}
 	host := ""
 	if u, err := url.Parse(c.URI); err == nil {
-		host = u.Hostname()
+		host, _ = asciiHost(u.Hostname())
 	}
 	return client{ID: c.ID, Name: c.Name, Host: host, RedirectURIs: c.RedirectURIs, AuthMethod: c.AuthMethod, secret: c.Secret}, nil
 }
 
 // checkRedirect holds a redirect URI to the rules: https, or http to this
 // computer's loopback for a client that runs on it. No fragment and no
-// credentials. Custom schemes are refused, as the MCP spec asks.
+// credentials. Custom schemes are refused, as the MCP spec asks, and so is
+// a host with no ASCII form (asciiHost).
 func checkRedirect(raw string) error {
 	u, err := url.Parse(raw)
 	if err != nil || u.User != nil || u.Fragment != "" || strings.Contains(raw, "#") || u.Host == "" || len(raw) > 2048 {
 		return fmt.Errorf("redirect URI %q is not allowed", raw)
+	}
+	if _, ok := asciiHost(u.Hostname()); !ok {
+		return fmt.Errorf("redirect URI %q has a host with no ASCII form", raw)
 	}
 	switch u.Scheme {
 	case "https":
@@ -181,6 +186,8 @@ func (s *Server) serveRegister(w http.ResponseWriter, r *http.Request) {
 	}
 	if reg.ClientURI != "" {
 		if u, err := url.Parse(reg.ClientURI); err != nil || u.Scheme != "https" {
+			reg.ClientURI = ""
+		} else if _, ok := asciiHost(u.Hostname()); !ok {
 			reg.ClientURI = ""
 		}
 	}
