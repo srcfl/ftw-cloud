@@ -364,6 +364,24 @@ func (x *Handle) Put(t string, env []byte, seq uint64, carriesTable bool) error 
 	return nil
 }
 
+// PutTable keeps a live that came after a newer one but carries a newer
+// source table: it becomes the table held, and the newest values stay. The
+// phones reading take its table the same way.
+func (x *Handle) PutTable(env []byte, seq uint64) {
+	if x.kind != Box {
+		return
+	}
+	x.h.mu.Lock()
+	defer x.h.mu.Unlock()
+	x.h.full = &Held{T: cloudwire.MsgLive, Envelope: env, Seq: seq}
+	at := stamp()
+	for sess := range x.h.sessions {
+		if sess.x.mayRead(cloudwire.MsgLive) {
+			sess.deliver(env, at)
+		}
+	}
+}
+
 // Roster returns the roster held, and its number, 0 when none.
 func (x *Handle) Roster() (*cloudwire.Roster, uint64) {
 	x.h.mu.Lock()

@@ -99,9 +99,11 @@ to it yet.
   except a WebSocket upgrade's. The uplink and the app session run over
   QUIC with the WebSockets' handlers (`internal/wire`): a control stream, a
   bulk stream for the tunnel's lane 1, and datagrams for `hb` and a `live`
-  without its table. Clients race QUIC against the WebSocket. Early data
-  is answered once per Noise message 1. A phone that moves from Wi-Fi to
-  cellular keeps its connection and its box session.
+  without its table. Clients race QUIC against the WebSocket, and the door
+  offers only the protocols it serves. A box's target may come in early
+  data; a phone's session waits for the handshake, so a replay changes
+  nothing. A phone that moves from Wi-Fi to cellular keeps its connection
+  and its box session.
 - **Alerts (C4).** A box's signed `event` goes to its phones through APNs,
   wrapped unchanged: the phone checks the signature, writes its own words and
   picks the buttons from the verified kind. Every alert has the same aps,

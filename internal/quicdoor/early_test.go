@@ -1,7 +1,6 @@
 package quicdoor
 
 import (
-	"bytes"
 	"encoding/binary"
 	"testing"
 	"time"
@@ -34,34 +33,7 @@ func TestATicketAllowsEarlyDataForADay(t *testing.T) {
 	}
 }
 
-// Each message 1 passes once by its ephemeral key, for as long as a ticket
-// allows early data.
-func TestTheGuardLetsEachMessage1ThroughOnce(t *testing.T) {
-	now := time.Unix(1_790_000_000, 0)
-	g := newEarlyGuard(func() time.Time { return now })
-	m1 := append(bytes.Repeat([]byte{1}, ephemeralBytes), []byte("the rest of message 1")...)
-	if !g.first(m1) {
-		t.Fatal("the first copy was refused")
-	}
-	again := append(bytes.Repeat([]byte{1}, ephemeralBytes), []byte("other bytes, same key")...)
-	if g.first(again) {
-		t.Fatal("a second copy with the same ephemeral key passed")
-	}
-	if g.first(m1[:ephemeralBytes-1]) {
-		t.Fatal("a message too short to be message 1 passed")
-	}
-	other := bytes.Repeat([]byte{2}, ephemeralBytes)
-	g.remember(other)
-	if g.first(other) {
-		t.Fatal("a remembered message 1 passed in early data")
-	}
-	now = now.Add(cloudwire.EarlyDataFor + time.Minute)
-	if !g.first(m1) {
-		t.Fatal("past a ticket's early-data life the key was still held")
-	}
-}
-
-func TestEarlyDataIsOnUnderTheGuard(t *testing.T) {
+func TestEarlyDataIsOn(t *testing.T) {
 	if !Config().Allow0RTT {
 		t.Fatal("0-RTT is off")
 	}

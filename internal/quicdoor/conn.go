@@ -37,9 +37,6 @@ type Conn struct {
 	limit atomic.Int64
 	start sync.Once
 	in    chan inbound
-	// pending holds messages the door read before handing the connection
-	// over; ReadMessage returns them first.
-	pending [][]byte
 
 	mu       sync.Mutex
 	deadline time.Time
@@ -107,11 +104,6 @@ func (c *Conn) Carries(messageType int) bool {
 // ReadMessage returns the next message from any of the connection's paths,
 // with the type it came by.
 func (c *Conn) ReadMessage() (int, []byte, error) {
-	if len(c.pending) > 0 {
-		m := c.pending[0]
-		c.pending = c.pending[1:]
-		return websocket.BinaryMessage, m, nil
-	}
 	c.start.Do(c.readers)
 	for {
 		c.mu.Lock()

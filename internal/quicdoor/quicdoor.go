@@ -58,9 +58,20 @@ const (
 	// or a phone may open one control stream and one bulk stream; Conn
 	// closes on more.
 	maxStreams = 32
-	// maxMessage1 bounds the phone's Noise message 1, which the door reads
-	// itself; the app session checks it again, more tightly.
-	maxMessage1 = 64 << 10
+	// streamWindow and connWindow are the most a peer may have in flight to
+	// the door, on one stream and on one connection. Boxes and phones send
+	// little; the readable copy's bulk goes the other way.
+	streamWindow = 256 << 10
+	connWindow   = 512 << 10
+)
+
+// maxConns and maxHandshakes bound what the door holds at once: every
+// connection, and those still in their handshake. Past either a new one is
+// closed with 4429, busy, and its client tries the WebSocket or waits.
+// Variables so a test can lower them.
+var (
+	maxConns      int64 = 20_000
+	maxHandshakes int64 = 1_000
 )
 
 // retryRate is how many new connections a second the door takes on trust.
@@ -99,13 +110,15 @@ func (n *newcomers) retry(net.Addr) bool {
 
 // Door accepts QUIC connections and hands each to its protocol.
 type Door struct {
-	h3    *http3.Server
-	log   *slog.Logger
-	early *earlyGuard
-	now   func() time.Time
-	// EarlyRepeats counts message 1s in early data the guard held back: a
-	// replay, or a client that reused an ephemeral key.
-	EarlyRepeats atomic.Int64
+	h3  *http3.Server
+	log *slog.Logger
+	now func() time.Time
+	// EarlyHeld counts phone sessions whose target came in early data and
+	// waited for the handshake before the session opened.
+	EarlyHeld atomic.Int64
+	// conns and handshakes count what the door holds now (maxConns,
+	// maxHandshakes).
+	conns, handshakes atomic.Int64
 	// Box serves a box's uplink over QUIC and App a phone's session, with
 	// the same handlers as their WebSockets. A nil one refuses its ALPN.
 	// Set before Serve.
@@ -130,7 +143,6 @@ func New(handler http.Handler, log *slog.Logger) *Door {
 		log = slog.New(slog.DiscardHandler)
 	}
 	d := &Door{log: log, now: time.Now}
-	d.early = newEarlyGuard(func() time.Time { return d.now() })
 	if handler != nil {
 		d.h3 = &http3.Server{
 			Handler:     onlyRequests(handler),
@@ -186,11 +198,28 @@ func PortOf(addr string) (int, error) {
 
 // TLSConfig is base for QUIC: TLS 1.3 and this door's protocols. It keeps
 // base's certificate source, so ACME renews both listeners at once.
-func TLSConfig(base *tls.Config) *tls.Config {
+func TLSConfig(base *tls.Config, protos ...string) *tls.Config {
 	c := base.Clone()
 	c.MinVersion = tls.VersionTLS13
-	c.NextProtos = []string{ALPNH3, cloudwire.ALPNBox, cloudwire.ALPNApp}
+	c.NextProtos = protos
 	return c
+}
+
+// protos are the ALPNs the door serves. One it does not serve is not
+// offered, so a client's handshake for it fails at once and the client
+// takes the WebSocket, rather than winning a race and losing the session.
+func (d *Door) protos() []string {
+	var p []string
+	if d.h3 != nil {
+		p = append(p, ALPNH3)
+	}
+	if d.Box != nil {
+		p = append(p, cloudwire.ALPNBox)
+	}
+	if d.App != nil {
+		p = append(p, cloudwire.ALPNApp)
+	}
+	return p
 }
 
 // Config is the QUIC configuration the door listens with. A connection
@@ -205,6 +234,11 @@ func Config() *quic.Config {
 		MaxIncomingUniStreams: 8,
 		EnableDatagrams:       true,
 		Allow0RTT:             true,
+
+		InitialStreamReceiveWindow:     streamWindow,
+		MaxStreamReceiveWindow:         streamWindow,
+		InitialConnectionReceiveWindow: connWindow,
+		MaxConnectionReceiveWindow:     connWindow,
 	}
 }
 
@@ -221,7 +255,7 @@ func (d *Door) Serve(ctx context.Context, pc net.PacketConn, tlsConf *tls.Config
 	}
 	d.tr = tr
 	d.mu.Unlock()
-	tc := TLSConfig(tlsConf)
+	tc := TLSConfig(tlsConf, d.protos()...)
 	limitEarlyData(tc, d.now)
 	ln, err := tr.ListenEarly(tc, Config())
 	if err != nil {
@@ -245,8 +279,48 @@ func (d *Door) Serve(ctx context.Context, pc net.PacketConn, tlsConf *tls.Config
 			}
 			return err
 		}
+		if !d.admit(conn) {
+			continue
+		}
 		go d.serve(conn)
 	}
+}
+
+// admit counts conn against maxConns and maxHandshakes, or closes it when
+// the door holds enough.
+func (d *Door) admit(conn *quic.Conn) bool {
+	busy := quic.ApplicationErrorCode(cloudwire.CloseBusy)
+	if !done(conn) && d.handshakes.Load() >= maxHandshakes {
+		// Too many handshakes at once: shed this one now. A close this
+		// early loses its code (RFC 9000 §10.2.3), so its client counts QUIC
+		// as failing here and takes the WebSocket.
+		_ = conn.CloseWithError(busy, "")
+		return false
+	}
+	if d.conns.Load() >= maxConns {
+		// After the handshake the client reads 4429, busy, and waits.
+		go func() {
+			select {
+			case <-conn.HandshakeComplete():
+			case <-conn.Context().Done():
+			}
+			_ = conn.CloseWithError(busy, "")
+		}()
+		return false
+	}
+	d.conns.Add(1)
+	context.AfterFunc(conn.Context(), func() { d.conns.Add(-1) })
+	if !done(conn) {
+		d.handshakes.Add(1)
+		go func() {
+			select {
+			case <-conn.HandshakeComplete():
+			case <-conn.Context().Done():
+			}
+			d.handshakes.Add(-1)
+		}()
+	}
+	return true
 }
 
 // Close ends every live session with 1001, going away, so its client dials
@@ -338,29 +412,18 @@ func (d *Door) session(qc *quic.Conn, box bool) {
 		return
 	}
 	c := newConn(qc, ctrl, r, box)
+	// A phone's message 1 may come in early data, which the network can
+	// replay. Its session opens only once the handshake is done, which the
+	// sender of a replay cannot do, so nothing is replaced, spent, forwarded
+	// or asked for until then: for the first copy too, which matters when
+	// the network dropped the original and the phone dialled again.
 	if !box {
-		// Message 1, read here so that a copy replayed in early data stops at
-		// the door: the second one with an ephemeral key waits for a
-		// handshake its sender cannot finish.
-		_ = ctrl.SetReadDeadline(time.Now().Add(handshakeTimeout))
-		msg1, err := cloudwire.ReadMessage(r, maxMessage1)
-		_ = ctrl.SetReadDeadline(time.Time{})
-		if err != nil {
-			refuse(cloudwire.CloseProtocol)
+		if !done(qc) {
+			d.EarlyHeld.Add(1)
+		}
+		if !d.handshake(qc) {
 			return
 		}
-		switch {
-		case !done(qc):
-			if !d.early.first(msg1) {
-				d.EarlyRepeats.Add(1)
-				if !d.handshake(qc) {
-					return
-				}
-			}
-		case qc.ConnectionState().Used0RTT:
-			d.early.remember(msg1)
-		}
-		c.pending = [][]byte{msg1}
 	}
 	var ekm []byte
 	if box {

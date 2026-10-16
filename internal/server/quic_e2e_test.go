@@ -273,6 +273,46 @@ func TestALateDatagramIsDropped(t *testing.T) {
 	}
 }
 
+// Over QUIC a live without its table can overtake the one that carries it.
+// The service still takes the late table, and keeps the newer values: a
+// phone's snapshot holds both, so its sources do not go stale for want of a
+// table.
+func TestALateTableStillCounts(t *testing.T) {
+	s := newStack(t)
+	box := s.connectTunBoxQUIC()
+	key, _ := appwire.GenerateKeyPair()
+	box.roster(2, grantServe, nil, key.Public())
+	table := map[string]cloudwire.Source{"m": {Kind: "driver", State: protocol.SourceLive, StaleAfterMs: 10_000}}
+	box.send(cloudwire.MsgLive, cloudwire.Live{Header: box.header(), Fields: map[string]int64{"2": 1}, Sources: table, SrcRev: 1, Ages: map[string]int64{}})
+	withTable := mustSeal(t, box, cloudwire.MsgLive, cloudwire.Live{Header: box.header(), Fields: map[string]int64{"2": 2},
+		Sources: table, FieldSources: map[string][]string{"2": {"m"}}, SrcRev: 2, Ages: map[string]int64{}})
+	box.writeAs(wire.Datagram, mustSeal(t, box, cloudwire.MsgLive, cloudwire.Live{Header: box.header(), Fields: map[string]int64{"2": 3}, SrcRev: 2, Ages: map[string]int64{}}))
+	time.Sleep(100 * time.Millisecond)
+	box.writeAs(websocket.BinaryMessage, withTable)
+	box.send(cloudwire.MsgHB, cloudwire.HB{Header: box.header(), Clock: cloudwire.ClockNTP, SrcRev: 2})
+	waitHeldN(t, s, box.home, key, 3)
+	var newest int64
+	var tableRev uint64
+	for _, raw := range heldSnapshot(t, s, box.home, key).Envelopes {
+		env, _ := cloudwire.DecodeEnvelope(raw)
+		if env.T != cloudwire.MsgLive {
+			continue
+		}
+		var l cloudwire.Live
+		_ = cloudwire.Unmarshal(env.B, &l)
+		if l.Sources != nil {
+			tableRev = max(tableRev, l.SrcRev)
+		}
+		newest = l.Fields["2"]
+	}
+	if tableRev != 2 {
+		t.Fatalf("the service holds table %d, not the late one", tableRev)
+	}
+	if newest != 3 {
+		t.Fatalf("the newest live in the snapshot holds %d, not the overtaking one's 3", newest)
+	}
+}
+
 // The box binds hello to the TLS session inside QUIC. Its exporter is the
 // service's, so hello_ok comes; one from another session closes the uplink.
 func TestHelloOverQUICIsBoundToItsTLSSession(t *testing.T) {

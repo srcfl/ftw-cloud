@@ -436,8 +436,10 @@ type boxConn struct {
 
 	// newest is the highest seq of each newest-wins class on this
 	// connection. Over QUIC an hb or a live may come as a datagram, out of
-	// order; one older than what the service holds is dropped.
-	newest map[string]uint64
+	// order; one older than what the service holds is dropped. tableRev is
+	// the srcRev of the newest table held from this connection.
+	newest   map[string]uint64
+	tableRev uint64
 }
 
 // bucket is a token bucket.
@@ -768,14 +770,33 @@ func (c *boxConn) apply(env cloudwire.Envelope) (stop bool, err error) {
 		// The readable copy is off: the service holds no readings.
 		return false, nil
 	}
+	rev, table := uint64(0), false
+	if env.T == cloudwire.MsgLive {
+		rev, table = tableOf(env.B)
+	}
 	if !c.newer(env.T, h.Seq) {
+		// Over QUIC a live without its table can overtake the one that
+		// carries it. The late one still brings a newer table, and nothing
+		// else (docs/protocol-cloud.md, "Datagrams").
+		if !table || rev <= c.tableRev {
+			return false, nil
+		}
+		raw, err := env.Encode()
+		if err != nil {
+			return true, err
+		}
+		c.tableRev = rev
+		c.handle.PutTable(raw, h.Seq)
 		return false, nil
 	}
 	raw, err := env.Encode()
 	if err != nil {
 		return true, err
 	}
-	if err := c.handle.Put(env.T, raw, h.Seq, env.T == cloudwire.MsgLive && carriesTable(env.B)); err != nil {
+	if table {
+		c.tableRev = max(c.tableRev, rev)
+	}
+	if err := c.handle.Put(env.T, raw, h.Seq, table); err != nil {
 		return true, err
 	}
 	if c.u.OnHeld != nil {
@@ -801,12 +822,17 @@ func (c *boxConn) newer(t string, seq uint64) bool {
 	return true
 }
 
-// carriesTable reports whether a live body holds its source table.
-func carriesTable(body []byte) bool {
+// tableOf reports whether a live body holds its source table, and the
+// table's srcRev.
+func tableOf(body []byte) (uint64, bool) {
 	var l struct {
 		Sources map[string]cbor.RawMessage `cbor:"sources"`
+		SrcRev  uint64                     `cbor:"srcRev"`
 	}
-	return cloudwire.Unmarshal(body, &l) == nil && len(l.Sources) > 0
+	if cloudwire.Unmarshal(body, &l) != nil || len(l.Sources) == 0 {
+		return 0, false
+	}
+	return l.SrcRev, true
 }
 
 // roster keeps a signed roster whose grant and scopes are within what FTW

@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -351,5 +352,145 @@ func TestCloseEndsEachSessionWithGoingAway(t *testing.T) {
 	var ce *websocket.CloseError
 	if !errors.As(err, &ce) || ce.Code != websocket.CloseGoingAway {
 		t.Fatalf("the session ended with %v, not 1001", err)
+	}
+}
+
+// A door that does not serve the sessions does not offer their ALPNs, so a
+// client's handshake for one fails at once and it takes the WebSocket,
+// rather than winning the race and losing the session.
+func TestTheDoorOffersOnlyWhatItServes(t *testing.T) {
+	cert, pool := testCert(t)
+	addr := serve(t, http.NotFoundHandler(), cert)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	start := time.Now()
+	c, err := Dial(ctx, addr, &tls.Config{RootCAs: pool}, cloudwire.ALPNBox, cloudwire.TargetBox, nil)
+	if err == nil {
+		c.Close()
+		t.Fatal("a door without the box's handler finished a handshake for it")
+	}
+	if took := time.Since(start); took > time.Second {
+		t.Fatalf("the refused handshake took %v", took)
+	}
+	if !strings.Contains(err.Error(), "no_application_protocol") && !strings.Contains(err.Error(), "0x178") {
+		t.Fatalf("refused with %v, not for the protocol", err)
+	}
+}
+
+// A box that dials again sends its target as early data, and its hello must
+// bind to the exporter of that same TLS session. The door hands the box's
+// handler the exporter before the handshake ends; it is the client's.
+func TestABoxsEarlyTargetGetsItsSessionsExporter(t *testing.T) {
+	cert, pool := testCert(t)
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pc.Close()
+	d := New(nil, nil)
+	ekms := make(chan []byte, 2)
+	d.Box = func(c *Conn, ekm []byte) {
+		ekms <- ekm
+		for {
+			if _, _, err := c.ReadMessage(); err != nil {
+				return
+			}
+		}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = d.Serve(ctx, pc, &tls.Config{Certificates: []tls.Certificate{cert}}) }()
+	defer d.Close()
+
+	cache := tls.NewLRUClientSessionCache(4)
+	dial := func() *Conn {
+		t.Helper()
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		c, err := Dial(ctx, pc.LocalAddr().String(), &tls.Config{RootCAs: pool, ClientSessionCache: cache},
+			cloudwire.ALPNBox, cloudwire.TargetBox, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		<-c.QUIC().HandshakeComplete()
+		return c
+	}
+	first := dial()
+	<-ekms
+	time.Sleep(100 * time.Millisecond) // the ticket
+	_ = first.Close()
+
+	second := dial()
+	defer second.Close()
+	if !second.UsedEarlyData() {
+		t.Fatal("the second connection used no early data")
+	}
+	var got []byte
+	select {
+	case got = <-ekms:
+	case <-time.After(3 * time.Second):
+		t.Fatal("the box's handler never ran")
+	}
+	want, err := second.Exporter()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatal("the door's exporter for an early target is not the client's")
+	}
+}
+
+// Past maxConns the door closes a new connection with 4429.
+func TestAFullDoorSaysItIsBusy(t *testing.T) {
+	old := maxConns
+	maxConns = 1
+	t.Cleanup(func() { maxConns = old })
+	cert, pool := testCert(t)
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pc.Close()
+	d := New(nil, nil)
+	d.Box = func(c *Conn, _ []byte) {
+		for {
+			if _, _, err := c.ReadMessage(); err != nil {
+				return
+			}
+		}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = d.Serve(ctx, pc, &tls.Config{Certificates: []tls.Certificate{cert}}) }()
+	defer d.Close()
+	dial := func() *Conn {
+		t.Helper()
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		c, err := Dial(ctx, pc.LocalAddr().String(), &tls.Config{RootCAs: pool}, cloudwire.ALPNBox, cloudwire.TargetBox, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return c
+	}
+	first := dial()
+	defer first.Close()
+	time.Sleep(100 * time.Millisecond)
+	// The close may reach the client while it dials or once it reads.
+	dctx, dcancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer dcancel()
+	second, err := Dial(dctx, pc.LocalAddr().String(), &tls.Config{RootCAs: pool}, cloudwire.ALPNBox, cloudwire.TargetBox, nil)
+	if err == nil {
+		defer second.Close()
+		_ = second.SetReadDeadline(time.Now().Add(3 * time.Second))
+		_, _, err = second.ReadMessage()
+	}
+	var ae *quic.ApplicationError
+	var ce *websocket.CloseError
+	switch {
+	case errors.As(err, &ae) && ae.ErrorCode == quic.ApplicationErrorCode(cloudwire.CloseBusy):
+	case errors.As(err, &ce) && ce.Code == cloudwire.CloseBusy:
+	default:
+		t.Fatalf("the second connection ended with %v, not 4429", err)
 	}
 }
