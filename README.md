@@ -93,6 +93,17 @@ to it yet.
   most 4 KiB, the answer within 10 s.
 - Limits per home: 16 sessions, one per device, 256 envelopes queued per
   phone, and a small message rate from each phone.
+- **QUIC.** UDP 443 carries what TCP 443 does, with the same certificate
+  (`internal/quicdoor`, [deploy/http3.md](deploy/http3.md)). The plain
+  HTTPS routes answer over HTTP/3, and TCP responses say so in `Alt-Svc`,
+  except a WebSocket upgrade's. The uplink and the app session run over
+  QUIC with the WebSockets' handlers (`internal/wire`): a control stream, a
+  bulk stream for the tunnel's lane 1, and datagrams for `hb` and a `live`
+  without its table. Clients race QUIC against the WebSocket, and the door
+  offers only the protocols it serves. A box's target may come in early
+  data; a phone's session waits for the handshake, so a replay changes
+  nothing. A phone that moves from Wi-Fi to cellular keeps its connection
+  and its box session.
 - **Alerts (C4).** A box's signed `event` goes to its phones through APNs,
   wrapped unchanged: the phone checks the signature, writes its own words and
   picks the buttons from the verified kind. Every alert has the same aps,
@@ -261,7 +272,8 @@ box ──wss, TLS 1.3, signed frames──▶ /v1/box ──▶ store (memory) 
   judges as it judges the same session over the relay. The box closes the
   uplink on anything else.
 - **No TLS terminator in front.** Box and service bind the handshake to the
-  TLS session, so `ftwcloudd` ends TLS itself. A TCP load balancer is fine.
+  TLS session, so `ftwcloudd` ends TLS itself. A TCP load balancer is fine,
+  and so is a UDP one that forwards packets; nothing may end QUIC.
 - **Root on the host can read memory.** The privacy notice says so.
 
 ## Run it locally

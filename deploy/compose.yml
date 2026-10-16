@@ -14,8 +14,13 @@ services:
     restart: unless-stopped
     ports:
       - '443:443'
+      # HTTP/3 for the plain HTTPS routes (deploy/http3.md). The security
+      # group must let UDP 443 in before this runs.
+      - '443:443/udp'
     command:
       - -listen=:443
+      - -h3=${FTW_CLOUD_H3:-true}
+      - -quic-sessions=${FTW_CLOUD_QUIC_SESSIONS:-true}
       - -domain=cloud.ftw.energy
       - -state=/state
       - -service-key=/run/secrets/ftw-cloud-service.key
@@ -47,6 +52,14 @@ services:
       - /run/ftw-cloud-keys:/run/ftw-cloud-keys
     secrets:
       - ftw-cloud-service.key
+    # /healthz over TCP and HTTP/3 on the container's own port, with the
+    # certificate's name. Docker shows the result; nothing restarts on it.
+    healthcheck:
+      test: ['CMD', '/usr/local/bin/ftwcloudd', 'health', '-name', 'cloud.ftw.energy', '-h3=${FTW_CLOUD_H3:-true}', 'https://127.0.0.1/healthz']
+      interval: 60s
+      timeout: 15s
+      start_period: 60s
+      retries: 3
     read_only: true
     tmpfs:
       - /tmp

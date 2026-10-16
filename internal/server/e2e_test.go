@@ -22,10 +22,12 @@ import (
 	"github.com/srcfl/ftw-cloud/internal/apns"
 	"github.com/srcfl/ftw-cloud/internal/appsession"
 	"github.com/srcfl/ftw-cloud/internal/push"
+	"github.com/srcfl/ftw-cloud/internal/quicdoor"
 	"github.com/srcfl/ftw-cloud/internal/registry"
 	"github.com/srcfl/ftw-cloud/internal/store"
 	"github.com/srcfl/ftw-cloud/internal/token"
 	"github.com/srcfl/ftw-cloud/internal/uplink"
+	"github.com/srcfl/ftw-cloud/internal/wire"
 	"github.com/srcfl/ftw/go/protocol"
 	"github.com/srcfl/ftw/go/protocol/appwire"
 	"github.com/srcfl/ftw/go/protocol/cloudwire"
@@ -65,6 +67,9 @@ type stack struct {
 	up         *uplink.Uplink
 	reg        *registry.Registry
 	app        *appsession.Server
+	// quicAddr is the stack's QUIC door, once s.quic has started it.
+	quicAddr string
+	door     *quicdoor.Door
 }
 
 func newStack(t *testing.T) *stack {
@@ -117,7 +122,7 @@ type testBox struct {
 	seq  uint64
 	// liveSeq is the seq of the newest live sent, which hb names.
 	liveSeq uint64
-	conn    *websocket.Conn
+	conn    wire.Conn
 	// heard is what the service told the box after hello_ok.
 	heard chan string
 	start time.Time

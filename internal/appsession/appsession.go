@@ -31,6 +31,7 @@ import (
 	"github.com/srcfl/ftw-cloud/internal/registry"
 	"github.com/srcfl/ftw-cloud/internal/shard"
 	"github.com/srcfl/ftw-cloud/internal/store"
+	"github.com/srcfl/ftw-cloud/internal/wire"
 	"github.com/srcfl/ftw-cloud/internal/wsclose"
 	"github.com/srcfl/ftw/go/protocol/appwire"
 	"github.com/srcfl/ftw/go/protocol/cloudwire"
@@ -200,9 +201,19 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		return
 	}
+	s.ServeConn(conn, home)
+}
+
+// ServeConn runs one phone's session on conn, a WebSocket or QUIC (package
+// quicdoor), for home. It closes conn.
+func (s *Server) ServeConn(conn wire.Conn, home string) {
 	defer conn.Close()
 	appSockets.Add(1)
 	defer appSockets.Add(-1)
+	if !cloudwire.ValidHome(home) {
+		_ = conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(cloudwire.CloseProtocol, ""), time.Now().Add(time.Second))
+		return
+	}
 	conn.SetReadLimit(maxPhoneMessage)
 	sock := s.sockets.Add(conn)
 	defer s.sockets.Remove(sock)
@@ -269,7 +280,7 @@ var errProtocol = errors.New("appsession: the phone broke the protocol")
 // serve runs one session and returns the close code to end it with. Once the
 // session's reader runs, reading is set to a channel that closes when it
 // stops, and only that reader may read the socket.
-func (s *Server) serve(conn *websocket.Conn, home string, reading *<-chan struct{}) (int, error) {
+func (s *Server) serve(conn wire.Conn, home string, reading *<-chan struct{}) (int, error) {
 	start := time.Now()
 	_ = conn.SetReadDeadline(time.Now().Add(handshakeTimeout))
 	kind, msg1, err := conn.ReadMessage()
@@ -445,7 +456,7 @@ func (s *Server) watchOnce(home string) {
 // phoneConn is one phone's session after the handshake.
 type phoneConn struct {
 	s    *Server
-	conn *websocket.Conn
+	conn wire.Conn
 	tr   *appwire.Transport
 	dev  *store.Handle
 	home string
@@ -476,6 +487,11 @@ type phoneConn struct {
 	tunMu  sync.Mutex
 	tunSid uint32
 	hasTun bool
+
+	// heard is set by the phone's first transport message, which proves it
+	// holds message 2. Until then everything goes on the control stream,
+	// behind message 2: over QUIC a datagram could overtake it.
+	heard atomic.Bool
 }
 
 func (c *phoneConn) setLooking(on bool) {
@@ -503,26 +519,43 @@ func (c *phoneConn) stopLooking() {
 
 // write sends one WebSocket message. Only the session's own goroutine
 // writes; pings go through WriteControl, which may run beside it.
-func (c *phoneConn) write(msg []byte) error {
+func (c *phoneConn) write(msg []byte) error { return c.writeAs(websocket.BinaryMessage, msg) }
+
+// writeAs sends one message the way kind says, over QUIC; a WebSocket
+// carries every kind as a binary message.
+func (c *phoneConn) writeAs(kind int, msg []byte) error {
 	if err := c.conn.SetWriteDeadline(time.Now().Add(writeTimeout)); err != nil {
 		return err
 	}
-	return c.conn.WriteMessage(websocket.BinaryMessage, msg)
+	return c.conn.WriteMessage(wire.Kind(c.conn, kind), msg)
 }
 
 // forward sends one box envelope as the box sent it. An envelope too large
 // for a Noise message cannot reach a phone; it is dropped, and the phone sees
 // the gap through the next hb.
-func (c *phoneConn) forward(env []byte) error {
+func (c *phoneConn) forward(env []byte) error { return c.forwardAs(websocket.BinaryMessage, env) }
+
+// forwardAs is forward over the path kind names. Over QUIC an hb, or a live
+// without its source table, goes as a datagram: the newest wins, and a
+// lost one shows as a gap in the phone's freshness rules.
+func (c *phoneConn) forwardAs(kind int, env []byte) error {
 	frame, err := cloudwire.EncodeFrame(env)
 	if err != nil || len(frame)+appwire.TransportOverhead > maxNoiseMessage {
 		return nil
+	}
+	switch {
+	case !c.heard.Load():
+		kind = websocket.BinaryMessage
+	case kind == websocket.BinaryMessage && wire.Kind(c.conn, wire.Datagram) == wire.Datagram:
+		if e, err := cloudwire.DecodeEnvelope(env); err == nil && cloudwire.Datagram(e) {
+			kind = wire.Datagram
+		}
 	}
 	msg, err := c.tr.Encrypt(frame)
 	if err != nil {
 		return err
 	}
-	return c.write(msg)
+	return c.writeAs(kind, msg)
 }
 
 // run forwards until the store ends the session, the phone leaves or breaks
@@ -557,7 +590,11 @@ func (c *phoneConn) run(sess *store.Session) (int, error) {
 			if err != nil {
 				return 0, err
 			}
-			if err := c.forward(env); err != nil {
+			kind := websocket.BinaryMessage
+			if t.Bulk {
+				kind = wire.Bulk
+			}
+			if err := c.forwardAs(kind, env); err != nil {
 				return 0, err
 			}
 			tunUp.Observe(t.Waited())
@@ -598,6 +635,7 @@ func (c *phoneConn) readLoop() (int, error) {
 		if err != nil {
 			return cloudwire.CloseProtocol, err
 		}
+		c.heard.Store(true)
 		if code, err := c.apply(frame); err != nil {
 			return code, err
 		}

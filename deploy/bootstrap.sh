@@ -13,6 +13,9 @@ sed -i '/\sswap\s/d' /etc/fstab
 cat > /etc/sysctl.d/99-ftw-cloud.conf <<'SYSCTL'
 kernel.core_pattern = |/bin/false
 fs.suid_dumpable = 0
+# quic-go asks for 7.5 MB socket buffers for HTTP/3 (deploy/http3.md).
+net.core.rmem_max = 7500000
+net.core.wmem_max = 7500000
 SYSCTL
 sysctl --system >/dev/null
 install -d /etc/systemd/coredump.conf.d
@@ -171,7 +174,9 @@ if ! [[ $rev =~ ^[0-9a-f]{40}$ ]] || ! git merge-base --is-ancestor "$rev" origi
 fi
 git checkout --quiet --detach "$rev"
 
-# Only the image line changes; what keys.sh set stays.
+# Only the image line changes; what keys.sh set, and FTW_CLOUD_H3=false or
+# FTW_CLOUD_QUIC_SESSIONS=false set by hand to turn QUIC off
+# (deploy/http3.md), stay.
 touch "$env"
 sed -i '/^FTW_CLOUD_IMAGE=/d' "$env"
 printf 'FTW_CLOUD_IMAGE=%s\n' "$image" >> "$env"
@@ -192,7 +197,7 @@ systemctl enable ftw-cloud-key.service ftw-cloud.service
 
 # Show that the host rules hold.
 swapon --show
-sysctl kernel.core_pattern
+sysctl kernel.core_pattern net.core.rmem_max
 
 # A host that already runs an image from CI runs it again with the new
 # tooling. A new host waits for the owner to name a digest.
