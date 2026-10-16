@@ -200,7 +200,9 @@ func checkCIMDURL(raw string) (*url.URL, error) {
 	if _, err := netip.ParseAddr(strings.Trim(host, "[]")); err == nil {
 		return nil, errCIMDURL // an address, not a name
 	}
-	if _, ok := asciiHost(host); !ok {
+	// The document's URL names its host as the owner will see it: in
+	// lower case ASCII already.
+	if a, ok := asciiHost(host); !ok || a != host {
 		return nil, errCIMDURL
 	}
 	if u.Path == "" || u.Path == "/" {
