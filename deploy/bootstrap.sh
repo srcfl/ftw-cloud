@@ -174,8 +174,9 @@ if ! [[ $rev =~ ^[0-9a-f]{40}$ ]] || ! git merge-base --is-ancestor "$rev" origi
 fi
 git checkout --quiet --detach "$rev"
 
-# Only the image line changes; what keys.sh set, and FTW_CLOUD_H3=false set
-# by hand to turn HTTP/3 off (deploy/http3.md), stay.
+# Only the image line changes; what keys.sh set, and FTW_CLOUD_H3=false or
+# FTW_CLOUD_QUIC_SESSIONS=false set by hand to turn QUIC off
+# (deploy/http3.md), stay.
 touch "$env"
 sed -i '/^FTW_CLOUD_IMAGE=/d' "$env"
 printf 'FTW_CLOUD_IMAGE=%s\n' "$image" >> "$env"

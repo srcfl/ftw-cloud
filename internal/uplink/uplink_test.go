@@ -414,6 +414,6 @@ func FuzzBoxTun(f *testing.F) {
 		handle, _ := st.For(store.Principal{Kind: store.Box, Home: home})
 		c := &boxConn{u: u, home: home, pub: &key.PublicKey, handle: handle, tun: true,
 			write: func([]byte) error { return nil }, lim: newLimits(time.Now())}
-		_ = c.fromBox(cloudwire.Envelope{T: cloudwire.MsgTun, B: body})
+		_ = c.fromBox(cloudwire.Envelope{T: cloudwire.MsgTun, B: body}, false)
 	})
 }

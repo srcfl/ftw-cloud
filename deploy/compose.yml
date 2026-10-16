@@ -20,6 +20,7 @@ services:
     command:
       - -listen=:443
       - -h3=${FTW_CLOUD_H3:-true}
+      - -quic-sessions=${FTW_CLOUD_QUIC_SESSIONS:-true}
       - -domain=cloud.ftw.energy
       - -state=/state
       - -service-key=/run/secrets/ftw-cloud-service.key

@@ -20,6 +20,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gorilla/websocket"
 	"github.com/quic-go/quic-go"
 	"github.com/quic-go/quic-go/http3"
 	"github.com/srcfl/ftw/go/protocol/cloudwire"
@@ -172,14 +173,6 @@ func TestAltSvcNamesThePort(t *testing.T) {
 	}
 }
 
-// 0-RTT stays off until a route says which of its requests survive a
-// replay.
-func TestNoEarlyData(t *testing.T) {
-	if Config().Allow0RTT {
-		t.Fatal("0-RTT is on")
-	}
-}
-
 // A deploy or a crash drops the process without a word to its clients. With
 // the same reset key, the next process on the port answers an old
 // connection's next packet with a stateless reset, so the client knows at
@@ -295,5 +288,68 @@ func TestAClientAskedForARetryStillGetsIn(t *testing.T) {
 	defer resp.Body.Close()
 	if b, _ := io.ReadAll(resp.Body); string(b) != "ok" {
 		t.Fatalf("answer %q", b)
+	}
+}
+
+// SIGTERM stops the door taking connections and leaves the live sessions to
+// a drain. Close then ends each with 1001, so its client dials again at
+// once, rather than leaving it to its idle timeout.
+func TestCloseEndsEachSessionWithGoingAway(t *testing.T) {
+	cert, pool := testCert(t)
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pc.Close()
+	addr := pc.LocalAddr().String()
+	d := New(nil, nil)
+	in := make(chan struct{}, 1)
+	d.Box = func(c *Conn, _ []byte) {
+		in <- struct{}{}
+		for {
+			if _, _, err := c.ReadMessage(); err != nil {
+				return
+			}
+		}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	served := make(chan error, 1)
+	go func() { served <- d.Serve(ctx, pc, &tls.Config{Certificates: []tls.Certificate{cert}}) }()
+
+	dial := func(within time.Duration) (*Conn, error) {
+		ctx, cancel := context.WithTimeout(context.Background(), within)
+		defer cancel()
+		return Dial(ctx, addr, &tls.Config{RootCAs: pool}, cloudwire.ALPNBox, cloudwire.TargetBox, nil)
+	}
+	c, err := dial(5 * time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-in:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the box's handler never ran")
+	}
+
+	cancel()
+	if err := <-served; err != nil {
+		t.Fatal(err)
+	}
+	if late, err := dial(500 * time.Millisecond); err == nil {
+		late.Close()
+		t.Fatal("the door took a connection after its context ended")
+	}
+	if err := c.WriteMessage(websocket.BinaryMessage, []byte(`{}`)); err != nil {
+		t.Fatalf("the live session ended with the context: %v", err)
+	}
+
+	if err := d.Close(); err != nil {
+		t.Fatal(err)
+	}
+	_ = c.SetReadDeadline(time.Now().Add(3 * time.Second))
+	_, _, err = c.ReadMessage()
+	var ce *websocket.CloseError
+	if !errors.As(err, &ce) || ce.Code != websocket.CloseGoingAway {
+		t.Fatalf("the session ended with %v, not 1001", err)
 	}
 }

@@ -23,10 +23,13 @@ type Out struct {
 	At  time.Duration
 }
 
-// TunOut is one tun for a phone and when it arrived.
+// TunOut is one tun for a phone and when it arrived. Bulk is how it came
+// over QUIC, a lane 1 frame on the box's bulk stream, so the phone's goes
+// the same way; it is never on the wire.
 type TunOut struct {
 	cloudwire.AppTun
-	At time.Duration
+	At   time.Duration
+	Bulk bool
 }
 
 // epoch starts the clock Out and TunOut are stamped with.
@@ -155,7 +158,10 @@ func (s *Session) Ended(sid uint32) {
 
 // Tun hands one tun from the box to the session of the device it names.
 // False when no session of that device is open. A full queue drops it.
-func (x *Handle) Tun(t cloudwire.Tun) bool {
+func (x *Handle) Tun(t cloudwire.Tun) bool { return x.TunBy(t, false) }
+
+// TunBy is Tun for a tun that came on the box's bulk stream, when bulk.
+func (x *Handle) TunBy(t cloudwire.Tun, bulk bool) bool {
 	if x.kind != Box {
 		return false
 	}
@@ -166,7 +172,7 @@ func (x *Handle) Tun(t cloudwire.Tun) bool {
 			continue
 		}
 		select {
-		case sess.tun <- TunOut{AppTun: cloudwire.AppTun{Sid: t.Sid, D: t.D}, At: stamp()}:
+		case sess.tun <- TunOut{AppTun: cloudwire.AppTun{Sid: t.Sid, D: t.D}, At: stamp(), Bulk: bulk}:
 		default:
 			dropPhoneTun.Inc()
 		}

@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/srcfl/ftw-cloud/internal/wire"
 	"github.com/srcfl/ftw/go/protocol"
 	"github.com/srcfl/ftw/go/protocol/appwire"
 	"github.com/srcfl/ftw/go/protocol/cloudwire"
@@ -38,7 +39,7 @@ type tunBox struct {
 	key    *ecdsa.PrivateKey
 	home   string
 	static appwire.KeyPair
-	conn   *websocket.Conn
+	conn   wire.Conn
 	wmu    sync.Mutex
 	seq    uint64
 
@@ -51,6 +52,14 @@ type tunBox struct {
 	heard    []string
 	purged   chan cloudwire.Purged
 	closed   chan struct{}
+	// hsCount counts the phones' handshakes the box ran.
+	hsCount int
+}
+
+func (b *tunBox) handshakes() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.hsCount
 }
 
 type boxSide struct {
@@ -79,10 +88,19 @@ func (s *stack) connectTunBoxAs(key *ecdsa.PrivateKey, static appwire.KeyPair) *
 	if err != nil {
 		s.t.Fatal(err)
 	}
-	s.t.Cleanup(func() { _ = conn.Close() })
-	b.conn = conn
 	cs := conn.NetConn().(*tls.Conn).ConnectionState()
 	ekm, _ := cs.ExportKeyingMaterial(cloudwire.EKMLabel, nil, cloudwire.EKMBytes)
+	b.link(conn, ekm)
+	return b
+}
+
+// link runs the uplink's handshake on conn, bound to ekm, and starts the
+// box serving its phones.
+func (b *tunBox) link(conn wire.Conn, ekm []byte) {
+	b.t.Cleanup(func() { _ = conn.Close() })
+	b.conn = conn
+	pk, _ := cloudwire.PublicKeyBytesOf(&b.key.PublicKey)
+	s := b
 	var ch cloudwire.Challenge
 	if env := b.read(); env.T != cloudwire.MsgChallenge || cloudwire.Unmarshal(env.B, &ch) != nil {
 		s.t.Fatalf("first message %q", env.T)
@@ -94,7 +112,6 @@ func (s *stack) connectTunBoxAs(key *ecdsa.PrivateKey, static appwire.KeyPair) *
 		s.t.Fatalf("second message %q, want hello_ok", env.T)
 	}
 	go b.serve()
-	return b
 }
 
 func (b *tunBox) header() cloudwire.Header {
@@ -117,12 +134,16 @@ func (b *tunBox) read() cloudwire.Envelope {
 	return env
 }
 
-func (b *tunBox) write(env cloudwire.Envelope) {
+func (b *tunBox) write(env cloudwire.Envelope) { b.writeAs(websocket.BinaryMessage, env) }
+
+// writeAs sends env the way kind says: over QUIC, on the bulk stream or as
+// a datagram.
+func (b *tunBox) writeAs(kind int, env cloudwire.Envelope) {
 	raw, _ := env.Encode()
 	frame, _ := cloudwire.EncodeFrame(raw)
 	b.wmu.Lock()
 	defer b.wmu.Unlock()
-	_ = b.conn.WriteMessage(websocket.BinaryMessage, frame)
+	_ = b.conn.WriteMessage(kind, frame)
 }
 
 func (b *tunBox) send(t string, body any) {
@@ -239,6 +260,9 @@ func (b *tunBox) inner(t cloudwire.Tun) {
 	if err != nil {
 		return
 	}
+	b.mu.Lock()
+	b.hsCount++
+	b.mu.Unlock()
 	code, err := hs.ReadMessage(t.D)
 	if err != nil {
 		b.tun(cloudwire.Tun{Dev: t.Dev, Sid: t.Sid})
@@ -276,12 +300,17 @@ func (b *tunBox) endsSeen() []cloudwire.Tun {
 type tunPhone struct {
 	t     *testing.T
 	key   appwire.KeyPair
-	conn  *websocket.Conn
+	conn  wire.Conn
 	tr    *appwire.Transport
 	snap  cloudwire.Snapshot
 	inner *appwire.Transport
 	in    *appwire.InitiatorState
 	tuns  chan cloudwire.AppTun
+	// envs is every envelope that is not a tun, and kinds how each message
+	// came: over QUIC, by stream, bulk stream or datagram.
+	envs  chan cloudwire.Envelope
+	kmu   sync.Mutex
+	kinds map[string][]int
 	code  int
 	// ended is how the stream ended, set before tuns closes.
 	ended error
@@ -291,7 +320,7 @@ type tunPhone struct {
 // message 2.
 func (s *stack) dialPhone(home string, key appwire.KeyPair, now cloudwire.Now, origin string) *tunPhone {
 	s.t.Helper()
-	p := &tunPhone{t: s.t, key: key, tuns: make(chan cloudwire.AppTun, 64)}
+	p := newTunPhone(s.t, key)
 	pool := x509.NewCertPool()
 	pool.AddCert(s.srv.Certificate())
 	d := websocket.Dialer{TLSClientConfig: &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS13}}
@@ -306,9 +335,22 @@ func (s *stack) dialPhone(home string, key appwire.KeyPair, now cloudwire.Now, o
 		}
 		return p
 	}
-	s.t.Cleanup(func() { _ = conn.Close() })
+	p.session(conn, s.noise.Public(), home, now)
+	return p
+}
+
+func newTunPhone(t *testing.T, key appwire.KeyPair) *tunPhone {
+	return &tunPhone{t: t, key: key, tuns: make(chan cloudwire.AppTun, 64), envs: make(chan cloudwire.Envelope, 64),
+		kinds: map[string][]int{}}
+}
+
+// session runs the app session's handshake on conn and starts reading.
+func (p *tunPhone) session(conn wire.Conn, service []byte, home string, now cloudwire.Now) {
+	s := p
+	key := p.key
+	p.t.Cleanup(func() { _ = conn.Close() })
 	p.conn = conn
-	init, err := appwire.NewInitiator(appwire.InitiatorOptions{StaticKey: key, RemoteStatic: s.noise.Public(),
+	init, err := appwire.NewInitiator(appwire.InitiatorOptions{StaticKey: key, RemoteStatic: service,
 		Prologue: cloudwire.AppPrologue(home)})
 	if err != nil {
 		s.t.Fatal(err)
@@ -323,7 +365,7 @@ func (s *stack) dialPhone(home string, key appwire.KeyPair, now cloudwire.Now, o
 		if ok := asClose(err, &ce); ok {
 			p.code = ce.Code
 		}
-		return p
+		return
 	}
 	reply, err := init.ReadMessage(msg2)
 	if err != nil {
@@ -337,7 +379,7 @@ func (s *stack) dialPhone(home string, key appwire.KeyPair, now cloudwire.Now, o
 	go func() {
 		for {
 			_ = conn.SetReadDeadline(time.Time{})
-			_, msg, err := conn.ReadMessage()
+			kind, msg, err := conn.ReadMessage()
 			if err != nil {
 				p.ended = err
 				close(p.tuns)
@@ -349,14 +391,21 @@ func (s *stack) dialPhone(home string, key appwire.KeyPair, now cloudwire.Now, o
 			}
 			payload, _ := cloudwire.DecodeFrame(frame)
 			env, _ := cloudwire.DecodeEnvelope(payload)
+			p.kmu.Lock()
+			p.kinds[env.T] = append(p.kinds[env.T], kind)
+			p.kmu.Unlock()
 			if env.T == cloudwire.MsgTun {
 				var t cloudwire.AppTun
 				_ = cloudwire.Unmarshal(env.B, &t)
 				p.tuns <- t
+				continue
+			}
+			select {
+			case p.envs <- env:
+			default:
 			}
 		}
 	}()
-	return p
 }
 
 func asClose(err error, ce **websocket.CloseError) bool {

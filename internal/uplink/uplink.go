@@ -31,6 +31,7 @@ import (
 	"github.com/srcfl/ftw-cloud/internal/registry"
 	"github.com/srcfl/ftw-cloud/internal/shard"
 	"github.com/srcfl/ftw-cloud/internal/store"
+	"github.com/srcfl/ftw-cloud/internal/wire"
 	"github.com/srcfl/ftw-cloud/internal/wsclose"
 	"github.com/srcfl/ftw/go/protocol"
 	"github.com/srcfl/ftw/go/protocol/cloudwire"
@@ -281,6 +282,13 @@ func (u *Uplink) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		return
 	}
+	u.ServeConn(conn, ekm)
+}
+
+// ServeConn serves one box's uplink on conn, a WebSocket or QUIC (package
+// quicdoor). ekm is the exporter of the TLS session conn rides on, which the
+// box's hello must carry. It closes conn.
+func (u *Uplink) ServeConn(conn wire.Conn, ekm []byte) {
 	defer conn.Close()
 	conn.SetReadLimit(maxBoxFrame)
 	boxSockets.Add(1)
@@ -402,7 +410,7 @@ func verifiedRoster(h registry.Home) (*cloudwire.Roster, bool) {
 // boxConn is one box's connection.
 type boxConn struct {
 	u    *Uplink
-	conn *websocket.Conn
+	conn wire.Conn
 	ekm  []byte
 	// write sends one frame; tests replace it.
 	write   func([]byte) error
@@ -425,6 +433,11 @@ type boxConn struct {
 	// pinger pings the box every pingEvery until stopped.
 	pinger  atomic.Pointer[time.Timer]
 	stopped atomic.Bool
+
+	// newest is the highest seq of each newest-wins class on this
+	// connection. Over QUIC an hb or a live may come as a datagram, out of
+	// order; one older than what the service holds is dropped.
+	newest map[string]uint64
 }
 
 // bucket is a token bucket.
@@ -502,6 +515,9 @@ func (c *boxConn) run() error {
 	env, err := parseUplink(kind, msg)
 	if err != nil {
 		return err
+	}
+	if kind != websocket.BinaryMessage {
+		return fmt.Errorf("%w: hello off the control stream", errProtocol)
 	}
 	hello, err := c.hello(env, nonce)
 	if err != nil {
@@ -594,8 +610,14 @@ func (c *boxConn) run() error {
 		if err != nil {
 			return err
 		}
+		switch {
+		case kind == wire.Datagram && !cloudwire.Datagram(env):
+			return fmt.Errorf("%w: a %s as a datagram", errProtocol, env.T)
+		case kind == wire.Bulk && env.T != cloudwire.MsgTun:
+			return fmt.Errorf("%w: a %s on the bulk stream", errProtocol, env.T)
+		}
 		if env.T == cloudwire.MsgTun && !c.purged {
-			if err := c.fromBox(env); err != nil {
+			if err := c.fromBox(env, kind == wire.Bulk); err != nil {
 				return err
 			}
 			continue
@@ -633,8 +655,9 @@ func (c *boxConn) hello(env cloudwire.Envelope, nonce []byte) (cloudwire.Hello, 
 
 // fromBox routes one tun from the box to the phone whose session it is. It
 // is not signed and never read: d is the phone's and the box's. A phone that
-// has gone gets its session ended at the box.
-func (c *boxConn) fromBox(env cloudwire.Envelope) error {
+// has gone gets its session ended at the box. bulk is a tun from the box's
+// bulk stream, which goes on the phone's.
+func (c *boxConn) fromBox(env cloudwire.Envelope, bulk bool) error {
 	var t cloudwire.Tun
 	if len(env.Sig) != 0 || cloudwire.Unmarshal(env.B, &t) != nil || len(t.D) > cloudwire.TunDataMax || t.Dev == "" {
 		return fmt.Errorf("%w: a tun the service cannot route", errProtocol)
@@ -655,7 +678,7 @@ func (c *boxConn) fromBox(env cloudwire.Envelope) error {
 	}
 	tunFramesUp.Inc()
 	tunBytesUp.Add(int64(len(t.D)))
-	if !c.handle.Tun(t) && !t.Ended() && c.tun {
+	if !c.handle.TunBy(t, bulk) && !t.Ended() && c.tun {
 		return c.send(tun{Dev: t.Dev, Sid: t.Sid})
 	}
 	return nil
@@ -691,9 +714,9 @@ func (c *boxConn) allow() bool {
 }
 
 // parseUplink reads one box frame. Only binary lane 1 frames carry the
-// protocol.
+// protocol, on the control stream, the bulk stream or as a datagram.
 func parseUplink(kind int, msg []byte) (cloudwire.Envelope, error) {
-	if kind != websocket.BinaryMessage {
+	if kind != websocket.BinaryMessage && kind != wire.Bulk && kind != wire.Datagram {
 		return cloudwire.Envelope{}, fmt.Errorf("%w: a text message", errProtocol)
 	}
 	payload, err := cloudwire.DecodeFrame(msg)
@@ -745,6 +768,9 @@ func (c *boxConn) apply(env cloudwire.Envelope) (stop bool, err error) {
 		// The readable copy is off: the service holds no readings.
 		return false, nil
 	}
+	if !c.newer(env.T, h.Seq) {
+		return false, nil
+	}
 	raw, err := env.Encode()
 	if err != nil {
 		return true, err
@@ -756,6 +782,23 @@ func (c *boxConn) apply(env cloudwire.Envelope) (stop bool, err error) {
 		c.u.OnHeld(c.home, env.T, raw)
 	}
 	return false, nil
+}
+
+// newer reports whether a message of a newest-wins class is newer than any
+// of its class on this connection, and remembers it. Over a WebSocket every
+// one is; over QUIC a datagram can arrive after a later message.
+func (c *boxConn) newer(t string, seq uint64) bool {
+	if t != cloudwire.MsgLive && t != cloudwire.MsgHB {
+		return true
+	}
+	if c.newest == nil {
+		c.newest = map[string]uint64{}
+	}
+	if seq <= c.newest[t] {
+		return false
+	}
+	c.newest[t] = seq
+	return true
 }
 
 // carriesTable reports whether a live body holds its source table.

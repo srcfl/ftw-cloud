@@ -1,15 +1,23 @@
 // Package quicdoor is FTW Cloud's door over QUIC: UDP on the same port as
 // the TCP listener, with the same certificate. Each connection goes to the
-// protocol its TLS handshake negotiated by ALPN. Today that is HTTP/3, for
-// the routes that are plain HTTPS: /v1/app/once, /v1/now, /healthz and
-// /source. The sockets, /v1/box and /v1/app, stay on TCP.
+// protocol its TLS handshake negotiated by ALPN:
 //
-// TLS still ends in ftwcloudd, so r.TLS over HTTP/3 is this process's own
-// TLS 1.3 session, and its exporter is the one a client on this connection
-// computes.
+//	h3               HTTP/3, for the plain HTTPS routes: /v1/app/once,
+//	                 /v1/now, /healthz and /source
+//	ftw-cloud-box/1  a box's uplink, served by the same handler as /v1/box
+//	ftw-cloud-app/1  a phone's app session, as /v1/app
+//
+// The uplink and the app session keep their messages; Conn carries them on
+// a control stream, a bulk stream and QUIC DATAGRAMs (docs/protocol-cloud.md
+// in srcfl/ftw, "QUIC").
+//
+// TLS still ends in ftwcloudd, so r.TLS over HTTP/3 and Conn.Exporter are
+// this process's own TLS 1.3 session, and its exporter is the one a client
+// on the same connection computes.
 package quicdoor
 
 import (
+	"bufio"
 	"context"
 	"crypto/rand"
 	"crypto/tls"
@@ -18,13 +26,16 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/quic-go/quic-go"
 	"github.com/quic-go/quic-go/http3"
+	"github.com/srcfl/ftw/go/protocol/cloudwire"
 )
 
 // ALPNH3 is HTTP/3.
@@ -35,14 +46,21 @@ const ALPNH3 = http3.NextProtoH3
 const AltSvcMaxAge = 24 * time.Hour
 
 const (
-	// idleTimeout closes a quiet connection. A watch posts once per glance
-	// and a widget reads once per refresh, so nothing here stays open long.
-	idleTimeout = 30 * time.Second
-	// handshakeTimeout bounds the TLS handshake. A client that takes longer
-	// is better served by the WebSocket it races against.
+	// h3Idle closes a quiet HTTP/3 connection. A watch posts once per
+	// glance and a widget reads once per refresh, so nothing there stays
+	// open long.
+	h3Idle = 30 * time.Second
+	// handshakeTimeout bounds the TLS handshake, and the target after it. A
+	// client that takes longer is better served by the WebSocket it races
+	// against.
 	handshakeTimeout = 5 * time.Second
-	// maxStreams bounds concurrent requests on one connection.
+	// maxStreams bounds concurrent requests on one HTTP/3 connection. A box
+	// or a phone may open one control stream and one bulk stream; Conn
+	// closes on more.
 	maxStreams = 32
+	// maxMessage1 bounds the phone's Noise message 1, which the door reads
+	// itself; the app session checks it again, more tightly.
+	maxMessage1 = 64 << 10
 )
 
 // retryRate is how many new connections a second the door takes on trust.
@@ -79,29 +97,50 @@ func (n *newcomers) retry(net.Addr) bool {
 	return false
 }
 
-// Door accepts QUIC connections and serves HTTP/3 on them.
+// Door accepts QUIC connections and hands each to its protocol.
 type Door struct {
-	h3  *http3.Server
-	log *slog.Logger
+	h3    *http3.Server
+	log   *slog.Logger
+	early *earlyGuard
+	now   func() time.Time
+	// EarlyRepeats counts message 1s in early data the guard held back: a
+	// replay, or a client that reused an ephemeral key.
+	EarlyRepeats atomic.Int64
+	// Box serves a box's uplink over QUIC and App a phone's session, with
+	// the same handlers as their WebSockets. A nil one refuses its ALPN.
+	// Set before Serve.
+	Box func(conn *Conn, ekm []byte)
+	App func(conn *Conn, home string)
 	// ResetKey makes stateless resets (RFC 9000, 10.3). After a restart, a
 	// client of the old process gets a reset for its next packet instead
 	// of silence until its idle timeout. Keep it across restarts; nil sends
 	// none. Set before Serve.
 	ResetKey *quic.StatelessResetKey
+
+	mu     sync.Mutex
+	tr     *quic.Transport
+	live   map[*Conn]struct{}
+	closed bool
 }
 
-// New serves handler over HTTP/3. A nil log writes nothing.
+// New serves handler over HTTP/3; a nil handler refuses h3. A nil log
+// writes nothing.
 func New(handler http.Handler, log *slog.Logger) *Door {
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
 	}
-	return &Door{log: log, h3: &http3.Server{
-		Handler:     onlyRequests(handler),
-		IdleTimeout: idleTimeout,
-		// quic-go's own log names the peer's address, and an address beside
-		// a time is what links a household to its traffic.
-		Logger: nil,
-	}}
+	d := &Door{log: log, now: time.Now}
+	d.early = newEarlyGuard(func() time.Time { return d.now() })
+	if handler != nil {
+		d.h3 = &http3.Server{
+			Handler:     onlyRequests(handler),
+			IdleTimeout: h3Idle,
+			// quic-go's own log names the peer's address, and an address
+			// beside a time is what links a household to its traffic.
+			Logger: nil,
+		}
+	}
+	return d
 }
 
 // ResetKeyFile reads the stateless reset key at path, or writes a new one
@@ -150,40 +189,53 @@ func PortOf(addr string) (int, error) {
 func TLSConfig(base *tls.Config) *tls.Config {
 	c := base.Clone()
 	c.MinVersion = tls.VersionTLS13
-	c.NextProtos = []string{ALPNH3}
+	c.NextProtos = []string{ALPNH3, cloudwire.ALPNBox, cloudwire.ALPNApp}
 	return c
 }
 
-// Config is the QUIC configuration the door listens with. 0-RTT is off: a
-// request in early data can be replayed, and no route here has said which
-// of its requests survive that.
+// Config is the QUIC configuration the door listens with. A connection
+// silent for cloudwire.QUICIdleTimeout ends; boxes and phones send keepalives
+// well inside it. Datagrams are on for the readable copy's hb and live.
+// 0-RTT is on, under the rules in early.go.
 func Config() *quic.Config {
 	return &quic.Config{
 		HandshakeIdleTimeout:  handshakeTimeout,
-		MaxIdleTimeout:        idleTimeout,
+		MaxIdleTimeout:        cloudwire.QUICIdleTimeout,
 		MaxIncomingStreams:    maxStreams,
 		MaxIncomingUniStreams: 8,
-		Allow0RTT:             false,
+		EnableDatagrams:       true,
+		Allow0RTT:             true,
 	}
 }
 
-// Serve accepts connections on pc until ctx ends, then closes them. pc is
-// the caller's, and Serve closes it on its way out.
+// Serve accepts connections on pc until ctx ends. Then it takes no more,
+// and the live sessions stay until Close, so a drain can end each with its
+// own code. pc is the caller's.
 func (d *Door) Serve(ctx context.Context, pc net.PacketConn, tlsConf *tls.Config) error {
 	tr := &quic.Transport{Conn: pc, StatelessResetKey: d.ResetKey,
-		VerifySourceAddress: (&newcomers{now: time.Now}).retry}
-	defer tr.Close()
-	ln, err := tr.Listen(TLSConfig(tlsConf), Config())
+		VerifySourceAddress: (&newcomers{now: d.now}).retry}
+	d.mu.Lock()
+	if d.closed {
+		d.mu.Unlock()
+		return nil
+	}
+	d.tr = tr
+	d.mu.Unlock()
+	tc := TLSConfig(tlsConf)
+	limitEarlyData(tc, d.now)
+	ln, err := tr.ListenEarly(tc, Config())
 	if err != nil {
 		return err
 	}
 	defer ln.Close()
 	go func() {
 		<-ctx.Done()
+		_ = ln.Close()
 		shutdown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		_ = d.h3.Shutdown(shutdown)
-		_ = ln.Close()
+		if d.h3 != nil {
+			_ = d.h3.Shutdown(shutdown)
+		}
 	}()
 	for {
 		conn, err := ln.Accept(ctx)
@@ -197,15 +249,166 @@ func (d *Door) Serve(ctx context.Context, pc net.PacketConn, tlsConf *tls.Config
 	}
 }
 
+// Close ends every live session with 1001, going away, so its client dials
+// again at once, and then the transport. Call it on the way out, after
+// Serve's context is done and after any drain.
+func (d *Door) Close() error {
+	d.mu.Lock()
+	d.closed = true
+	tr, live := d.tr, d.live
+	d.live = nil
+	d.mu.Unlock()
+	var wg sync.WaitGroup
+	for c := range live {
+		wg.Go(func() { _ = c.Close() })
+	}
+	wg.Wait()
+	if tr == nil {
+		return nil
+	}
+	return tr.Close()
+}
+
+// track counts c as live until untrack, or reports false once Close has
+// begun.
+func (d *Door) track(c *Conn) bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.closed {
+		return false
+	}
+	if d.live == nil {
+		d.live = map[*Conn]struct{}{}
+	}
+	d.live[c] = struct{}{}
+	return true
+}
+
+func (d *Door) untrack(c *Conn) {
+	d.mu.Lock()
+	delete(d.live, c)
+	d.mu.Unlock()
+}
+
 func (d *Door) serve(conn *quic.Conn) {
-	switch conn.ConnectionState().TLS.NegotiatedProtocol {
-	case ALPNH3:
+	switch alpn := conn.ConnectionState().TLS.NegotiatedProtocol; {
+	case alpn == ALPNH3 && d.h3 != nil:
+		// No route has said which of its requests survive a replay, so a
+		// request in early data waits for the handshake.
+		if !d.handshake(conn) {
+			return
+		}
 		if err := d.h3.ServeQUICConn(conn); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			d.log.Debug("HTTP/3 connection ended", "err", err)
 		}
+	case alpn == cloudwire.ALPNBox && d.Box != nil, alpn == cloudwire.ALPNApp && d.App != nil:
+		d.session(conn, alpn == cloudwire.ALPNBox)
 	default:
 		_ = conn.CloseWithError(quic.ApplicationErrorCode(http3.ErrCodeVersionFallback), "")
 	}
+}
+
+// session reads the control stream's target and hands the connection to the
+// box's or the phone's handler.
+func (d *Door) session(qc *quic.Conn, box bool) {
+	refuse := func(code int) { _ = qc.CloseWithError(quic.ApplicationErrorCode(code), "") }
+	ctx, cancel := context.WithTimeout(qc.Context(), handshakeTimeout)
+	defer cancel()
+	ctrl, err := qc.AcceptStream(ctx)
+	if err != nil {
+		refuse(cloudwire.CloseProtocol)
+		return
+	}
+	_ = ctrl.SetReadDeadline(time.Now().Add(handshakeTimeout))
+	r := bufio.NewReader(ctrl)
+	raw, err := cloudwire.ReadMessage(r, cloudwire.MaxTarget)
+	_ = ctrl.SetReadDeadline(time.Time{})
+	if err != nil {
+		refuse(cloudwire.CloseProtocol)
+		return
+	}
+	target, err := url.Parse(string(raw))
+	if err != nil {
+		refuse(cloudwire.CloseProtocol)
+		return
+	}
+	home := target.Query().Get(cloudwire.AppHomeParam)
+	if !box && (target.Path != cloudwire.AppPath || !cloudwire.ValidHome(home)) {
+		refuse(cloudwire.CloseProtocol)
+		return
+	}
+	c := newConn(qc, ctrl, r, box)
+	if !box {
+		// Message 1, read here so that a copy replayed in early data stops at
+		// the door: the second one with an ephemeral key waits for a
+		// handshake its sender cannot finish.
+		_ = ctrl.SetReadDeadline(time.Now().Add(handshakeTimeout))
+		msg1, err := cloudwire.ReadMessage(r, maxMessage1)
+		_ = ctrl.SetReadDeadline(time.Time{})
+		if err != nil {
+			refuse(cloudwire.CloseProtocol)
+			return
+		}
+		switch {
+		case !done(qc):
+			if !d.early.first(msg1) {
+				d.EarlyRepeats.Add(1)
+				if !d.handshake(qc) {
+					return
+				}
+			}
+		case qc.ConnectionState().Used0RTT:
+			d.early.remember(msg1)
+		}
+		c.pending = [][]byte{msg1}
+	}
+	var ekm []byte
+	if box {
+		if target.Path != cloudwire.TargetBox {
+			refuse(cloudwire.CloseProtocol)
+			return
+		}
+		if ekm, err = c.Exporter(); err != nil {
+			refuse(cloudwire.CloseProtocol)
+			return
+		}
+	}
+	if !d.track(c) {
+		_ = c.Close()
+		return
+	}
+	defer d.untrack(c)
+	if box {
+		d.Box(c, ekm)
+	} else {
+		d.App(c, home)
+	}
+	_ = c.Close()
+}
+
+// done reports whether the connection's handshake has completed.
+func done(qc *quic.Conn) bool {
+	select {
+	case <-qc.HandshakeComplete():
+		return true
+	default:
+		return false
+	}
+}
+
+// handshake waits for the handshake, and closes a connection whose
+// handshake does not finish in time.
+func (d *Door) handshake(qc *quic.Conn) bool {
+	t := time.NewTimer(handshakeTimeout)
+	defer t.Stop()
+	select {
+	case <-qc.HandshakeComplete():
+		return true
+	case <-qc.Context().Done():
+	case <-t.C:
+		_ = qc.CloseWithError(quic.ApplicationErrorCode(cloudwire.CloseProtocol), "")
+	}
+	return false
 }
 
 // onlyRequests refuses extended CONNECT. quic-go's HTTP/3 server always

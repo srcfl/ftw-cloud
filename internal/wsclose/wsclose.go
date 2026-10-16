@@ -5,7 +5,8 @@
 // such as 4421 with the right shard or 4503 with the spread.
 //
 // A Set tracks every socket a handler holds from the upgrade on, so a drain
-// reaches those still in their handshake too.
+// reaches those still in their handshake too. A socket is a WebSocket or a
+// QUIC connection (package quicdoor), whose close is its application error.
 package wsclose
 
 import (
@@ -14,6 +15,8 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+
+	"github.com/srcfl/ftw-cloud/internal/wire"
 )
 
 // Wait is how long a close waits for the peer's.
@@ -21,7 +24,7 @@ const Wait = time.Second
 
 // Socket is one tracked socket.
 type Socket struct {
-	Conn *websocket.Conn
+	Conn wire.Conn
 	sent atomic.Bool
 }
 
@@ -58,7 +61,7 @@ type Set struct {
 }
 
 // Add tracks a socket from its upgrade on.
-func (t *Set) Add(c *websocket.Conn) *Socket {
+func (t *Set) Add(c wire.Conn) *Socket {
 	s := &Socket{Conn: c}
 	t.mu.Lock()
 	defer t.mu.Unlock()

@@ -100,6 +100,7 @@ func serve(args []string) error {
 	restartRate := fs.Int("restart-rate", defaultRestartRate, "sockets a second the next instance can take after a restart; sets the spread of the redial")
 	restartMin := fs.Duration("restart-spread-min", 15*time.Second, "the shortest spread: longer than the port stays closed while the next container starts")
 	h3 := fs.Bool("h3", true, "also serve HTTP/3 on the same address over UDP, and say so in Alt-Svc")
+	quicSessions := fs.Bool("quic-sessions", true, "also serve /v1/box and /v1/app over QUIC on the same address over UDP")
 	_ = fs.Parse(args)
 
 	harden()
@@ -233,22 +234,33 @@ func serve(args []string) error {
 		tlsConfig.NextProtos = append(tlsConfig.NextProtos, "acme-tls/1")
 	}
 
-	// HTTP/3 on UDP, beside TCP, for the plain HTTPS routes. The sockets
-	// stay on TCP. The UDP port is bound before Alt-Svc says it is there,
-	// and a port that will not bind leaves TCP serving alone: QUIC is the
-	// fast path, never the only one.
+	// QUIC on UDP, beside TCP: HTTP/3 for the plain HTTPS routes, and the
+	// uplink and the app session with the handlers their WebSockets have.
+	// The UDP port is bound before Alt-Svc says it is there, and a port that
+	// will not bind leaves TCP serving alone: QUIC is the fast path, never
+	// the only one.
 	var door *quicdoor.Door
 	var udp net.PacketConn
-	if *h3 {
+	if *h3 || *quicSessions {
 		port, err := quicdoor.PortOf(*listen)
 		if err != nil {
 			return err
 		}
 		if udp, err = net.ListenPacket("udp", *listen); err != nil {
-			log.Error("HTTP/3 is off: UDP did not bind; TCP serves alone", "err", err)
+			log.Error("QUIC is off: UDP did not bind; TCP serves alone", "err", err)
 		} else {
-			srv.AltSvc = quicdoor.AltSvc(port)
-			door = quicdoor.New(srv.Handler(), log)
+			var h3Handler http.Handler
+			if *h3 {
+				srv.AltSvc = quicdoor.AltSvc(port)
+				h3Handler = srv.Handler()
+			}
+			door = quicdoor.New(h3Handler, log)
+			if *quicSessions {
+				door.Box = func(c *quicdoor.Conn, ekm []byte) { up.ServeConn(c, ekm) }
+				if srv.App != nil {
+					door.App = func(c *quicdoor.Conn, home string) { srv.App.ServeConn(c, home) }
+				}
+			}
 			if door.ResetKey, err = quicdoor.ResetKeyFile(filepath.Join(*stateDir, "quic-reset.key")); err != nil {
 				log.Warn("no stateless resets: a client waits out its idle timeout after a restart", "err", err)
 			}
@@ -333,15 +345,19 @@ func serve(args []string) error {
 		stopPush()
 	}()
 	if door != nil {
+		// On the way out the live QUIC sessions end with 1001. Silence would
+		// leave each client to its idle timeout.
+		defer door.Close()
 		go func() {
 			if err := door.Serve(ctx, udp, tlsConfig); err != nil {
-				log.Error("HTTP/3 stopped; TCP serves on", "err", err)
+				log.Error("QUIC stopped; TCP serves on", "err", err)
 			}
 		}()
 	}
 
 	pub, _ := cloudwire.PublicKeyBytesOf(&key.PublicKey)
-	log.Info("ftwcloudd listening", "addr", *listen, "h3", door != nil, "shard", shards.Self(), "shards", shards.Shards(),
+	log.Info("ftwcloudd listening", "addr", *listen, "h3", srv.AltSvc != "", "quic_sessions", door != nil && door.Box != nil,
+		"shard", shards.Self(), "shards", shards.Shards(),
 		"service_key", base64.RawURLEncoding.EncodeToString(pub), "noise_key", base64.RawURLEncoding.EncodeToString(noise.Public()))
 	err = httpSrv.ListenAndServeTLS("", "")
 	if err != nil && !errors.Is(err, http.ErrServerClosed) {

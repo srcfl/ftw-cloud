@@ -1,10 +1,16 @@
-# HTTP/3 on UDP 443
+# QUIC on UDP 443
 
-`ftwcloudd` serves HTTP/3 on UDP 443 beside TCP 443, with the same
-certificate, for the routes that are plain HTTPS: `/v1/app/once`, `/v1/now`,
-`/healthz` and `/source`. The sockets, `/v1/box` and `/v1/app`, stay on TCP.
-TCP responses carry `Alt-Svc: h3=":443"; ma=86400`, except a WebSocket
-upgrade's.
+`ftwcloudd` serves QUIC on UDP 443 beside TCP 443, with the same
+certificate:
+
+- HTTP/3 (`h3`) for the routes that are plain HTTPS: `/v1/app/once`,
+  `/v1/now`, `/healthz` and `/source`. TCP responses carry
+  `Alt-Svc: h3=":443"; ma=86400`, except a WebSocket upgrade's.
+- The uplink (`ftw-cloud-box/1`) and the app session (`ftw-cloud-app/1`),
+  with the WebSockets' handlers and messages (srcfl/ftw
+  `docs/protocol-cloud.md`, "QUIC"). Boxes and phones race QUIC against the
+  WebSocket and fall back to it on their own, so shutting UDP never cuts
+  anyone off; it only makes them slower.
 
 What it buys, measured by `scripts/netem-once.sh` (a watch's one-shot read,
 40 ms round trip): a read on a new connection takes two round trips instead
@@ -69,11 +75,12 @@ Nothing restarts on it; it is there to look at after a deploy.
 
 ## Turning it off
 
-Without a release: on the host, add `FTW_CLOUD_H3=false` to
-`/etc/ftw-cloud/compose.env` and run `systemctl restart ftw-cloud.service`.
-`ftw-cloud-deploy` keeps that line. The service then stops listening on UDP
-and stops sending `Alt-Svc`. Wait a day, the `ma` in `Alt-Svc`, before you
-shut UDP 443 in the security group:
+Without a release: on the host, add `FTW_CLOUD_H3=false`,
+`FTW_CLOUD_QUIC_SESSIONS=false` or both to `/etc/ftw-cloud/compose.env` and
+run `systemctl restart ftw-cloud.service`. `ftw-cloud-deploy` keeps those
+lines. With both off the service stops listening on UDP and stops sending
+`Alt-Svc`. Wait a day, the `ma` in `Alt-Svc`, before you shut UDP 443 in
+the security group:
 
 ```bash
 aws ec2 revoke-security-group-ingress --region eu-north-1 --group-id sg-098992ad382ecf94a \
@@ -93,12 +100,22 @@ aws ec2 revoke-security-group-ingress --region eu-north-1 --group-id sg-098992ad
   knows at once, not after its idle timeout
   (`TestARestartResetsTheOldProcesssConnections`). Keep the file with the
   rest of `/state`; a new key only costs one idle timeout per client.
+  On SIGTERM the door stops taking connections, and on the way out it ends
+  each live session with 1001, going away
+  (`TestCloseEndsEachSessionWithGoingAway`). The drain, which closes them
+  first with 4503 and a spread, goes between the two.
 - **Floods.** Past 200 new connections a second the door asks each to prove
   its address with a Retry, which costs a real client one round trip and a
-  spoofed one everything. A handshake gets 5 s. A UDP port that will not
-  bind turns HTTP/3 off and leaves TCP serving.
-- **No 0-RTT.** A request in early data can be replayed, so the door refuses
-  early data until a route says which of its requests survive a replay.
+  spoofed one everything. A handshake gets 5 s, and the door holds at most
+  a set number of handshakes and connections at once. A UDP port that will
+  not bind turns QUIC off and leaves TCP serving.
+- **0-RTT.** The sessions take early data under the protocol's rules: a
+  box's target may get its `challenge` before the handshake ends, and a
+  phone's session waits for the handshake, so a replayed flight changes
+  nothing. A ticket allows early data for a day. HTTP/3 requests in early
+  data wait for the handshake. A restart draws new ticket keys.
+- **A UDP load balancer** in front would have to keep each QUIC connection
+  on one host by its connection id; with one host there is none.
 - **No DNS record for HTTP/3.** An `HTTPS` record with `alpn=h3` would tell
   every client, the sockets' too, to try QUIC on the first connection.
   `Alt-Svc` reaches only clients of the plain routes.
