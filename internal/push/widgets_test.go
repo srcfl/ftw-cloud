@@ -190,10 +190,14 @@ func TestWidgetPushesAreCappedPerHome(t *testing.T) {
 }
 
 // A roster prunes each kind by its own scope: a device that loses events
-// keeps its widgets, and one that loses live loses them.
+// keeps its widgets, and one that loses live loses them. An owner's phone
+// keeps its alerts for notices.
 func TestARosterPrunesEachKindByItsScope(t *testing.T) {
 	r := newRig(t)
+	viewer := r.viewer
+	viewer.Scopes = r.all
 	_ = r.register(t, r.owner, r.all, "alerts")
+	_ = r.register(t, viewer, r.all, "viewer-alerts")
 	_ = r.registerWidgets(t, r.owner, r.all, "widgets")
 	grant := cloudwire.Grant{ID: bytes.Repeat([]byte{4}, 16), Scopes: r.all}
 	count := func(kind string) int {
@@ -202,9 +206,10 @@ func TestARosterPrunesEachKindByItsScope(t *testing.T) {
 	}
 	noEvents := r.owner
 	noEvents.Scopes = []string{protocol.ScopeLiveRead}
-	r.svc.Roster(r.home, &cloudwire.Roster{Devices: []cloudwire.Device{noEvents}, Grant: grant})
-	if count(cloudwire.PushKindAlert) != 0 || count(KindWidgets) != 1 {
-		t.Fatal("losing events did not drop alerts alone")
+	viewerNoEvents := r.viewer
+	r.svc.Roster(r.home, &cloudwire.Roster{Devices: []cloudwire.Device{noEvents, viewerNoEvents}, Grant: grant})
+	if count(cloudwire.PushKindAlert) != 1 || count(KindWidgets) != 1 {
+		t.Fatal("losing events did not drop the viewer's alerts alone")
 	}
 	grant.Scopes = []string{protocol.ScopeEventsRead}
 	r.svc.Roster(r.home, &cloudwire.Roster{Devices: []cloudwire.Device{r.owner}, Grant: grant})

@@ -11,15 +11,26 @@
 // saying it was restarting on purpose. It carries no arguments and no
 // buttons.
 //
+// A security notice (docs/agents.md, Push kinds) goes the same way, signed
+// by the box and unchanged, but to the home's owner devices only, with the
+// readable copy on or off: someone gained access, asks for a change, is
+// about to lose access, or can now approve access. It goes to no viewer and
+// no watch token, reaches an owner an owner has suspended, and Apple may
+// hold it for a day. A notice that carries anything beyond its kind and, on
+// agent.added, the client's name is dropped and counted, and so is an event
+// of a notice's kind.
+//
 // A widgets push carries no data. It tells WidgetKit to reload the app's
 // widgets, which then read GET /v1/now with their own token. It goes when
 // a box's priced hours reach further than before, as when tomorrow's prices
 // arrive, and when a car is plugged in.
 //
 // Tokens are bound to roster entries. A device registers for alerts only if
-// its role and the owner's grant both allow ftw.events.read, and for widgets
-// only if they allow ftw.live.read. A roster that drops the device, moves
-// its epoch or narrows its scope drops its tokens. A device an owner has
+// its role and the owner's grant both allow ftw.events.read, or it is an
+// owner's phone, which gets notices whatever the grant; and for widgets
+// only if they allow ftw.live.read. An event and box.unreachable go only to
+// devices the newest roster lets read events. A roster that drops the
+// device, moves its epoch or narrows its scope drops its tokens. A device an owner has
 // suspended gets nothing until the suspension ends. Nothing here logs a
 // token or a home id.
 //
@@ -52,6 +63,9 @@ const (
 	// raises a few notifications a day; past this, something is wrong and
 	// the rest are dropped.
 	MaxAlertsPerHour = 20
+	// MaxNoticesPerHour is the same for security notices, counted apart,
+	// so a flood of events cannot hide a new owner and the reverse.
+	MaxNoticesPerHour = 20
 	// MaxTokensPerDevice bounds a device's registrations of one kind. A
 	// phone holds one token per kind; a few more cover a reinstall before
 	// Apple says the old token is gone. Past it the oldest goes, so one
@@ -109,6 +123,9 @@ var (
 	alertsQueued   = metrics.Default.Gauge("ftwcloud_push_queued", "Pushes waiting for a worker.", "kind", "alert")
 	widgetsQueued  = metrics.Default.Gauge("ftwcloud_push_queued", "Pushes waiting for a worker.", "kind", "widgets")
 	alertsDropped  = metrics.Drop("push_alert_queue_full")
+	noticesRefused = metrics.Drop("push_notice_not_a_notice")
+	eventsRefused  = metrics.Drop("push_event_of_a_notice_kind")
+	tooLarge       = metrics.Drop("push_payload_over_apns_limit")
 	widgetsDropped = metrics.Drop("push_widgets_queue_full")
 	widgetsMerged  = metrics.Default.Counter("ftwcloud_push_coalesced_total", "Widget pushes merged into one already waiting.")
 	pushCapped     = metrics.Drop("push_home_cap")
@@ -193,7 +210,7 @@ type Service struct {
 // alertJob is one alert to a home's phones. On a retry, regs holds the
 // registrations Apple did not take, and tries how often it went.
 // unreachable marks box.unreachable, which is recorded as told only once a
-// phone took it.
+// phone took it. notice marks a security notice, for the owners alone.
 type alertJob struct {
 	home        string
 	payload     []byte
@@ -201,7 +218,18 @@ type alertJob struct {
 	tries       int
 	regs        []registry.PushReg
 	unreachable bool
+	notice      bool
 }
+
+// noticeBucket counts notices against MaxNoticesPerHour, apart from alerts.
+const noticeBucket = "notice"
+
+// maxPayload is the most APNs takes in an alert.
+const maxPayload = 4096
+
+// noticeExpiry is how long Apple may keep trying to deliver a notice: it
+// states a lasting fact, and the phone shows it for that long.
+const noticeExpiry = cloudwire.NoticeMaxAgeMs * time.Millisecond
 
 // homeState is one home's box connection, as the dead man's switch sees it,
 // its recent pushes per kind, and what its widgets show that can change.
@@ -378,7 +406,7 @@ func (s *Service) Register(home string, dev cloudwire.Device, scopes []string, r
 	if app == "" {
 		app = cloudwire.PushAppIPhone
 	}
-	if !known || !slices.Contains(scopes, k.scope) ||
+	if !known || !(slices.Contains(scopes, k.scope) || getsNotices(dev, r.Kind, app)) ||
 		(app != cloudwire.PushAppIPhone && app != cloudwire.PushAppWatch) ||
 		len(r.APNsToken) == 0 || len(r.APNsToken) > cloudwire.APNsTokenMaxBytes ||
 		(r.Environment != cloudwire.PushSandbox && r.Environment != cloudwire.PushProduction) {
@@ -389,6 +417,12 @@ func (s *Service) Register(home string, dev cloudwire.Device, scopes []string, r
 		return err
 	}
 	return s.reg.PushTrim(home, dev.ID, r.Kind, MaxTokensPerDevice)
+}
+
+// getsNotices reports whether a registration of kind may stand for
+// security notices alone: an owner's phone, for alerts.
+func getsNotices(dev cloudwire.Device, kindName, app string) bool {
+	return kindName == cloudwire.PushKindAlert && dev.Role == protocol.RoleOwner && app == cloudwire.PushAppIPhone
 }
 
 // Unregister forgets one of the device's tokens.
@@ -411,10 +445,11 @@ func (s *Service) Roster(home string, r *cloudwire.Roster) {
 	for _, d := range r.Devices {
 		devices[d.ID] = d
 	}
-	if err := s.reg.PushPrune(home, func(id string, epoch uint64, kindName string) bool {
+	if err := s.reg.PushPrune(home, func(id string, epoch uint64, kindName, app string) bool {
 		d, ok := devices[id]
 		k, known := kinds[kindName]
-		return ok && known && d.Epoch == epoch && slices.Contains(d.Scopes, k.scope) && slices.Contains(r.Grant.Scopes, k.scope)
+		return ok && known && d.Epoch == epoch && (getsNotices(d, kindName, app) ||
+			slices.Contains(d.Scopes, k.scope) && slices.Contains(r.Grant.Scopes, k.scope))
 	}); err != nil {
 		s.log.Warn("could not drop the tokens a roster dropped", "err", err)
 	}
@@ -435,13 +470,60 @@ func (s *Service) Held(home, class string, envelope []byte) {
 }
 
 // Event sends a box-signed event envelope, as it arrived, to the home's
-// registered phones.
+// registered phones. An event of a notice's kind is dropped: a box from
+// before notices reached FTW Cloud sends one as both, and as an event it
+// would reach the viewers too.
 func (s *Service) Event(home string, envelope []byte) {
+	if env, err := cloudwire.DecodeEnvelope(envelope); err == nil {
+		var ev struct {
+			Kind string `cbor:"kind"`
+		}
+		if cloudwire.Unmarshal(env.B, &ev) == nil && slices.Contains(cloudwire.NoticeKinds, ev.Kind) {
+			eventsRefused.Inc()
+			return
+		}
+	}
 	payload, err := cloudwire.AlertPayload(cloudwire.Alert{Home: home, Event: envelope})
-	if err != nil {
+	if err != nil || !fits(payload) {
 		return
 	}
 	s.queueAlert(alertJob{home: home, payload: payload, expires: s.now().Add(eventExpiry)})
+}
+
+// fits reports whether Apple takes a payload this size, and counts one it
+// would not.
+func fits(payload []byte) bool {
+	if len(payload) > maxPayload {
+		tooLarge.Inc()
+		return false
+	}
+	return true
+}
+
+// Notice sends a box-signed security notice, as it arrived, to the home's
+// owner phones. envelope must hold a notice and nothing more
+// (cloudwire.ReadNotice); anything else is dropped and counted.
+func (s *Service) Notice(home string, envelope []byte) {
+	env, err := cloudwire.DecodeEnvelope(envelope)
+	if err == nil && env.T == cloudwire.MsgNotice {
+		_, err = cloudwire.ReadNotice(env.B)
+	}
+	if err != nil || env.T != cloudwire.MsgNotice {
+		noticesRefused.Inc()
+		s.log.Warn("push: a box sent a notice that is not one; dropped")
+		return
+	}
+	payload, err := cloudwire.AlertPayload(cloudwire.Alert{Home: home, Event: envelope})
+	if err != nil || !fits(payload) {
+		return
+	}
+	// Counted here, so a box past its cap fills no queue.
+	if !s.allowIn(home, noticeBucket, MaxNoticesPerHour) {
+		pushCapped.Inc()
+		s.log.Warn("a home passed its push cap; push dropped", "kind", noticeBucket, "cap_per_hour", MaxNoticesPerHour)
+		return
+	}
+	s.queueAlert(alertJob{home: home, payload: payload, expires: s.now().Add(noticeExpiry), notice: true})
 }
 
 // widgetsChanged reports whether prices now reach further than before, or a
@@ -651,36 +733,88 @@ func (s *Service) state(home string) *homeState {
 
 // allow counts one push of a kind against the home's hourly cap.
 func (s *Service) allow(home, kindName string) bool {
+	return s.allowIn(home, kindName, kinds[kindName].perHour)
+}
+
+// allowIn counts one push against a bucket's hourly cap.
+func (s *Service) allowIn(home, bucket string, perHour int) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	st := s.state(home)
 	now := s.now()
 	var keep []time.Time
-	for _, at := range st.sent[kindName] {
+	for _, at := range st.sent[bucket] {
 		if now.Sub(at) < time.Hour {
 			keep = append(keep, at)
 		}
 	}
-	if len(keep) >= kinds[kindName].perHour {
-		st.sent[kindName] = keep
+	if len(keep) >= perHour {
+		st.sent[bucket] = keep
 		return false
 	}
-	st.sent[kindName] = append(keep, now)
+	st.sent[bucket] = append(keep, now)
 	return true
 }
 
 // regs is a home's registrations of a kind that may get a push now. A
 // device an owner has suspended keeps its tokens, so lifting the suspension
-// brings its pushes back, but gets nothing meanwhile. A watch's token waits
-// for the watch app's topic.
-func (s *Service) regs(home, kindName string) ([]registry.PushReg, error) {
+// brings its pushes back, but gets nothing meanwhile, except a notice: one
+// owner must not be able to silence another before adding an agent, a key
+// or an owner. A watch's token waits for the watch app's topic.
+func (s *Service) regs(home, kindName string, notice bool) ([]registry.PushReg, error) {
 	regs, err := s.reg.PushRegs(home, kindName)
 	if err != nil {
 		return nil, err
 	}
 	return slices.DeleteFunc(regs, func(r registry.PushReg) bool {
-		return s.reg.Suspended(home, r.DeviceID, r.Epoch) || (r.App == cloudwire.PushAppWatch && s.WatchApp == "")
+		return (!notice && s.reg.Suspended(home, r.DeviceID, r.Epoch)) || (r.App == cloudwire.PushAppWatch && s.WatchApp == "")
 	}), nil
+}
+
+// audience keeps the registrations an alert may reach, by the newest roster
+// the home's box signed: for a notice, its owner phones; for anything else,
+// the devices whose effective scope has ftw.events.read. Without a roster
+// held, an event goes where the tokens are, as the roster prunes them, and
+// a notice goes nowhere.
+func (s *Service) audience(home string, notice bool, regs []registry.PushReg) ([]registry.PushReg, error) {
+	r, err := s.roster(home)
+	if err != nil || (r == nil && !notice) {
+		return regs, err
+	}
+	devices := map[string]cloudwire.Device{}
+	if r != nil {
+		for _, d := range r.Devices {
+			devices[d.ID] = d
+		}
+	}
+	events := r != nil && slices.Contains(r.Grant.Scopes, protocol.ScopeEventsRead)
+	return slices.DeleteFunc(regs, func(reg registry.PushReg) bool {
+		d, ok := devices[reg.DeviceID]
+		if !ok || d.Epoch != reg.Epoch {
+			return true
+		}
+		if notice {
+			return !getsNotices(d, cloudwire.PushKindAlert, reg.App)
+		}
+		return !events || !slices.Contains(d.Scopes, protocol.ScopeEventsRead)
+	}), nil
+}
+
+// roster is the newest roster the home's box signed, nil when none is held.
+func (s *Service) roster(home string) (*cloudwire.Roster, error) {
+	h, ok, err := s.reg.Get(home)
+	if err != nil || !ok || len(h.Roster) == 0 {
+		return nil, err
+	}
+	env, err := cloudwire.DecodeEnvelope(h.Roster)
+	if err != nil {
+		return nil, err
+	}
+	var r cloudwire.Roster
+	if err := cloudwire.Unmarshal(env.B, &r); err != nil {
+		return nil, err
+	}
+	return &r, nil
 }
 
 // sendAlert posts an alert to the home's registered devices. What Apple or
@@ -691,7 +825,10 @@ func (s *Service) sendAlert(ctx context.Context, job alertJob) {
 	if s.sender == nil {
 		return
 	}
-	fresh, err := s.regs(job.home, cloudwire.PushKindAlert)
+	fresh, err := s.regs(job.home, cloudwire.PushKindAlert, job.notice)
+	if err == nil && len(fresh) > 0 {
+		fresh, err = s.audience(job.home, job.notice, fresh)
+	}
 	if err != nil {
 		s.log.Warn("could not read push registrations; the alert goes again", "err", err)
 		s.retryAlert(job, nil)
@@ -703,7 +840,8 @@ func (s *Service) sendAlert(ctx context.Context, job alertJob) {
 			s.told(job)
 			return
 		}
-		if !s.allow(job.home, cloudwire.PushKindAlert) {
+		// A notice was counted when it came.
+		if !job.notice && !s.allow(job.home, cloudwire.PushKindAlert) {
 			pushCapped.Inc()
 			s.log.Warn("a home passed its push cap; push dropped", "kind", cloudwire.PushKindAlert, "cap_per_hour", MaxAlertsPerHour)
 			s.told(job)
@@ -771,7 +909,7 @@ func (s *Service) sendWidgets(ctx context.Context, home string) bool {
 	if s.sender == nil {
 		return true
 	}
-	regs, err := s.regs(home, KindWidgets)
+	regs, err := s.regs(home, KindWidgets, false)
 	if err != nil {
 		return false
 	}

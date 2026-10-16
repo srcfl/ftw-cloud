@@ -265,13 +265,14 @@ func TestABoxHandleCannotOpenASession(t *testing.T) {
 
 // A token reaches its home through the roster entry it is bound to, at that
 // epoch, and reads only Now: the newest live, prices and hb, and the newest
-// live that carried sources.
+// live that carried sources. Never lp, car, plan, health or tiles.
 func TestATokenReadsOnlyNow(t *testing.T) {
 	s, box, _ := filled(t)
 	_ = box.Put(cloudwire.MsgPrices, []byte("prices"), 8, false)
 	_ = box.Put(cloudwire.MsgLP, []byte("lp"), 9, false)
 	_ = box.Put(cloudwire.MsgHealth, []byte("health"), 10, false)
 	_ = box.Put(cloudwire.MsgTiles, []byte("tiles"), 11, false)
+	_ = box.Put(cloudwire.MsgCar, []byte("car"), 12, false)
 	box.SetRoster(roster(2, protocol.CloudScopes...))
 	x, err := s.For(Principal{Kind: Token, Home: "h1", DeviceID: "owner"})
 	if err != nil {

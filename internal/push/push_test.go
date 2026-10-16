@@ -175,10 +175,8 @@ func TestOnlyADeviceThatMayReadEventsRegisters(t *testing.T) {
 		t.Fatalf("a viewer registered: %v", err)
 	}
 	// An owner under a grant that leaves events out has no events scope
-	// in its effective scope.
-	if err := r.register(t, r.owner, []string{protocol.ScopeLiveRead}, "owner-token"); err != ErrNotForThisDevice {
-		t.Fatalf("an owner without events registered: %v", err)
-	}
+	// in its effective scope, and registers for the notices alone
+	// (notice_test.go). The rest of this test is about the request.
 	bad := []cloudwire.PushRegister{
 		{APNsToken: []byte("t"), Environment: "staging", Kind: cloudwire.PushKindAlert},
 		{APNsToken: []byte("t"), Environment: cloudwire.PushSandbox, Kind: "liveactivity"},
@@ -263,11 +261,15 @@ func TestARosterThatDropsOrNarrowsADeviceDropsItsTokens(t *testing.T) {
 	if regs, _ := r.reg.PushRegs(r.home, cloudwire.PushKindAlert); len(regs) != 0 {
 		t.Fatalf("after a new epoch: %+v", regs)
 	}
-	// And a grant that drops events drops every token.
+	// A grant that drops events drops a viewer's token; an owner's phone
+	// keeps its own for notices.
+	viewer := r.viewer
+	viewer.Scopes = r.all
 	_ = r.register(t, again, r.all, "c")
+	_ = r.register(t, viewer, r.all, "d")
 	grant.Scopes = []string{protocol.ScopeLiveRead}
-	r.svc.Roster(r.home, &cloudwire.Roster{Devices: []cloudwire.Device{again}, Grant: grant})
-	if regs, _ := r.reg.PushRegs(r.home, cloudwire.PushKindAlert); len(regs) != 0 {
+	r.svc.Roster(r.home, &cloudwire.Roster{Devices: []cloudwire.Device{again, viewer}, Grant: grant})
+	if regs, _ := r.reg.PushRegs(r.home, cloudwire.PushKindAlert); len(regs) != 1 || regs[0].DeviceID != again.ID {
 		t.Fatalf("after the grant dropped events: %+v", regs)
 	}
 }

@@ -115,6 +115,13 @@ to it yet.
   device, and go when the roster drops them or Apple says they are gone.
   Apple's key comes from Parameter Store
   ([deploy/apns.md](deploy/apns.md)).
+- **Security notices.** A box's signed `notice` (someone gained access,
+  asks for a change, is about to lose access, can now approve access, or
+  paired as an owner) goes the same way, unchanged, but to the home's owner
+  phones only, with the readable copy on or off, and never to a viewer or a
+  watch. An owner's phone may therefore register for alerts with the copy
+  off. A notice holding anything beyond its kind and, on `agent.added`, the
+  client's name is dropped and counted. Notices have their own hourly cap.
 - **Widget push.** A widget registers its push token with `push.register
   {kind: widgets}`, which needs `ftw.live.read`. A watch registers its
   alert and widget tokens with `app: watch`; its pushes go to the watch

@@ -187,6 +187,7 @@ func serve(args []string) error {
 	pushSvc.WatchApp = *apnsWatch
 	pushSvc.Owns = shards.Ours
 	up.OnHeld = pushSvc.Held
+	up.OnNotice = pushSvc.Notice
 	up.OnRoster = func(home string, r *cloudwire.Roster) {
 		pushSvc.Roster(home, r)
 		tokens.Roster(home, r)
