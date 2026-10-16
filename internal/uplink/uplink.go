@@ -136,6 +136,10 @@ type Uplink struct {
 	OnHeld   func(home, class string, envelope []byte)
 	OnRoster func(home string, r *cloudwire.Roster)
 	OnGone   func(home, why string, conn uint64)
+	// OnNotice gets each security notice, as the box signed it, with the
+	// readable copy on or off. The service holds none. It runs on the
+	// box's goroutine and must not block. Set before serving.
+	OnNotice func(home string, envelope []byte)
 	// OnPurge hears that a box purged its home, each time it asks, so what
 	// other parts keep for the home goes with it. It runs on the box's
 	// goroutine and must not block. Set before serving.
@@ -760,6 +764,19 @@ func (c *boxConn) apply(env cloudwire.Envelope) (stop bool, err error) {
 		return true, nil
 	case cloudwire.MsgHello:
 		return true, fmt.Errorf("%w: a second hello", errProtocol)
+	case cloudwire.MsgNotice:
+		// For the owners' phones whatever the grant, so not behind
+		// Serving(), which is the copy; push checks that it holds a notice
+		// and nothing more. A box that has sent no roster names no owner,
+		// and its notice costs nothing.
+		if r, _ := c.handle.Roster(); r != nil && c.u.OnNotice != nil {
+			raw, err := env.Encode()
+			if err != nil {
+				return true, err
+			}
+			c.u.OnNotice(c.home, raw)
+		}
+		return false, nil
 	}
 
 	if _, forwarded := cloudwire.ClassScope[env.T]; !forwarded {

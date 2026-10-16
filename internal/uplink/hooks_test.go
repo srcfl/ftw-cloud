@@ -129,3 +129,52 @@ func TestTheEndOfAnUplinkSaysWhy(t *testing.T) {
 		t.Fatalf("connects %d", conns())
 	}
 }
+
+// A security notice reaches push as the box signed it with the readable copy
+// off, and the service holds nothing of it.
+func TestANoticeReachesPushWithTheCopyOff(t *testing.T) {
+	s := newService(t)
+	h := listen(s)
+	var notices [][]byte
+	var mu sync.Mutex
+	s.up.OnNotice = func(_ string, env []byte) { mu.Lock(); notices = append(notices, env); mu.Unlock() }
+	b := newBox(t)
+	_, _ = b.connect(s, nil)
+	off := b.roster()
+	off.Grant = cloudwire.Grant{Controller: cloudwire.ControllerSourceful}
+	b.send(cloudwire.MsgRoster, off)
+	sent := b.send(cloudwire.MsgNotice, cloudwire.Notice{Header: b.header(), Kind: protocol.PushOwnerAdded})
+	wait(t, "the notice", func() bool { mu.Lock(); defer mu.Unlock(); return len(notices) == 1 })
+	if !bytes.Equal(notices[0], sent) {
+		t.Fatal("push got other bytes than the box sent")
+	}
+	if classes := h.count(func(h *heard) int { return len(h.classes) }); classes() != 0 {
+		t.Fatalf("the service held %v with the copy off", h.classes)
+	}
+	if b.closed() {
+		t.Fatal("a notice closed the uplink")
+	}
+}
+
+// A box that has sent no roster names no owner: its notice goes nowhere and
+// costs push nothing.
+func TestANoticeBeforeARosterGoesNowhere(t *testing.T) {
+	s := newService(t)
+	var mu sync.Mutex
+	n := 0
+	s.up.OnNotice = func(string, []byte) { mu.Lock(); n++; mu.Unlock() }
+	b := newBox(t)
+	_, _ = b.connect(s, nil)
+	b.send(cloudwire.MsgNotice, cloudwire.Notice{Header: b.header(), Kind: protocol.PushOwnerAdded})
+	off := b.roster()
+	off.Grant = cloudwire.Grant{Controller: cloudwire.ControllerSourceful}
+	b.send(cloudwire.MsgRoster, off)
+	b.send(cloudwire.MsgNotice, cloudwire.Notice{Header: b.header(), Kind: protocol.PushOwnerAdded})
+	wait(t, "the notice after the roster", func() bool { mu.Lock(); defer mu.Unlock(); return n >= 1 })
+	time.Sleep(100 * time.Millisecond)
+	mu.Lock()
+	defer mu.Unlock()
+	if n != 1 {
+		t.Fatalf("push heard %d notices, want the one after the roster", n)
+	}
+}
