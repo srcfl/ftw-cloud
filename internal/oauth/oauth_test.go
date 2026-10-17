@@ -802,6 +802,58 @@ func TestRevokeAtTheBoxEndsTheTokens(t *testing.T) {
 	}
 }
 
+// A grant the owner renews keeps its tokens past its first end, and every
+// refresh token ends when the box's newest roster says the grant ends, never
+// later: not when it is renewed for a year, not when it is cut to an hour.
+func TestARefreshTokenFollowsTheGrantTheBoxSets(t *testing.T) {
+	g := newRig(t)
+	f := g.start(cimdID, cimdBack, "")
+	tk := g.approve(f, cimdID) // the box grants 30 days
+	key := f.agentKey(t)
+	refresh := func(tok string) (int, tokens) {
+		g.t.Helper()
+		return g.token(url.Values{"grant_type": {grantRefresh}, "refresh_token": {tok}, "client_id": {cimdID}})
+	}
+	endsWithGrant := func(tok string) {
+		t.Helper()
+		row, ok, _ := g.s.st.token(tok)
+		a, _, _ := g.s.st.agent(home, cloudwire.DeviceID(key))
+		if !ok || !row.Expires.Equal(a.Expires) {
+			t.Fatalf("the refresh token ends %v, the grant %v", row.Expires, a.Expires)
+		}
+	}
+	endsWithGrant(tk.Refresh)
+
+	// On day 29 the owner renews it for a year.
+	g.advance(29 * 24 * time.Hour)
+	g.roster(home, agentFor(key, cimdID, g.now().Add(365*24*time.Hour), ScopeLiveRead, ScopePlanRead))
+	status, tk2 := refresh(tk.Refresh)
+	if status != http.StatusOK {
+		t.Fatalf("refresh after the renewal: %d", status)
+	}
+	endsWithGrant(tk2.Refresh)
+	g.advance(2 * 24 * time.Hour)
+	status, tk3 := refresh(tk2.Refresh)
+	if status != http.StatusOK {
+		t.Fatalf("a renewed grant lost its tokens at its first end: %d", status)
+	}
+	if _, aerr := g.bearer(tk3.Access); aerr != nil {
+		t.Fatalf("the token after the first end: %+v", aerr)
+	}
+
+	// The owner cuts it to an hour: the next refresh token ends with it.
+	g.roster(home, agentFor(key, cimdID, g.now().Add(time.Hour), ScopeLiveRead, ScopePlanRead))
+	status, tk4 := refresh(tk3.Refresh)
+	if status != http.StatusOK {
+		t.Fatalf("refresh after the cut: %d", status)
+	}
+	endsWithGrant(tk4.Refresh)
+	g.advance(time.Hour + time.Second)
+	if status, _ := refresh(tk4.Refresh); status != http.StatusBadRequest {
+		t.Fatalf("refresh after the grant ended: %d", status)
+	}
+}
+
 // An agent whose time the box set runs out fails, and is swept.
 func TestAnExpiredAgentFails(t *testing.T) {
 	g := newRig(t)
@@ -1061,8 +1113,9 @@ func TestApprovalOutlastsAKeysPartThatIsAway(t *testing.T) {
 
 // The offer: the contract's SignedOffer, which protocol.OpenOffer opens
 // with the offer key pinned by its kid. It carries the agent's key, the
-// client and its host, what it asks for, the code and an end within ten
-// minutes, and no home; in the QR, the link and the request's details alike.
+// client and its host, what it asks for, a year as the longest the owner may
+// grant, the code and an end within ten minutes, and no home; in the QR, the
+// link and the request's details alike.
 func TestTheOfferIsSignedAndCarriesTheConsent(t *testing.T) {
 	g := newRig(t)
 	f := g.start(cimdID, cimdBack, ScopeLiveRead+" "+ScopeDispatchHold)
@@ -1082,7 +1135,7 @@ func TestTheOfferIsSignedAndCarriesTheConsent(t *testing.T) {
 	if o.Home != "" || !bytes.Equal(o.Key, f.agentKey(t)) || o.Role != protocol.RoleAgent || o.Client != "Claude" ||
 		o.ClientID != cimdID || o.ClientHost != "example.com" || o.Verified || o.Code != f.view.Code ||
 		!slices.Equal(o.Scopes, []string{ScopeDispatchHold, ScopeLiveRead}) || !slices.Equal(o.Ops, []string{"loadpoint.hold"}) ||
-		o.Caps.HoldS == 0 || o.TTLS != uint64(protocol.AgentMaxMs/1000) || o.ExpMs > g.now().UnixMilli()+protocol.OfferTTLMs {
+		o.Caps.HoldS == 0 || o.TTLS != 365*24*60*60 || o.ExpMs > g.now().UnixMilli()+protocol.OfferTTLMs {
 		t.Fatalf("offer %+v", o)
 	}
 	// Another key does not open it, and it ends.

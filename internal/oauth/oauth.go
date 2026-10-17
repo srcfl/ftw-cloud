@@ -64,9 +64,10 @@ const (
 	// AccessTTL is an access token's life. Short: a token that leaks is
 	// worth little, and a revoked agent loses access at its box anyway.
 	AccessTTL = 10 * time.Minute
-	// RefreshTTL caps a refresh token, and an agent's own end caps it
-	// sooner.
-	RefreshTTL = 30 * 24 * time.Hour
+	// RefreshTTL caps each refresh token at the longest grant an agent may
+	// have, and the agent's own end caps it sooner. A refresh takes the end
+	// the box sets now, so a grant the owner renews keeps its tokens.
+	RefreshTTL = time.Duration(protocol.AgentMaxMs) * time.Millisecond
 )
 
 // Scopes. Each is a right the box grants an agent, by its registry name

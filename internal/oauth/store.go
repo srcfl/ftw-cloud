@@ -363,8 +363,8 @@ func (s *store) issueCode(rid, code string, expires time.Time) error {
 
 // redeem spends an authorization code once. A code presented a second time
 // is reported as reused, and the caller revokes what the first use got:
-// the spent code's hash outlives its consent for as long as those tokens
-// may live.
+// the spent code's hash outlives its consent for as long as one refresh
+// token may live.
 func (s *store) redeem(code string, now time.Time) (c consent, ridHash []byte, reused bool, err error) {
 	tx, err := s.db.Begin()
 	if err != nil {

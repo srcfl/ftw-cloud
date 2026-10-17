@@ -236,11 +236,12 @@ func (s *Server) refresh(w http.ResponseWriter, r *http.Request, cl client) {
 		tokenError(w, http.StatusBadRequest, "invalid_grant", "the owner removed this assistant")
 		return
 	}
-	s.issue(w, t.Family, cl.ID, a, scope, t.Expires)
+	s.issue(w, t.Family, cl.ID, a, scope, s.now().Add(RefreshTTL))
 }
 
 // issue writes a new access token and a new refresh token of one family.
-// The refresh token ends no later than refreshEnd or the agent.
+// The refresh token ends no later than refreshEnd or the agent's end as the
+// box's newest roster sets it.
 func (s *Server) issue(w http.ResponseWriter, family []byte, clientID string, a agentRow, scope string, refreshEnd time.Time) {
 	now := s.now()
 	if a.Expires.Before(refreshEnd) {
