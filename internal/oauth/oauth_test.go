@@ -802,6 +802,63 @@ func TestRevokeAtTheBoxEndsTheTokens(t *testing.T) {
 	}
 }
 
+// A grant the owner renews keeps its tokens past its first end, even when
+// the assistant made no call in between: the refresh token does not end with
+// the grant it was issued under. An access token never outlives the grant,
+// and once the grant the box sets has ended, a refresh fails.
+func TestARefreshTokenFollowsTheGrantTheBoxSets(t *testing.T) {
+	g := newRig(t)
+	f := g.start(cimdID, cimdBack, "")
+	tk := g.approve(f, cimdID) // the box grants 30 days
+	key := f.agentKey(t)
+	refresh := func(tok string) (int, tokens) {
+		g.t.Helper()
+		return g.token(url.Values{"grant_type": {grantRefresh}, "refresh_token": {tok}, "client_id": {cimdID}})
+	}
+
+	// The assistant goes quiet after day 0. On day 29 the owner renews the
+	// grant for a year; on day 31 the assistant comes back with the refresh
+	// token it was given on day 0.
+	g.advance(29 * 24 * time.Hour)
+	g.roster(home, agentFor(key, cimdID, g.now().Add(365*24*time.Hour), ScopeLiveRead, ScopePlanRead))
+	g.advance(2 * 24 * time.Hour)
+	status, tk2 := refresh(tk.Refresh)
+	if status != http.StatusOK {
+		t.Fatalf("an idle assistant lost a renewed grant at its first end: %d", status)
+	}
+	if _, aerr := g.bearer(tk2.Access); aerr != nil {
+		t.Fatalf("the token after the first end: %+v", aerr)
+	}
+
+	// The owner cuts it to five minutes: the access token ends with it.
+	g.roster(home, agentFor(key, cimdID, g.now().Add(5*time.Minute), ScopeLiveRead, ScopePlanRead))
+	status, tk3 := refresh(tk2.Refresh)
+	if status != http.StatusOK || tk3.Expires > 300 {
+		t.Fatalf("refresh after the cut: %d, access for %d s", status, tk3.Expires)
+	}
+	g.advance(5*time.Minute + time.Second)
+	if _, aerr := g.bearer(tk3.Access); aerr == nil {
+		t.Fatal("an access token outlived the grant")
+	}
+	if status, _ := refresh(tk3.Refresh); status != http.StatusBadRequest {
+		t.Fatalf("refresh after the grant ended: %d", status)
+	}
+}
+
+// A roster that sets an end past the longest grant is taken as a year from
+// now.
+func TestARosterEndPastAYearIsCut(t *testing.T) {
+	g := newRig(t)
+	f := g.start(cimdID, cimdBack, "")
+	g.approve(f, cimdID)
+	key := f.agentKey(t)
+	g.roster(home, agentFor(key, cimdID, g.now().Add(2*365*24*time.Hour), ScopeLiveRead, ScopePlanRead))
+	a, ok, _ := g.s.st.agent(home, cloudwire.DeviceID(key))
+	if most := g.now().Add(365 * 24 * time.Hour); !ok || a.Expires.After(most) {
+		t.Fatalf("the agent ends %v, past %v", a.Expires, most)
+	}
+}
+
 // An agent whose time the box set runs out fails, and is swept.
 func TestAnExpiredAgentFails(t *testing.T) {
 	g := newRig(t)
@@ -929,8 +986,11 @@ func TestTheConsentPage(t *testing.T) {
 	page := string(body)
 	for _, want := range []string{"Let Claude into your home?", "From example.com. FTW Cloud does not know this client", "127.0.0.1:8123",
 		"a program on this computer", "<svg", AppLink, scopeWords[ScopeDispatchHold], "Control lasts minutes",
-		// An owner with no app approves and removes on the box's own page.
-		"open Settings, then Access, and type", "in the FTW app or on your box"} {
+		// The QR code or the link opens the app; the code is for an owner
+		// who has neither, in the app or on the box's own page.
+		"scan the QR code with your phone's camera, or tap the button on your phone",
+		"Type this code in the FTW app under Settings → Assistants and support → Add an assistant, or on your box's own page under Settings → Access",
+		"in the FTW app or on your box"} {
 		if !strings.Contains(page, want) {
 			t.Fatalf("the page lacks %q", want)
 		}
@@ -1071,8 +1131,9 @@ func TestApprovalOutlastsAKeysPartThatIsAway(t *testing.T) {
 
 // The offer: the contract's SignedOffer, which protocol.OpenOffer opens
 // with the offer key pinned by its kid. It carries the agent's key, the
-// client and its host, what it asks for, the code and an end within ten
-// minutes, and no home; in the QR, the link and the request's details alike.
+// client and its host, what it asks for, a year as the longest the owner may
+// grant, the code and an end within ten minutes, and no home; in the QR, the
+// link and the request's details alike.
 func TestTheOfferIsSignedAndCarriesTheConsent(t *testing.T) {
 	g := newRig(t)
 	f := g.start(cimdID, cimdBack, ScopeLiveRead+" "+ScopeDispatchHold)
@@ -1092,7 +1153,7 @@ func TestTheOfferIsSignedAndCarriesTheConsent(t *testing.T) {
 	if o.Home != "" || !bytes.Equal(o.Key, f.agentKey(t)) || o.Role != protocol.RoleAgent || o.Client != "Claude" ||
 		o.ClientID != cimdID || o.ClientHost != "example.com" || o.Verified || o.Code != f.view.Code ||
 		!slices.Equal(o.Scopes, []string{ScopeDispatchHold, ScopeLiveRead}) || !slices.Equal(o.Ops, []string{"loadpoint.hold"}) ||
-		o.Caps.HoldS == 0 || o.TTLS != uint64(protocol.AgentMaxMs/1000) || o.ExpMs > g.now().UnixMilli()+protocol.OfferTTLMs {
+		o.Caps.HoldS == 0 || o.TTLS != 365*24*60*60 || o.ExpMs > g.now().UnixMilli()+protocol.OfferTTLMs {
 		t.Fatalf("offer %+v", o)
 	}
 	// Another key does not open it, and it ends.

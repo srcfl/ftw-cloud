@@ -32,7 +32,9 @@ var proposedHoldCaps = protocol.Caps{HoldS: protocol.HoldSMax, MaxW: 11_000, Per
 
 // buildOffer is the offer for one consent: the agent's key, what its client
 // asks for, and the code on the page. The home is left empty: the owner
-// picks it, in the app or on the box's page.
+// picks it, in the app or on the box's page. So the offer asks for the
+// longest an agent may have; the app and the box page start at 30 days and
+// offer a box no more than it takes (docs/agents.md, Mixed versions).
 func buildOffer(c consent) protocol.GrantOffer {
 	scopes := slices.Sorted(slices.Values(splitScope(c.Scope)))
 	var ops []string
