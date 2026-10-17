@@ -48,6 +48,7 @@ func newServer(t *testing.T) (*Server, string) {
 		t.Fatal(err)
 	}
 	up.Statistics = true
+	s.Statistics.(*statistics.Service).Enabled = true
 	// A home with readings in it, held the way a box's uplink holds them.
 	const home = "canaryhomecanaryhomecanary"
 	box, _ := st.For(store.Principal{Kind: store.Box, Home: home})

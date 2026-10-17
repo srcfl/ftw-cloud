@@ -385,7 +385,13 @@ The sender refuses redirects, proxies and local destinations.
 
 `GET /v1/stats` publishes only group cells under
 `ftw-project-stats-2026-10-v1`. Boxes send signed `stats` hours only after the
-owner accepts that policy. The previous statistics policy sends no new
+owner accepts that policy and the service advertises it in signed `hello_ok`.
+The service starts with collection off. After the signed C8 DPIA review,
+operators can set `FTW_CLOUD_STATISTICS_POLICY` to that exact policy in the
+host's compose environment; empty keeps it off. An unapproved policy makes
+`/v1/stats` return 503 with `FTW-Statistics-State: disabled`. Withdrawal,
+purge and retention remain active while collection is off. The review draft
+is in [privacy/project-statistics-dpia.md](privacy/project-statistics-dpia.md). The previous statistics policy sends no new
 fields. Reporting installations in the last 24 closed hours are not people
 or total FTW installs. Power and capacity are configured; energy sums
 recorded hours, including partial hours. Missing data is unknown.
@@ -408,4 +414,12 @@ does not upload earlier ledger history.
 Deploying this ingestion scope still needs the signed C8 DPIA and the
 updated consent text described by Core's ADR 0008. This change does not
 claim that sign-off, change an owner's saved choice, or release a Core
-update. The existing app statistics switch does not accept the new policy.
+update. The paired native consent change requires a fresh choice for this policy.
+
+
+The separate anonymous daily-report feed is `GET /v1/fleet/public`. It exposes
+only daily counts and dimension labels with at least 10 reports, for at most
+90 days. It contains imported relay history and new reports received by Cloud;
+consumers replace the old archive rather than adding both. It needs no hourly
+energy policy. Averaging seven complete UTC days gives an estimate of active
+reporting installations, never people or all installations ever made.

@@ -11,10 +11,11 @@ import (
 )
 
 type Service struct {
-	Reg    *registry.Registry
-	mu     sync.Mutex
-	cached []byte
-	at     time.Time
+	Reg     *registry.Registry
+	Enabled bool
+	mu      sync.Mutex
+	cached  []byte
+	at      time.Time
 }
 
 func New(reg *registry.Registry) (*Service, error) {
@@ -26,6 +27,12 @@ func New(reg *registry.Registry) (*Service, error) {
 
 func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "public, max-age=60")
+	if !s.Enabled {
+		w.Header().Set("Retry-After", "3600")
+		w.Header().Set("FTW-Statistics-State", "disabled")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		return
+	}
 	if r.Method != http.MethodGet {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return

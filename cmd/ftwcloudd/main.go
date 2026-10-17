@@ -99,6 +99,7 @@ func serve(args []string) error {
 	devCapture := fs.String("dev-apns-capture", "", "write each alert to this directory instead of sending it to Apple (development builds only)")
 	keysSocket := fs.String("keys-socket", "/run/ftw-cloud-keys/keys.sock", "ftwkeysd's socket; assistants can connect only while it answers")
 	shardsPath := fs.String("shards", "", "shard directory, JSON; without it this instance holds every home")
+	statsPolicy := fs.String("statistics-policy", "", "approved statistics policy; empty keeps hourly collection off pending C8 sign-off")
 	metricsAddr := fs.String("metrics-listen", defaultMetricsAddr, "loopback address for /metrics; empty turns it off")
 	restartRate := fs.Int("restart-rate", defaultRestartRate, "sockets a second the next instance can take after a restart; sets the spread of the redial")
 	restartMin := fs.Duration("restart-spread-min", 15*time.Second, "the shortest spread: longer than the port stays closed while the next container starts")
@@ -120,6 +121,9 @@ func serve(args []string) error {
 		log.Warn("no Noise key: phones cannot read from FTW Cloud until one is installed", "path", *noisePath)
 	} else if err != nil {
 		return err
+	}
+	if *statsPolicy != "" && *statsPolicy != cloudwire.StatsPolicy {
+		return fmt.Errorf("unknown statistics policy")
 	}
 	shards := shard.Single(*domain)
 	if *shardsPath != "" {
@@ -144,7 +148,9 @@ func serve(args []string) error {
 	if err != nil {
 		return err
 	}
-	up.Statistics = true
+	up.StatisticsStore = true
+	up.Statistics = *statsPolicy == cloudwire.StatsPolicy
+	usageSvc.Enabled = up.Statistics
 	// A restart is a deploy, and commands ride through here: phones are
 	// admitted by the rosters their boxes signed before, without waiting
 	// for every box to reconnect.

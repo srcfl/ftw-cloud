@@ -102,12 +102,13 @@ func TunDropped() int64 { return dropTunUp.Load() + dropTunDown.Load() }
 // Uplink is the /v1/box handler.
 type Uplink struct {
 	// Statistics is set before serving, after the consent tables exist.
-	Statistics bool
-	store      *store.Store
-	registry   *registry.Registry
-	key        *ecdsa.PrivateKey
-	log        *slog.Logger
-	now        func() time.Time
+	Statistics      bool
+	StatisticsStore bool
+	store           *store.Store
+	registry        *registry.Registry
+	key             *ecdsa.PrivateKey
+	log             *slog.Logger
+	now             func() time.Time
 
 	mu    sync.Mutex
 	conns map[string]*boxConn
@@ -559,7 +560,11 @@ func (c *boxConn) run() error {
 			return err
 		}
 	}
-	if err := c.send(helloOK{BoxNonce: hello.BoxNonce, EKM: c.ekm, Have: map[string]string{}, RosterSeq: c.rosterSeq()}); err != nil {
+	statsPolicy := ""
+	if c.u.Statistics {
+		statsPolicy = cloudwire.StatsPolicy
+	}
+	if err := c.send(helloOK{StatsPolicy: statsPolicy, BoxNonce: hello.BoxNonce, EKM: c.ekm, Have: map[string]string{}, RosterSeq: c.rosterSeq()}); err != nil {
 		return err
 	}
 	boxHandshake.Since(c.started)
@@ -907,7 +912,7 @@ func (c *boxConn) roster(env cloudwire.Envelope) error {
 	if !c.handle.SetRoster(&r) {
 		return nil // older than what is held: ignored
 	}
-	if c.u.Statistics {
+	if c.u.Statistics || c.u.StatisticsStore {
 		if err := c.u.registry.StatisticsGrant(c.home, g); err != nil {
 			return err
 		}

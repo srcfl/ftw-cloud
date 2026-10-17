@@ -37,7 +37,7 @@ import (
 const SourceArchive = "/usr/share/ftw-cloud/source.tar.gz"
 
 // Routes are every path the service answers.
-var Routes = append([]string{"/v1/box", "/v1/app", "/v1/app/once", "/v1/now", "/v1/fleet", "/v1/stats", "/source", "/healthz", "/mcp"}, oauth.Routes...)
+var Routes = append([]string{"/v1/box", "/v1/app", "/v1/app/once", "/v1/now", "/v1/fleet", "/v1/fleet/public", "/v1/stats", "/source", "/healthz", "/mcp"}, oauth.Routes...)
 
 // devRoutes adds a local inspection route in binaries built with
 // -tags ftwclouddev. It is nil in every other build.
@@ -92,6 +92,11 @@ func (s *Server) Handler() http.Handler {
 	}
 	if s.Fleet != nil {
 		mux.Handle("/v1/fleet", s.Fleet)
+		if f, ok := s.Fleet.(interface {
+			Public(http.ResponseWriter, *http.Request)
+		}); ok {
+			mux.HandleFunc("/v1/fleet/public", f.Public)
+		}
 	} else {
 		mux.HandleFunc("/v1/fleet", notYet)
 	}
