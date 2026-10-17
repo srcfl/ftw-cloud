@@ -19,6 +19,8 @@ services:
       - '443:443/udp'
     command:
       - -listen=:443
+      # Set only after the C8 DPIA and policy text have been signed off.
+      - -statistics-policy=${FTW_CLOUD_STATISTICS_POLICY:-}
       - -h3=${FTW_CLOUD_H3:-true}
       - -quic-sessions=${FTW_CLOUD_QUIC_SESSIONS:-true}
       - -domain=cloud.ftw.energy

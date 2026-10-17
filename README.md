@@ -380,3 +380,46 @@ events scope and suspension before sending. A readable-copy grant is not
 needed. The roster holds the delivery endpoints and ciphertext; a separate
 per-home row holds only the current outage's sent ids. Purge removes both.
 The sender refuses redirects, proxies and local destinations.
+
+## Project usage statistics
+
+`GET /v1/stats` publishes only group cells under
+`ftw-project-stats-2026-10-v1`. Boxes send signed `stats` hours only after the
+owner accepts that policy and the service advertises it in signed `hello_ok`.
+The service starts with collection off. After the signed C8 DPIA review,
+operators can set `FTW_CLOUD_STATISTICS_POLICY` to that exact policy in the
+host's compose environment; empty keeps it off. An unapproved policy makes
+`/v1/stats` return 503 with `FTW-Statistics-State: disabled`. Withdrawal,
+purge and retention remain active while collection is off. The review draft
+is in [privacy/project-statistics-dpia.md](privacy/project-statistics-dpia.md). The previous statistics policy sends no new
+fields. Reporting installations in the last 24 closed hours are not people
+or total FTW installs. Power and capacity are configured; energy sums
+recorded hours, including partial hours. Missing data is unknown.
+
+Cloud stores consented hourly values for 13 months, upserts reconnects, and
+deletes household rows on a signed withdrawal or purge. Cells need 20 homes
+and no home above 30 percent of the sum. The stats Worker polls this public
+view; it receives no home id or per-home value. One instance supplies its
+local shard only; public multi-shard totals need an explicit safe collector.
+
+Owner acceptance uses the existing box API. On the box's loopback interface,
+read `GET /api/cloud/stats-policy`, accept its terms, then
+`POST /api/cloud/stats` with `{"policy":"ftw-project-stats-2026-10-v1"}`.
+The readable Cloud grant must already be on. `DELETE /api/cloud/stats`
+withdraws this choice. Do not enable it for someone else or reuse an older
+consent. Native apps keep the old scope until their consent screen adopts
+this policy. The first contributing hour starts after consent; the sender
+does not upload earlier ledger history.
+
+Enabling this collection scope needs the signed C8 DPIA and the updated
+consent text described by Core's ADR 0008. A deployment with collection off
+does not claim that sign-off or change an owner's saved choice. The paired
+native consent change requires a fresh choice for this policy.
+
+
+The separate anonymous daily-report feed is `GET /v1/fleet/public`. It exposes
+only daily counts and dimension labels with at least 10 reports, for at most
+90 days. It contains imported relay history and new reports received by Cloud;
+consumers replace the old archive rather than adding both. It needs no hourly
+energy policy. Averaging seven complete UTC days gives an estimate of active
+reporting installations, never people or all installations ever made.

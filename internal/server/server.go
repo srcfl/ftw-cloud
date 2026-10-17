@@ -37,7 +37,7 @@ import (
 const SourceArchive = "/usr/share/ftw-cloud/source.tar.gz"
 
 // Routes are every path the service answers.
-var Routes = append([]string{"/v1/box", "/v1/app", "/v1/app/once", "/v1/now", "/v1/fleet", "/source", "/healthz", "/mcp"}, oauth.Routes...)
+var Routes = append([]string{"/v1/box", "/v1/app", "/v1/app/once", "/v1/now", "/v1/fleet", "/v1/fleet/public", "/v1/stats", "/source", "/healthz", "/mcp"}, oauth.Routes...)
 
 // devRoutes adds a local inspection route in binaries built with
 // -tags ftwclouddev. It is nil in every other build.
@@ -56,10 +56,11 @@ type Server struct {
 	Tokens *token.Service
 	// OAuth is the authorization server for assistants, and MCP the server
 	// they call. Nil serves none.
-	OAuth *oauth.Server
-	Fleet http.Handler
-	MCP   http.Handler
-	Log   *slog.Logger
+	OAuth      *oauth.Server
+	Fleet      http.Handler
+	Statistics http.Handler
+	MCP        http.Handler
+	Log        *slog.Logger
 	// AltSvc, when set, is the Alt-Svc header that points TCP clients at
 	// HTTP/3 (package quicdoor). It goes on plain responses only: a client
 	// that learns HTTP/3 from a WebSocket upgrade might try the socket over
@@ -91,8 +92,18 @@ func (s *Server) Handler() http.Handler {
 	}
 	if s.Fleet != nil {
 		mux.Handle("/v1/fleet", s.Fleet)
+		if f, ok := s.Fleet.(interface {
+			Public(http.ResponseWriter, *http.Request)
+		}); ok {
+			mux.HandleFunc("/v1/fleet/public", f.Public)
+		}
 	} else {
 		mux.HandleFunc("/v1/fleet", notYet)
+	}
+	if s.Statistics != nil {
+		mux.Handle("/v1/stats", s.Statistics)
+	} else {
+		mux.HandleFunc("/v1/stats", notYet)
 	}
 	mux.HandleFunc("/source", source)
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
@@ -184,6 +195,11 @@ func (s *Server) Upkeep(ctx context.Context, every time.Duration) {
 			if f, ok := s.Fleet.(interface{ Prune(time.Time) error }); ok {
 				if err := f.Prune(time.Now()); err != nil {
 					s.Log.Warn("fleet upkeep failed")
+				}
+			}
+			if f, ok := s.Statistics.(interface{ Prune(time.Time) error }); ok {
+				if err := f.Prune(time.Now()); err != nil {
+					s.Log.Warn("statistics upkeep failed")
 				}
 			}
 			if err := s.Registry.TokenExpire(time.Now()); err != nil {

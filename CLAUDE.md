@@ -32,7 +32,11 @@ maintains it.
   never from a body field. Every later box message but `tun` must verify
   with that key. `tun` is unsigned: its `d` is a phone's ciphertext, which
   the service routes by `dev` and `sid` and never reads.
-- **No readings on disk.** Memory holds readings, and only while the roster's
+- **Live readings stay in memory.** The separate, versioned project statistics
+  consent permits rounded closed-hour energy and configured capacities on
+  disk for 13 months. Only group cells pass `/v1/stats`; no staff route reads
+  a home. Withdrawal and home purge delete its unpublished statistics.
+  Memory holds live readings, and only while the roster's
   grant serves a copy; SQLite holds only the home id, the box key, the signed
   roster, owners' suspensions, tombstones, APNs registrations, the hashes of
   extension tokens when each away box's alert is due, browser notice sent markers and
