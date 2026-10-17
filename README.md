@@ -205,7 +205,15 @@ to it yet.
   agents (`live.get`, `loadpoints.get`, `cars.get`, `plan.get`, `price.get`,
   `hist.query`, `health.get`, `events.get`, `logs.get`, `config.get`,
   `diag.run`, `drivers.get`; srcfl/ftw `docs/agents.md`), under the scope
-  the registry names for it. The box names chargers and cars by its agent
+  the registry names for it. `status` keeps the box's `live` body as it
+  is, keyed by field id, and adds `readings`: each field by its registry
+  name (`grid_w`, `pv_w`, `battery_soc`, ...) with its unit, sources, state
+  and age, and any id the registry does not name under `unknownFields`.
+  `history_query` asks for every stored point of the range's tiles and
+  trims and averages them to the range and the points asked for here,
+  since the box spreads `maxPoints` over whole tiles. Powers are signed by
+  FTW's site convention (srcfl/ftw `docs/site-convention.md`).
+  The box names chargers and cars by its agent
   ids, which the control tools take back. The box refuses the passthrough to agents,
   and the readable copy is never an agent's: every read goes through the
   box, which audits it and enforces revoke. An agent row has no tunnel of
