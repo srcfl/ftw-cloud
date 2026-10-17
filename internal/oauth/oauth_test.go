@@ -896,11 +896,19 @@ func TestTheBoxPageFindsARequestByItsCode(t *testing.T) {
 	if resp.StatusCode != http.StatusNotFound {
 		t.Fatalf("an unknown code: %d", resp.StatusCode)
 	}
+	// The box's page reads a refusal too, so it can tell a wrong code from
+	// no network.
+	if got := resp.Header.Get("Access-Control-Allow-Origin"); got != "*" {
+		t.Fatalf("an unknown code's answer is not readable from the box's page: %q", got)
+	}
 	// Lookups are rate limited for everyone together.
 	limited := false
 	for range 60 {
 		resp, _ := http.Get(g.srv.URL + "/oauth/requests?code=ZZZZZZ")
 		if resp.StatusCode == http.StatusTooManyRequests {
+			if resp.Header.Get("Access-Control-Allow-Origin") != "*" {
+				t.Fatal("a limited lookup's answer is not readable from the box's page")
+			}
 			limited = true
 			break
 		}
@@ -920,7 +928,9 @@ func TestTheConsentPage(t *testing.T) {
 	body, _ := io.ReadAll(resp.Body)
 	page := string(body)
 	for _, want := range []string{"Let Claude into your home?", "From example.com. FTW Cloud does not know this client", "127.0.0.1:8123",
-		"a program on this computer", "<svg", AppLink, scopeWords[ScopeDispatchHold], "Control lasts minutes"} {
+		"a program on this computer", "<svg", AppLink, scopeWords[ScopeDispatchHold], "Control lasts minutes",
+		// An owner with no app approves and removes on the box's own page.
+		"open Settings, then Access, and type", "in the FTW app or on your box"} {
 		if !strings.Contains(page, want) {
 			t.Fatalf("the page lacks %q", want)
 		}

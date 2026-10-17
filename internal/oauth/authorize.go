@@ -303,6 +303,11 @@ func (s *Server) serveRequest(w http.ResponseWriter, r *http.Request) {
 // about 39 bits, and finding one shows only an offer the owner must still
 // approve.
 func (s *Server) serveRequestByCode(w http.ResponseWriter, r *http.Request) {
+	// The box's page fetches it from the owner's browser, on whatever
+	// address the box has at home. Every answer is readable there: a
+	// browser hides a refusal it may not read, and a wrong code would look
+	// the same as no network. A refusal says nothing a code does not.
+	w.Header().Set("Access-Control-Allow-Origin", "*")
 	if s.limited(&s.lookupLimit, s.lookupByIP, r) {
 		w.Header().Set("Retry-After", "1")
 		http.Error(w, "too many lookups", http.StatusTooManyRequests)
@@ -318,9 +323,6 @@ func (s *Server) serveRequestByCode(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	// The box's page fetches it from the owner's browser, on whatever
-	// address the box has at home.
-	w.Header().Set("Access-Control-Allow-Origin", "*")
 	writeJSON(w, http.StatusOK, s.view(c), false)
 }
 

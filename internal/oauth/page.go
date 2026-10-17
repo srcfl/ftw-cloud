@@ -125,14 +125,14 @@ var consentTmpl = template.Must(template.New("consent").Parse(`<!doctype html>
 <p>After you approve, this window goes back to <strong>{{.RedirectHost}}</strong>.{{if .Local}} <span class="warn">That is a program on this computer. Approve only if you started it.</span>{{end}}</p>
 <h2>It asks to</h2>
 <ul>{{range .Scopes}}<li>{{.}}</li>{{end}}</ul>
-<p class="muted">{{if .Control}}Control lasts minutes at a time, within limits your box sets. {{end}}It can change nothing lasting by itself. You can remove it at any time in the FTW app.</p>
+<p class="muted">{{if .Control}}Control lasts minutes at a time, within limits your box sets. {{end}}It can change nothing lasting by itself. You can remove it at any time, in the FTW app or on your box's own page.</p>
 </div>
 <div class="approve">
 <div class="qr">{{.QR}}</div>
 <div>
 <p>Approve in the FTW app: scan the code with your phone, or</p>
 <p><a class="button" href="{{.Link}}">Open the FTW app</a></p>
-<p class="muted">Or, on your box's own page, open Access and type</p>
+<p class="muted">No app? On your box's own page, open Settings, then Access, and type</p>
 <p class="code">{{.Code}}</p>
 </div>
 </div>
