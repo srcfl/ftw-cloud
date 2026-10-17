@@ -145,9 +145,15 @@ func TestStatisticsOnlyRejectsRemoteMetadata(t *testing.T) {
 	r.Grant.Purposes = []string{protocol.CloudPurposeStats}
 	r.Grant.TermsPolicy, r.Grant.StatsPolicy = cloudwire.StatsPolicy, cloudwire.StatsPolicy
 	r.Grant.StatsID = make([]byte, 16)
+	r.Grant.StatsSinceMs = time.Now().UnixMilli()
 	if !statisticsOnly(r) {
 		t.Fatal("valid local roster refused")
 	}
+	r.Grant.StatsSinceMs = 0
+	if statisticsAccess(r) {
+		t.Fatal("local roster accepted without a start timestamp")
+	}
+	r.Grant.StatsSinceMs = time.Now().UnixMilli()
 	r.Noise = make([]byte, 32)
 	if statisticsAccess(r) {
 		t.Fatal("statistics-only exposed a Noise key")
@@ -195,5 +201,125 @@ func TestActivatingStatisticsRejectsLegacyCloudAndStoredRoster(t *testing.T) {
 	}
 	if len(snapshot(t, approved, next.home)) > 0 {
 		t.Fatal("legacy cache remained readable")
+	}
+}
+
+func acceptedStatisticsRoster(b *box, now time.Time) cloudwire.Roster {
+	r := b.roster(protocol.ScopeLiveRead)
+	r.Grant.Purposes = append(r.Grant.Purposes, protocol.CloudPurposeStats)
+	r.Grant.TermsPolicy, r.Grant.StatsPolicy = cloudwire.CloudTermsPolicy, cloudwire.StatsPolicy
+	r.Grant.StatsID = bytes.Repeat([]byte{8}, 16)
+	r.Grant.StatsSinceMs = now.Add(-2 * time.Hour).UnixMilli()
+	return r
+}
+func statisticsReport(b *box, r cloudwire.Roster, now time.Time) cloudwire.Stats {
+	return cloudwire.Stats{Header: b.header(), StatsID: r.Grant.StatsID, Policy: cloudwire.StatsPolicy, HourMS: now.Truncate(time.Hour).Add(-time.Hour).UnixMilli(), Metrics: map[string]int64{"pv_generation_wh": 120}}
+}
+
+func TestRejectedRosterCreatesNoStatisticsGrant(t *testing.T) {
+	s := newService(t)
+	if err := s.reg.StatisticsInit(); err != nil {
+		t.Fatal(err)
+	}
+	s.up.Statistics = true
+	now := time.Now()
+	b := newBox(t)
+	if _, err := b.connect(s, nil); err != nil {
+		t.Fatal(err)
+	}
+	r := acceptedStatisticsRoster(b, now)
+	r.Grant.TermsPolicy = "old-terms"
+	b.send(cloudwire.MsgRoster, r)
+	if !b.closed() {
+		t.Fatal("rejected terms did not close")
+	}
+	// Even a direct registry write must find no grant left by rejection.
+	if err := s.reg.StatisticsPut(b.home, statisticsReport(b, r, now), now); err != nil {
+		t.Fatal(err)
+	}
+	v, err := s.reg.StatisticsView(now)
+	if err != nil || v.Installations.State != "empty" {
+		t.Fatal("rejected roster authorised reports", v, err)
+	}
+}
+
+func TestStatisticsRequireAnAcceptedRosterOnEveryConnection(t *testing.T) {
+	s := newService(t)
+	if err := s.reg.StatisticsInit(); err != nil {
+		t.Fatal(err)
+	}
+	s.up.Statistics = true
+	now := time.Now()
+	b := newBox(t)
+	if _, err := b.connect(s, nil); err != nil {
+		t.Fatal(err)
+	}
+	r := acceptedStatisticsRoster(b, now)
+	b.send(cloudwire.MsgRoster, r)
+	b.send(cloudwire.MsgStats, statisticsReport(b, r, now))
+	wait(t, "initial report", func() bool { v, _ := s.reg.StatisticsView(now); return v.Installations.State == "withheld" })
+	// Retain the valid grant while clearing fixture hours, as retention does.
+	if err := s.reg.StatisticsPrune(now.AddDate(0, 14, 0)); err != nil {
+		t.Fatal(err)
+	}
+	_ = b.conn.Close()
+	if _, err := b.connect(s, nil); err != nil {
+		t.Fatal(err)
+	}
+	b.send(cloudwire.MsgStats, statisticsReport(b, r, now))
+	r.Header = b.header()
+	r.RosterSeq = 2
+	b.send(cloudwire.MsgRoster, r)
+	wait(t, "new connection roster", func() bool { h, ok, _ := s.reg.Get(b.home); return ok && h.RosterSeq == 2 })
+	v, err := s.reg.StatisticsView(now)
+	if err != nil || v.Installations.State != "empty" {
+		t.Fatal("report before roster was stored", v, err)
+	}
+	b.send(cloudwire.MsgStats, statisticsReport(b, r, now))
+	wait(t, "report after roster", func() bool { v, _ := s.reg.StatisticsView(now); return v.Installations.State == "withheld" })
+}
+
+func TestApprovedCollectionAcknowledgesAndPersistsWithdrawal(t *testing.T) {
+	s := newService(t)
+	if err := s.reg.StatisticsInit(); err != nil {
+		t.Fatal(err)
+	}
+	s.up.Statistics = true
+	now := time.Now()
+	b := newBox(t)
+	if _, err := b.connect(s, nil); err != nil {
+		t.Fatal(err)
+	}
+	r := acceptedStatisticsRoster(b, now)
+	b.send(cloudwire.MsgRoster, r)
+	b.send(cloudwire.MsgStats, statisticsReport(b, r, now))
+	wait(t, "report before withdrawal", func() bool { v, _ := s.reg.StatisticsView(now); return v.Installations.State == "withheld" })
+	r.Header = b.header()
+	r.RosterSeq = 2
+	r.Grant = cloudwire.Grant{ID: r.Grant.ID, Controller: cloudwire.ControllerSourceful}
+	b.send(cloudwire.MsgRoster, r)
+	env := b.read()
+	var receipt cloudwire.Purged
+	if env.T != cloudwire.MsgPurged || cloudwire.Unmarshal(env.B, &receipt) != nil || receipt.What != cloudwire.PurgedCopy {
+		t.Fatal("withdrawal had no deletion receipt", env.T)
+	}
+	if !b.closed() {
+		t.Fatal("withdrawn Cloud retained access")
+	}
+	h, ok, err := s.reg.Get(b.home)
+	if err != nil || !ok || h.RosterSeq != 2 {
+		t.Fatal("withdrawal not persisted", ok, err)
+	}
+	saved, err := cloudwire.DecodeEnvelope(h.Roster)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var withdrawn cloudwire.Roster
+	if cloudwire.Unmarshal(saved.B, &withdrawn) != nil || len(withdrawn.Grant.Purposes) != 0 {
+		t.Fatal("old grant persisted")
+	}
+	v, err := s.reg.StatisticsView(now)
+	if err != nil || v.Installations.State != "empty" {
+		t.Fatal("withdrawn rows retained", v, err)
 	}
 }

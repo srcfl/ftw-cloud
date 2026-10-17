@@ -18,7 +18,7 @@ func statsFixture(t *testing.T) (*Registry, time.Time, cloudwire.Grant) {
 		t.Fatal(err)
 	}
 	now := time.Date(2026, 10, 17, 12, 30, 0, 0, time.UTC)
-	g := cloudwire.Grant{Controller: cloudwire.ControllerSourceful, Purposes: []string{protocol.CloudPurposeServe, protocol.CloudPurposeStats}, StatsID: bytes.Repeat([]byte{1}, 16), StatsPolicy: cloudwire.StatsPolicy, StatsSinceMs: now.Add(-25 * time.Hour).UnixMilli()}
+	g := cloudwire.Grant{TermsPolicy: cloudwire.CloudTermsPolicy, Controller: cloudwire.ControllerSourceful, Purposes: []string{protocol.CloudPurposeServe, protocol.CloudPurposeStats}, StatsID: bytes.Repeat([]byte{1}, 16), StatsPolicy: cloudwire.StatsPolicy, StatsSinceMs: now.Add(-25 * time.Hour).UnixMilli()}
 	return r, now, g
 }
 func statsHome(t *testing.T, r *Registry, now time.Time, g cloudwire.Grant, home string, value int64) cloudwire.Stats {
