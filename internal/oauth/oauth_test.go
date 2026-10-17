@@ -986,8 +986,11 @@ func TestTheConsentPage(t *testing.T) {
 	page := string(body)
 	for _, want := range []string{"Let Claude into your home?", "From example.com. FTW Cloud does not know this client", "127.0.0.1:8123",
 		"a program on this computer", "<svg", AppLink, scopeWords[ScopeDispatchHold], "Control lasts minutes",
-		// An owner with no app approves and removes on the box's own page.
-		"open Settings, then Access, and type", "in the FTW app or on your box"} {
+		// The QR code or the link opens the app; the code is for an owner
+		// who has neither, in the app or on the box's own page.
+		"scan the QR code with your phone's camera, or tap the button on your phone",
+		"Type this code in the FTW app under Settings → Assistants and support → Add an assistant, or on your box's own page under Settings → Access",
+		"in the FTW app or on your box"} {
 		if !strings.Contains(page, want) {
 			t.Fatalf("the page lacks %q", want)
 		}
