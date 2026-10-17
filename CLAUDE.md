@@ -35,7 +35,9 @@ maintains it.
 - **No readings on disk.** Memory holds readings, and only while the roster's
   grant serves a copy; SQLite holds only the home id, the box key, the signed
   roster, owners' suspensions, tombstones, APNs registrations, the hashes of
-  extension tokens and when each away box's alert is due. Nothing logs
+  extension tokens when each away box's alert is due, browser notice sent markers and
+  anonymous daily fleet totals. Browser endpoints and box-encrypted offline
+  notices live only in the signed roster. Nothing logs
   addresses.
 - **A phone can only narrow, or talk to its own box.** On `/v1/app` it can
   say whether it is looking, an owner can suspend a roster device, and a

@@ -869,6 +869,9 @@ func (c *boxConn) roster(env cloudwire.Envelope) error {
 	}
 	// A grant has three shapes: a copy with serve, a withdrawn one with its
 	// id alone, or none at all.
+	if err := cloudwire.ValidateWebPush(r.WebPush); err != nil {
+		return fmt.Errorf("%w: browser notice rows", errProtocol)
+	}
 	g := r.Grant
 	on := len(g.ID) == cloudwire.GrantIDBytes && slices.Contains(g.Purposes, protocol.CloudPurposeServe)
 	bare := len(g.Scopes) == 0 && len(g.Purposes) == 0

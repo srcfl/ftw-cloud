@@ -37,6 +37,7 @@ import (
 
 	"github.com/srcfl/ftw-cloud/internal/apns"
 	"github.com/srcfl/ftw-cloud/internal/appsession"
+	"github.com/srcfl/ftw-cloud/internal/fleet"
 	"github.com/srcfl/ftw-cloud/internal/keys"
 	"github.com/srcfl/ftw-cloud/internal/mcp"
 	"github.com/srcfl/ftw-cloud/internal/metrics"
@@ -49,6 +50,7 @@ import (
 	"github.com/srcfl/ftw-cloud/internal/store"
 	"github.com/srcfl/ftw-cloud/internal/token"
 	"github.com/srcfl/ftw-cloud/internal/uplink"
+	"github.com/srcfl/ftw-cloud/internal/webpush"
 	"github.com/srcfl/ftw/go/protocol/appwire"
 	"github.com/srcfl/ftw/go/protocol/cloudwire"
 	"golang.org/x/crypto/acme/autocert"
@@ -66,7 +68,7 @@ func main() {
 		}
 		return
 	}
-	if len(os.Args) > 1 && os.Args[1] == "metrics" {
+	if len(os.Args) > 1 && (os.Args[1] == "metrics" || os.Args[1] == "fleet") {
 		if err := printMetrics(os.Args[2:]); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
@@ -146,9 +148,13 @@ func serve(args []string) error {
 	} else if n > 0 {
 		log.Info("rosters restored from the registry", "homes", n, "took", time.Since(restoreStart).Round(time.Millisecond))
 	}
+	fleetSvc, err := fleet.New(reg)
+	if err != nil {
+		return err
+	}
 	tokens := token.New(st, reg, log)
 	tokens.Shards = shards
-	srv := &server.Server{Store: st, Registry: reg, Uplink: up, Tokens: tokens, Log: log}
+	srv := &server.Server{Store: st, Registry: reg, Uplink: up, Tokens: tokens, Fleet: fleetSvc, Log: log}
 
 	// Assistants: the authorization server, with agent keys in ftwkeysd.
 	agentKeys := keys.Dial(*keysSocket)
@@ -183,7 +189,12 @@ func serve(args []string) error {
 	default:
 		sender = client
 	}
+	webPushSvc, err := webpush.New(reg)
+	if err != nil {
+		return err
+	}
 	pushSvc := push.New(reg, sender, log)
+	pushSvc.BrowserUnreachable = webPushSvc.Send
 	pushSvc.WatchApp = *apnsWatch
 	pushSvc.Owns = shards.Ours
 	up.OnHeld = pushSvc.Held
@@ -301,7 +312,7 @@ func serve(args []string) error {
 		}
 	}
 	if *metricsAddr != "" {
-		if err := serveMetrics(ctx, *metricsAddr); err != nil {
+		if err := serveMetrics(ctx, *metricsAddr, fleetSvc.Stats); err != nil {
 			return err
 		}
 	}
@@ -402,7 +413,7 @@ func restartSpread(sockets, rate int, floor time.Duration) time.Duration {
 const defaultMetricsAddr = "127.0.0.1:9464"
 
 // serveMetrics answers /metrics on a loopback address until ctx ends.
-func serveMetrics(ctx context.Context, addr string) error {
+func serveMetrics(ctx context.Context, addr string, fleetStats ...http.HandlerFunc) error {
 	host, _, err := net.SplitHostPort(addr)
 	if err != nil {
 		return fmt.Errorf("metrics-listen: %w", err)
@@ -414,7 +425,12 @@ func serveMetrics(ctx context.Context, addr string) error {
 	if err != nil {
 		return err
 	}
-	m := &http.Server{Handler: metrics.Default, ReadHeaderTimeout: 5 * time.Second, ErrorLog: log0()}
+	mux := http.NewServeMux()
+	mux.Handle("/metrics", metrics.Default)
+	if len(fleetStats) > 0 {
+		mux.HandleFunc("/fleet/stats", fleetStats[0])
+	}
+	m := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second, ErrorLog: log0()}
 	go func() { _ = m.Serve(ln) }()
 	go func() {
 		<-ctx.Done()
@@ -429,7 +445,11 @@ func printMetrics(args []string) error {
 	addr := fs.String("addr", defaultMetricsAddr, "where the service answers /metrics")
 	_ = fs.Parse(args)
 	c := &http.Client{Timeout: 5 * time.Second}
-	resp, err := c.Get("http://" + *addr + "/metrics")
+	path := "/metrics"
+	if len(os.Args) > 1 && os.Args[1] == "fleet" {
+		path = "/fleet/stats"
+	}
+	resp, err := c.Get("http://" + *addr + path)
 	if err != nil {
 		return err
 	}

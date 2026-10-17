@@ -364,3 +364,19 @@ with `go list -deps`, so no control code can reach this build.
 `ftwcloudd` is licensed under the GNU Affero General Public License, version 3
 only (AGPL-3.0-only). See [LICENSE](LICENSE) and
 [CONTRIBUTING.md](CONTRIBUTING.md).
+
+Anonymous box reports use `POST /v1/fleet`. It accepts only the seven
+`ftw.fleet/1` fields and reduces each report into bounded daily counts for
+90 days. It stores no raw report, address or home id. An operator can read
+`/fleet/stats` only on the loopback metrics listener, with
+`docker exec ftw-cloud-ftwcloudd-1 ftwcloudd fleet`. These counts measure
+reports, not unique boxes.
+
+Browser offline notices use the box's optional signed roster rows. The box
+encrypts each notice and signs a short-lived VAPID header; the service holds
+no browser encryption key or box signing key. It uses the APNs outage timer,
+including update grace and deploy drain, and checks the current device epoch,
+events scope and suspension before sending. A readable-copy grant is not
+needed. The roster holds the delivery endpoints and ciphertext; a separate
+per-home row holds only the current outage's sent ids. Purge removes both.
+The sender refuses redirects, proxies and local destinations.
