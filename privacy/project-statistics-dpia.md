@@ -65,6 +65,24 @@ att logga adresser. Infrastrukturens loggar, säkerhetskopior, underbiträden oc
 överföringar utanför EES behöver verifieras före beslut. Slutlig gallring i
 säkerhetskopior kan inte påstås vara verifierad av databasens radtest.
 
+## Avgränsad driftkontroll den 17 oktober 2026
+
+EC2:s API i eu-north-1 bekräftade att Cloud-värdens aktuella disk är en
+20 GiB gp3-volym med EBS-kryptering och en KMS-nyckel. Den sitter på den
+befintliga FTW Cloud-värden. Volymen raderas vid avslut av instansen.
+Detta visar kryptering i vila, inte vilka personer som får använda nyckeln.
+
+Värdens säkerhetsgrupp släpper in TCP och UDP på port 443 från IPv4-internet.
+Den har ingen regel för SSH eller andra portar. Utgående IPv4-trafik tillåts.
+Detta är en kontroll av säkerhetsgruppen, inte en full nät- eller IAM-granskning.
+Drift använder SSM; operatörslistor, loggning och nyckelbehörigheter återstår.
+
+EC2:s snapshotfråga hittade inga snapshots för just denna volym i det aktuella
+kontot och regionen. Andra backupvägar, exempelvis S3 eller AWS Backup,
+granskas inte av den frågan. Backupens innehåll, återställning, livstid och
+radering är därför fortfarande öppna frågor. Kontrollen läste bara
+infrastrukturens metadata och ändrade ingen resurs.
+
 ## Nödvändighet, proportionalitet och samtycke
 
 Rättslig grund för den obligatoriska Cloud-modellen är ännu inte fastställd.
@@ -107,7 +125,7 @@ att årsanalysen faktiskt behövs; den publika 24-timmarsvyn behöver i sig inte
 | Närvaro och vanor framgår av timenergi | Aktivt val av Cloud-villkor eller frivilligt lokalt bidrag, avslutade timmar, få fält, avrundning, inga platsfält | Timenergi kan ändå avslöja vanor. Ansvarig ska bedöma om risken är rimlig och hur andra boende informeras. |
 | En ny policy följer med ett äldre val | Nytt policy-id, ingen automatisk återanvändning, box och Cloud kontrollerar policyn | Granska de renderade svenska och engelska skärmarna samt versionsflödet. |
 | Återidentifiering ur små eller dominerade grupper | Minst 20 hem, högst 30 procent per hem, inga hushållsrader till Worker | Upprepade offentliga summor kan möjliggöra differensanalys. Trösklarna är inte ett bevis på anonymitet. Bedöm större eller fastare grupper före start om risken kvarstår. |
-| Intrång eller missbruk av värdåtkomst | Signerade rapporter, snäva fält, ingen personalroute, SSH-fri SSM-drift, separata behörigheter för agentnycklar | Full administratör kan läsa data. Verifiera åtkomstlista, loggning, diskkryptering, patchning och incidentväg. |
+| Intrång eller missbruk av värdåtkomst | Signerade rapporter, snäva fält, ingen personalroute, SSH-fri SSM-drift, separata behörigheter för agentnycklar | Full administratör kan läsa data. EBS-kryptering har verifierats. Verifiera åtkomstlista, loggning, patchning och incidentväg. |
 | Felaktiga slutsatser eller dubbla rapporter | Upsert per hem/timme, partnerfilter, okända värden utelämnas, konfigurering märks som sådan | Delvisa timmar och självrapporterad konfiguration bevisar inte fysisk styrning eller full dygnsproduktion. |
 | Uppgifter lever kvar efter avstängning | Radering vid mottaget signerat återkallande, även när insamlingen är pausad; gallring efter 13 månader | Säkerhetskopiors livstid och radering efter förlorad box ska dokumenteras och provas. |
 
@@ -134,7 +152,8 @@ Före aktivering ska ansvarig fylla i eller länka bevis för:
 2. Rättslig grund för båda flödena, med uttrycklig bedömning av obligatorisk statistik i Cloud, andra boende och terminalregler.
 3. AWS personuppgiftsbiträdesavtal, underbiträden och överföringsbedömning;
    Cloudflare får bara gruppvärden, vars återidentifieringsrisk ändå ska bedömas.
-4. Diskkryptering, operatörsbehörigheter, loggar och säkerhetskopiors gallring.
+4. Operatörs- och KMS-behörigheter, loggar och säkerhetskopiors gallring.
+   EBS-kryptering och den aktuella säkerhetsgruppen har kontrollerats ovan.
 5. Praktiskt prov på radering och rättighetsbegäran, inklusive en förlorad box
    och utlämnande/rättelse av lagrade rader. De vägarna är inte verifierade här.
 6. Uppdaterade App Store-integritetsuppgifter innan någon ny behandling tas i bruk.
