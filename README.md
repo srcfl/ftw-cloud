@@ -205,7 +205,15 @@ to it yet.
   agents (`live.get`, `loadpoints.get`, `cars.get`, `plan.get`, `price.get`,
   `hist.query`, `health.get`, `events.get`, `logs.get`, `config.get`,
   `diag.run`, `drivers.get`; srcfl/ftw `docs/agents.md`), under the scope
-  the registry names for it. The box names chargers and cars by its agent
+  the registry names for it. `status` keeps the box's `live` body as it
+  is, keyed by field id, and adds `readings`: each field by its registry
+  name (`grid_w`, `pv_w`, `battery_soc`, ...) with its unit, sources, state
+  and age, and any id the registry does not name under `unknownFields`.
+  `history_query` asks for every stored point of the range's tiles and
+  trims and averages them to the range and the points asked for here,
+  since the box spreads `maxPoints` over whole tiles. Powers are signed by
+  FTW's site convention (srcfl/ftw `docs/site-convention.md`).
+  The box names chargers and cars by its agent
   ids, which the control tools take back. The box refuses the passthrough to agents,
   and the readable copy is never an agent's: every read goes through the
   box, which audits it and enforces revoke. An agent row has no tunnel of
@@ -356,3 +364,19 @@ with `go list -deps`, so no control code can reach this build.
 `ftwcloudd` is licensed under the GNU Affero General Public License, version 3
 only (AGPL-3.0-only). See [LICENSE](LICENSE) and
 [CONTRIBUTING.md](CONTRIBUTING.md).
+
+Anonymous box reports use `POST /v1/fleet`. It accepts only the seven
+`ftw.fleet/1` fields and reduces each report into bounded daily counts for
+90 days. It stores no raw report, address or home id. An operator can read
+`/fleet/stats` only on the loopback metrics listener, with
+`docker exec ftw-cloud-ftwcloudd-1 ftwcloudd fleet`. These counts measure
+reports, not unique boxes.
+
+Browser offline notices use the box's optional signed roster rows. The box
+encrypts each notice and signs a short-lived VAPID header; the service holds
+no browser encryption key or box signing key. It uses the APNs outage timer,
+including update grace and deploy drain, and checks the current device epoch,
+events scope and suspension before sending. A readable-copy grant is not
+needed. The roster holds the delivery endpoints and ciphertext; a separate
+per-home row holds only the current outage's sent ids. Purge removes both.
+The sender refuses redirects, proxies and local destinations.

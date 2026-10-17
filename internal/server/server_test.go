@@ -14,6 +14,7 @@ import (
 	"testing"
 
 	"github.com/srcfl/ftw-cloud/internal/appsession"
+	"github.com/srcfl/ftw-cloud/internal/fleet"
 	"github.com/srcfl/ftw-cloud/internal/registry"
 	"github.com/srcfl/ftw-cloud/internal/store"
 	"github.com/srcfl/ftw-cloud/internal/token"
@@ -37,6 +38,10 @@ func newServer(t *testing.T) (*Server, string) {
 	s := &Server{Store: st, Registry: reg, Uplink: up, App: appsession.New(st, reg, up, noise, log),
 		Tokens: token.New(st, reg, log), Log: log}
 
+	s.Fleet, err = fleet.New(reg)
+	if err != nil {
+		t.Fatal(err)
+	}
 	// A home with readings in it, held the way a box's uplink holds them.
 	const home = "canaryhomecanaryhomecanary"
 	box, _ := st.For(store.Principal{Kind: store.Box, Home: home})

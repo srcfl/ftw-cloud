@@ -181,6 +181,10 @@ type Service struct {
 	// registered with app watch. Empty sends them nothing. The iPhone app's
 	// is the sender's own. Set before serving.
 	WatchApp string
+	// BrowserUnreachable delivers the box-encrypted browser notices on the
+	// same outage timer. It needs no APNs key or readable-copy grant.
+	BrowserUnreachable func(context.Context, string) (int, bool)
+	BrowserHomes       func() ([]string, error)
 	// Owns reports whether this shard holds a home. Resume starts no
 	// box.unreachable for a home another shard holds, whose rows may still
 	// be here during a move. Nil holds every home. Set before Resume.
@@ -690,11 +694,19 @@ func (s *Service) Resume() error {
 	if err != nil {
 		return err
 	}
+	if s.BrowserHomes != nil {
+		more, err := s.BrowserHomes()
+		if err != nil {
+			return err
+		}
+		homes = append(homes, more...)
+	}
 	wait := time.Duration(cloudwire.UnreachableAfterMs) * time.Millisecond
 	for _, home := range homes {
 		if seen[home] || (s.Owns != nil && !s.Owns(home)) {
 			continue
 		}
+		seen[home] = true
 		if err := s.reg.AwaySet(home, now.Add(wait)); err != nil {
 			return err
 		}
@@ -822,51 +834,61 @@ func (s *Service) roster(home string) (*cloudwire.Roster, error) {
 // showing, and only to devices that may still get it; a gone token is
 // forgotten.
 func (s *Service) sendAlert(ctx context.Context, job alertJob) {
-	if s.sender == nil {
+	if s.sender == nil && (!job.unreachable || s.BrowserUnreachable == nil) {
 		return
+	}
+	if job.unreachable {
+		due, err := s.reg.WebPushOutage(job.home)
+		if err != nil {
+			s.retryAlert(job, nil)
+			return
+		}
+		if due == 0 || due > s.now().UnixMilli() {
+			return
+		}
 	}
 	fresh, err := s.regs(job.home, cloudwire.PushKindAlert, job.notice)
 	if err == nil && len(fresh) > 0 {
 		fresh, err = s.audience(job.home, job.notice, fresh)
 	}
 	if err != nil {
-		s.log.Warn("could not read push registrations; the alert goes again", "err", err)
+		s.log.Warn("could not read push registrations; the alert goes again")
 		s.retryAlert(job, nil)
 		return
 	}
 	if job.tries == 0 {
 		job.regs = fresh
-		if len(job.regs) == 0 {
-			s.told(job)
-			return
-		}
-		// A notice was counted when it came.
 		if !job.notice && !s.allow(job.home, cloudwire.PushKindAlert) {
 			pushCapped.Inc()
-			s.log.Warn("a home passed its push cap; push dropped", "kind", cloudwire.PushKindAlert, "cap_per_hour", MaxAlertsPerHour)
 			s.told(job)
 			return
 		}
 	} else {
-		// A device suspended, dropped by a roster or unregistered since
-		// the last try gets nothing.
 		job.regs = slices.DeleteFunc(job.regs, func(r registry.PushReg) bool {
 			return !slices.ContainsFunc(fresh, func(f registry.PushReg) bool { return bytes.Equal(f.Token, r.Token) })
 		})
-		if len(job.regs) == 0 {
-			s.told(job)
-			return
-		}
-	}
-	if !s.breaker.wait(ctx) {
-		return
 	}
 	job.tries++
-	took, again := s.deliver(ctx, job.home, cloudwire.PushKindAlert, job.payload, job.expires, job.regs)
-	if took > 0 || len(again) == 0 {
+	browserRetry := false
+	if job.unreachable && s.BrowserUnreachable != nil {
+		_, retry := s.BrowserUnreachable(ctx, job.home)
+		browserRetry = retry
+	}
+	again := []registry.PushReg{}
+	if s.sender != nil && len(job.regs) > 0 {
+		if !s.breaker.wait(ctx) {
+			return
+		}
+		_, remaining := s.deliver(ctx, job.home, cloudwire.PushKindAlert, job.payload, job.expires, job.regs)
+		again = remaining
+	}
+	if len(again) == 0 && !browserRetry {
 		s.told(job)
 	}
-	if len(again) > 0 {
+	if len(again) > 0 || browserRetry {
+		if again == nil {
+			again = []registry.PushReg{}
+		}
 		s.retryAlert(job, again)
 	}
 }
