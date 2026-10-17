@@ -40,7 +40,8 @@ services:
     # "Deploys").
     stop_grace_period: 15s
     volumes:
-      # The registry and certificates. No readings are ever written here.
+      # Registry, certificates and, only after C8 approval, closed-hour
+      # project statistics with 48-hour retention. Live readings stay in memory.
       - ftw-cloud-state:/state
       # Apple's push key, read from Parameter Store into tmpfs at boot by
       # deploy/apns.sh. Empty means no alerts, and the service runs.
