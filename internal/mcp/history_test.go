@@ -66,6 +66,9 @@ func TestHistoryKeepsToTheRangeAndAveragesToThePointsAskedFor(t *testing.T) {
 	if len(grid) != 24 || got["stepS"] != int64(3600) {
 		t.Fatalf("%d points at %v s", len(grid), got["stepS"])
 	}
+	if got["resolution"] != "1h" || got["sourceResolution"] != string(protocol.ResN5m) {
+		t.Fatalf("resolution %v, source %v", got["resolution"], got["sourceResolution"])
+	}
 	first, _ := time.Parse(time.RFC3339, grid[0]["at"].(string))
 	last, _ := time.Parse(time.RFC3339, grid[23]["at"].(string))
 	if first.UnixMilli() < from-60_000 || last.UnixMilli() >= now {
@@ -111,5 +114,13 @@ func TestAnUnbuiltReadSaysSoAndWhatToUseInstead(t *testing.T) {
 	err := words(boxError{Code: protocol.ErrUnknownOp, Args: map[string]any{"t": "some.new"}})
 	if !strings.Contains(err.Error(), "newer FTW") {
 		t.Fatalf("an unknown read: %v", err)
+	}
+}
+
+func TestStepLabel(t *testing.T) {
+	for ms, want := range map[int64]string{0: "", 30_000: "30s", 300_000: "5m", 3_600_000: "1h", 7_200_000: "2h", 86_400_000: "1d", 90_000: "90s"} {
+		if got := stepLabel(ms); got != want {
+			t.Errorf("stepLabel(%d) = %q, want %q", ms, got, want)
+		}
 	}
 }

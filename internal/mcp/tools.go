@@ -607,9 +607,28 @@ func historyData(chunks []protocol.HistChunk, end protocol.HistEnd, fromMs, toMs
 		gaps = append(gaps, map[string]any{"from": time.UnixMilli(g.FromMs).UTC().Format(time.RFC3339),
 			"to": time.UnixMilli(g.ToMs).UTC().Format(time.RFC3339), "reason": clean(g.Reason)})
 	}
-	return map[string]any{"resolution": string(end.ResActual), "stepS": step / 1000,
+	// resolution names the step of the returned points; sourceResolution is
+	// the box's own storage resolution the points were averaged from.
+	return map[string]any{"resolution": stepLabel(step), "sourceResolution": string(end.ResActual), "stepS": step / 1000,
 		"from": time.UnixMilli(fromMs).UTC().Format(time.RFC3339), "to": time.UnixMilli(toMs).UTC().Format(time.RFC3339),
 		"series": out, "gaps": gaps}
+}
+
+// stepLabel writes a step in milliseconds as the largest whole unit that
+// divides it: 3600000 is "1h", 300000 is "5m", 0 is "".
+func stepLabel(ms int64) string {
+	s := ms / 1000
+	switch {
+	case s <= 0:
+		return ""
+	case s%86400 == 0:
+		return fmt.Sprintf("%dd", s/86400)
+	case s%3600 == 0:
+		return fmt.Sprintf("%dh", s/3600)
+	case s%60 == 0:
+		return fmt.Sprintf("%dm", s/60)
+	}
+	return fmt.Sprintf("%ds", s)
 }
 
 // clean removes characters that can hide text from a person reading along
