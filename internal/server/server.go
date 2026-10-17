@@ -37,7 +37,7 @@ import (
 const SourceArchive = "/usr/share/ftw-cloud/source.tar.gz"
 
 // Routes are every path the service answers.
-var Routes = append([]string{"/v1/box", "/v1/app", "/v1/app/once", "/v1/now", "/source", "/healthz", "/mcp"}, oauth.Routes...)
+var Routes = append([]string{"/v1/box", "/v1/app", "/v1/app/once", "/v1/now", "/v1/fleet", "/source", "/healthz", "/mcp"}, oauth.Routes...)
 
 // devRoutes adds a local inspection route in binaries built with
 // -tags ftwclouddev. It is nil in every other build.
@@ -57,6 +57,7 @@ type Server struct {
 	// OAuth is the authorization server for assistants, and MCP the server
 	// they call. Nil serves none.
 	OAuth *oauth.Server
+	Fleet http.Handler
 	MCP   http.Handler
 	Log   *slog.Logger
 	// AltSvc, when set, is the Alt-Svc header that points TCP clients at
@@ -87,6 +88,11 @@ func (s *Server) Handler() http.Handler {
 	}
 	if s.MCP != nil {
 		mux.Handle("/mcp", s.MCP)
+	}
+	if s.Fleet != nil {
+		mux.Handle("/v1/fleet", s.Fleet)
+	} else {
+		mux.HandleFunc("/v1/fleet", notYet)
 	}
 	mux.HandleFunc("/source", source)
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
@@ -175,6 +181,11 @@ func (s *Server) Upkeep(ctx context.Context, every time.Duration) {
 		case <-t.C:
 			s.Store.Sweep()
 			s.Uplink.Sweep()
+			if f, ok := s.Fleet.(interface{ Prune(time.Time) error }); ok {
+				if err := f.Prune(time.Now()); err != nil {
+					s.Log.Warn("fleet upkeep failed")
+				}
+			}
 			if err := s.Registry.TokenExpire(time.Now()); err != nil {
 				s.Log.Warn("token upkeep failed", "err", err)
 			}
