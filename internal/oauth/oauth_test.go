@@ -802,9 +802,10 @@ func TestRevokeAtTheBoxEndsTheTokens(t *testing.T) {
 	}
 }
 
-// A grant the owner renews keeps its tokens past its first end, and every
-// refresh token ends when the box's newest roster says the grant ends, never
-// later: not when it is renewed for a year, not when it is cut to an hour.
+// A grant the owner renews keeps its tokens past its first end, even when
+// the assistant made no call in between: the refresh token does not end with
+// the grant it was issued under. An access token never outlives the grant,
+// and once the grant the box sets has ended, a refresh fails.
 func TestARefreshTokenFollowsTheGrantTheBoxSets(t *testing.T) {
 	g := newRig(t)
 	f := g.start(cimdID, cimdBack, "")
@@ -814,43 +815,47 @@ func TestARefreshTokenFollowsTheGrantTheBoxSets(t *testing.T) {
 		g.t.Helper()
 		return g.token(url.Values{"grant_type": {grantRefresh}, "refresh_token": {tok}, "client_id": {cimdID}})
 	}
-	endsWithGrant := func(tok string) {
-		t.Helper()
-		row, ok, _ := g.s.st.token(tok)
-		a, _, _ := g.s.st.agent(home, cloudwire.DeviceID(key))
-		if !ok || !row.Expires.Equal(a.Expires) {
-			t.Fatalf("the refresh token ends %v, the grant %v", row.Expires, a.Expires)
-		}
-	}
-	endsWithGrant(tk.Refresh)
 
-	// On day 29 the owner renews it for a year.
+	// The assistant goes quiet after day 0. On day 29 the owner renews the
+	// grant for a year; on day 31 the assistant comes back with the refresh
+	// token it was given on day 0.
 	g.advance(29 * 24 * time.Hour)
 	g.roster(home, agentFor(key, cimdID, g.now().Add(365*24*time.Hour), ScopeLiveRead, ScopePlanRead))
+	g.advance(2 * 24 * time.Hour)
 	status, tk2 := refresh(tk.Refresh)
 	if status != http.StatusOK {
-		t.Fatalf("refresh after the renewal: %d", status)
+		t.Fatalf("an idle assistant lost a renewed grant at its first end: %d", status)
 	}
-	endsWithGrant(tk2.Refresh)
-	g.advance(2 * 24 * time.Hour)
-	status, tk3 := refresh(tk2.Refresh)
-	if status != http.StatusOK {
-		t.Fatalf("a renewed grant lost its tokens at its first end: %d", status)
-	}
-	if _, aerr := g.bearer(tk3.Access); aerr != nil {
+	if _, aerr := g.bearer(tk2.Access); aerr != nil {
 		t.Fatalf("the token after the first end: %+v", aerr)
 	}
 
-	// The owner cuts it to an hour: the next refresh token ends with it.
-	g.roster(home, agentFor(key, cimdID, g.now().Add(time.Hour), ScopeLiveRead, ScopePlanRead))
-	status, tk4 := refresh(tk3.Refresh)
-	if status != http.StatusOK {
-		t.Fatalf("refresh after the cut: %d", status)
+	// The owner cuts it to five minutes: the access token ends with it.
+	g.roster(home, agentFor(key, cimdID, g.now().Add(5*time.Minute), ScopeLiveRead, ScopePlanRead))
+	status, tk3 := refresh(tk2.Refresh)
+	if status != http.StatusOK || tk3.Expires > 300 {
+		t.Fatalf("refresh after the cut: %d, access for %d s", status, tk3.Expires)
 	}
-	endsWithGrant(tk4.Refresh)
-	g.advance(time.Hour + time.Second)
-	if status, _ := refresh(tk4.Refresh); status != http.StatusBadRequest {
+	g.advance(5*time.Minute + time.Second)
+	if _, aerr := g.bearer(tk3.Access); aerr == nil {
+		t.Fatal("an access token outlived the grant")
+	}
+	if status, _ := refresh(tk3.Refresh); status != http.StatusBadRequest {
 		t.Fatalf("refresh after the grant ended: %d", status)
+	}
+}
+
+// A roster that sets an end past the longest grant is taken as a year from
+// now.
+func TestARosterEndPastAYearIsCut(t *testing.T) {
+	g := newRig(t)
+	f := g.start(cimdID, cimdBack, "")
+	g.approve(f, cimdID)
+	key := f.agentKey(t)
+	g.roster(home, agentFor(key, cimdID, g.now().Add(2*365*24*time.Hour), ScopeLiveRead, ScopePlanRead))
+	a, ok, _ := g.s.st.agent(home, cloudwire.DeviceID(key))
+	if most := g.now().Add(365 * 24 * time.Hour); !ok || a.Expires.After(most) {
+		t.Fatalf("the agent ends %v, past %v", a.Expires, most)
 	}
 }
 

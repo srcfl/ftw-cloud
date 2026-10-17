@@ -64,10 +64,13 @@ const (
 	// AccessTTL is an access token's life. Short: a token that leaks is
 	// worth little, and a revoked agent loses access at its box anyway.
 	AccessTTL = 10 * time.Minute
-	// RefreshTTL caps each refresh token at the longest grant an agent may
-	// have, and the agent's own end caps it sooner. A refresh takes the end
-	// the box sets now, so a grant the owner renews keeps its tokens.
-	RefreshTTL = time.Duration(protocol.AgentMaxMs) * time.Millisecond
+	// RefreshTTL is a refresh token's life: the longest grant an agent may
+	// have. The agent's end does not shorten it, so a grant the owner renews
+	// while its client is idle keeps its tokens; an agent past its end is
+	// refused at every refresh and swept.
+	RefreshTTL = maxGrant
+	// maxGrant is the longest end the service takes from a roster.
+	maxGrant = time.Duration(protocol.AgentMaxMs) * time.Millisecond
 )
 
 // Scopes. Each is a right the box grants an agent, by its registry name
@@ -417,7 +420,7 @@ func (s *Server) applyRoster(ctx context.Context, home string, devices []cloudwi
 			s.revoke(ctx, a)
 			continue
 		}
-		if err := s.st.setGrant(a.Home, a.Agent, grantOf(d)); err != nil {
+		if err := s.st.setGrant(a.Home, a.Agent, grantOf(d, s.now())); err != nil {
 			s.log.Warn("could not update an agent's grant", "err", err)
 		}
 	}
@@ -443,7 +446,7 @@ func (s *Server) approve(ctx context.Context, home string, listed map[string]clo
 		}
 		c.Home, c.Agent, c.Shard = home, d.ID, s.shard(home)
 		c.Granted = strings.Join(intersect(splitScope(c.Scope), d.Agent.Scopes), " ")
-		if err := s.st.approve(ridHash, c, grantOf(d), now); err != nil {
+		if err := s.st.approve(ridHash, c, grantOf(d, now), now); err != nil {
 			s.log.Warn("could not record an approval", "err", err)
 			continue
 		}
@@ -481,9 +484,15 @@ func (s *Server) retryApprovals(ctx context.Context) {
 }
 
 // grantOf is an agent row's grant, as the box signed it in the roster.
-func grantOf(d cloudwire.Device) agentGrant {
+// The service never takes an end past the longest grant from now, whatever a
+// roster says.
+func grantOf(d cloudwire.Device, now time.Time) agentGrant {
+	end := time.UnixMilli(d.Agent.ExpiresAtMs)
+	if most := now.Add(maxGrant); end.After(most) {
+		end = most
+	}
 	return agentGrant{Scopes: slices.Clone(d.Agent.Scopes), Ops: slices.Clone(d.Agent.Ops), Caps: d.Agent.Caps,
-		Expires: time.UnixMilli(d.Agent.ExpiresAtMs)}
+		Expires: end}
 }
 
 // revoke drops an agent and its tokens, and has its key forgotten.

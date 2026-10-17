@@ -199,7 +199,7 @@ func (s *Server) exchangeCode(w http.ResponseWriter, r *http.Request, cl client)
 		tokenError(w, http.StatusBadRequest, "invalid_grant", "the owner removed this assistant")
 		return
 	}
-	s.issue(w, ridHash, cl.ID, a, c.Granted, s.now().Add(RefreshTTL))
+	s.issue(w, ridHash, cl.ID, a, c.Granted)
 }
 
 func (s *Server) refresh(w http.ResponseWriter, r *http.Request, cl client) {
@@ -236,20 +236,21 @@ func (s *Server) refresh(w http.ResponseWriter, r *http.Request, cl client) {
 		tokenError(w, http.StatusBadRequest, "invalid_grant", "the owner removed this assistant")
 		return
 	}
-	s.issue(w, t.Family, cl.ID, a, scope, s.now().Add(RefreshTTL))
+	s.issue(w, t.Family, cl.ID, a, scope)
 }
 
 // issue writes a new access token and a new refresh token of one family.
-// The refresh token ends no later than refreshEnd or the agent's end as the
-// box's newest roster sets it.
-func (s *Server) issue(w http.ResponseWriter, family []byte, clientID string, a agentRow, scope string, refreshEnd time.Time) {
+// The access token ends within AccessTTL and never after the agent's end as
+// the box's newest roster sets it. The refresh token lasts RefreshTTL and is
+// not clamped to that end: the owner may renew the grant while the client is
+// idle, and an agent past its end is refused at every refresh and every call
+// (agentGone) and swept with its tokens.
+func (s *Server) issue(w http.ResponseWriter, family []byte, clientID string, a agentRow, scope string) {
 	now := s.now()
-	if a.Expires.Before(refreshEnd) {
-		refreshEnd = a.Expires
-	}
+	refreshEnd := now.Add(RefreshTTL)
 	accessEnd := now.Add(AccessTTL)
-	if accessEnd.After(refreshEnd) {
-		accessEnd = refreshEnd
+	if accessEnd.After(a.Expires) {
+		accessEnd = a.Expires
 	}
 	access, refresh := s.route.newToken(accessPrefix, a.Home), s.route.newToken(refreshPrefix, a.Home)
 	base := tokenRow{Family: family, ClientID: clientID, Home: a.Home, Agent: a.Agent, Scope: scope, Resource: Resource}
