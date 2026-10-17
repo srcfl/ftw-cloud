@@ -44,15 +44,15 @@ func (r *Registry) FleetPut(report fleetwire.Report, now time.Time) (bool, error
 	if _, err := tx.Exec(`INSERT INTO fleet_days(date, totals) VALUES (?, ?) ON CONFLICT(date) DO UPDATE SET totals=excluded.totals`, date, data); err != nil {
 		return false, err
 	}
-	if _, err := tx.Exec(`DELETE FROM fleet_days WHERE date NOT IN (SELECT date FROM fleet_days ORDER BY date DESC LIMIT ?)`, fleetwire.MaxDays); err != nil {
+	if _, err := tx.Exec(`DELETE FROM fleet_days WHERE date < ? OR date NOT IN (SELECT date FROM fleet_days ORDER BY date DESC LIMIT ?)`, now.UTC().AddDate(0, 0, 1-fleetwire.MaxDays).Format(time.DateOnly), fleetwire.MaxDays); err != nil {
 		return false, err
 	}
 	return true, tx.Commit()
 }
 
-func (r *Registry) FleetView() (fleetwire.View, error) {
+func (r *Registry) FleetView(now time.Time) (fleetwire.View, error) {
 	view := fleetwire.View{Schema: fleetwire.StatsSchema, Meaning: fleetwire.Meaning, Days: []fleetwire.Day{}}
-	rows, err := r.rd.Query(`SELECT totals FROM fleet_days ORDER BY date DESC LIMIT ?`, fleetwire.MaxDays)
+	rows, err := r.rd.Query(`SELECT totals FROM fleet_days WHERE date >= ? AND date <= ? ORDER BY date DESC LIMIT ?`, now.UTC().AddDate(0, 0, 1-fleetwire.MaxDays).Format(time.DateOnly), now.UTC().Format(time.DateOnly), fleetwire.MaxDays)
 	if err != nil {
 		return view, err
 	}
@@ -69,4 +69,10 @@ func (r *Registry) FleetView() (fleetwire.View, error) {
 		view.Days = append(view.Days, day)
 	}
 	return view, rows.Err()
+}
+
+// FleetPrune expires dates by calendar age, including when no reports arrive.
+func (r *Registry) FleetPrune(now time.Time) error {
+	_, err := r.db.Exec(`DELETE FROM fleet_days WHERE date < ?`, now.UTC().AddDate(0, 0, 1-fleetwire.MaxDays).Format(time.DateOnly))
+	return err
 }

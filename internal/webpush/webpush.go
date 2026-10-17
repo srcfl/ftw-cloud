@@ -191,3 +191,24 @@ func (s *Service) Send(ctx context.Context, home string) (took int, retry bool) 
 	}
 	return took, retry
 }
+
+// Homes includes browser-only homes in the restart grace, even if their
+// box was online when the service stopped and left no away row.
+func (s *Service) Homes() ([]string, error) {
+	homes, err := s.reg.Rosters()
+	if err != nil {
+		return nil, err
+	}
+	var out []string
+	for _, h := range homes {
+		env, err := cloudwire.DecodeEnvelope(h.Roster)
+		if err != nil {
+			continue
+		}
+		var r cloudwire.Roster
+		if cloudwire.Unmarshal(env.B, &r) == nil && len(r.WebPush) > 0 && cloudwire.ValidateWebPush(r.WebPush) == nil {
+			out = append(out, h.ID)
+		}
+	}
+	return out, nil
+}

@@ -181,6 +181,11 @@ func (s *Server) Upkeep(ctx context.Context, every time.Duration) {
 		case <-t.C:
 			s.Store.Sweep()
 			s.Uplink.Sweep()
+			if f, ok := s.Fleet.(interface{ Prune(time.Time) error }); ok {
+				if err := f.Prune(time.Now()); err != nil {
+					s.Log.Warn("fleet upkeep failed")
+				}
+			}
 			if err := s.Registry.TokenExpire(time.Now()); err != nil {
 				s.Log.Warn("token upkeep failed", "err", err)
 			}

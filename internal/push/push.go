@@ -184,6 +184,7 @@ type Service struct {
 	// BrowserUnreachable delivers the box-encrypted browser notices on the
 	// same outage timer. It needs no APNs key or readable-copy grant.
 	BrowserUnreachable func(context.Context, string) (int, bool)
+	BrowserHomes       func() ([]string, error)
 	// Owns reports whether this shard holds a home. Resume starts no
 	// box.unreachable for a home another shard holds, whose rows may still
 	// be here during a move. Nil holds every home. Set before Resume.
@@ -693,11 +694,19 @@ func (s *Service) Resume() error {
 	if err != nil {
 		return err
 	}
+	if s.BrowserHomes != nil {
+		more, err := s.BrowserHomes()
+		if err != nil {
+			return err
+		}
+		homes = append(homes, more...)
+	}
 	wait := time.Duration(cloudwire.UnreachableAfterMs) * time.Millisecond
 	for _, home := range homes {
 		if seen[home] || (s.Owns != nil && !s.Owns(home)) {
 			continue
 		}
+		seen[home] = true
 		if err := s.reg.AwaySet(home, now.Add(wait)); err != nil {
 			return err
 		}
@@ -860,11 +869,9 @@ func (s *Service) sendAlert(ctx context.Context, job alertJob) {
 		})
 	}
 	job.tries++
-	took := 0
 	browserRetry := false
 	if job.unreachable && s.BrowserUnreachable != nil {
-		n, retry := s.BrowserUnreachable(ctx, job.home)
-		took += n
+		_, retry := s.BrowserUnreachable(ctx, job.home)
 		browserRetry = retry
 	}
 	again := []registry.PushReg{}
@@ -872,11 +879,10 @@ func (s *Service) sendAlert(ctx context.Context, job alertJob) {
 		if !s.breaker.wait(ctx) {
 			return
 		}
-		n, remaining := s.deliver(ctx, job.home, cloudwire.PushKindAlert, job.payload, job.expires, job.regs)
-		took += n
+		_, remaining := s.deliver(ctx, job.home, cloudwire.PushKindAlert, job.payload, job.expires, job.regs)
 		again = remaining
 	}
-	if took > 0 || (len(again) == 0 && !browserRetry) {
+	if len(again) == 0 && !browserRetry {
 		s.told(job)
 	}
 	if len(again) > 0 || browserRetry {

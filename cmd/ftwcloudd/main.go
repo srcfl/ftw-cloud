@@ -195,6 +195,7 @@ func serve(args []string) error {
 	}
 	pushSvc := push.New(reg, sender, log)
 	pushSvc.BrowserUnreachable = webPushSvc.Send
+	pushSvc.BrowserHomes = webPushSvc.Homes
 	pushSvc.WatchApp = *apnsWatch
 	pushSvc.Owns = shards.Ours
 	up.OnHeld = pushSvc.Held

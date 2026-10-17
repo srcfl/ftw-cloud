@@ -23,7 +23,7 @@ func TestReportsBecomeOnlyBoundedDailyTotalsAcrossARestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	now := time.Date(2026, 10, 17, 0, 0, 0, 0, time.UTC)
+	now := time.Now().UTC().Truncate(24 * time.Hour)
 	svc.now = func() time.Time { return now }
 	report := fleetwire.Report{Schema: fleetwire.Schema, Version: "v0.146.0", Channel: "stable", Drivers: []string{}, Battery: "none", Zone: "SE4", Age: "unknown"}
 	raw, _ := json.Marshal(report)
@@ -52,7 +52,7 @@ func TestReportsBecomeOnlyBoundedDailyTotalsAcrossARestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	view, err := reg.FleetView()
+	view, err := reg.FleetView(now)
 	if err != nil || len(view.Days) != 1 || view.Days[0].Reports != 100 {
 		t.Fatal(view, err)
 	}
@@ -61,9 +61,17 @@ func TestReportsBecomeOnlyBoundedDailyTotalsAcrossARestart(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	view, _ = reg.FleetView()
+	view, _ = reg.FleetView(now.AddDate(0, 0, 91))
 	if len(view.Days) != 90 {
 		t.Fatal(len(view.Days))
+	}
+	// A long gap expires old populated dates, even without another report.
+	if err := reg.FleetPrune(now.AddDate(1, 0, 0)); err != nil {
+		t.Fatal(err)
+	}
+	view, _ = reg.FleetView(now.AddDate(1, 0, 0))
+	if len(view.Days) != 0 {
+		t.Fatal("old totals survived", view)
 	}
 	for _, tc := range []struct {
 		method, body string

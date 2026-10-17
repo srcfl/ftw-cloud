@@ -24,6 +24,9 @@ func New(reg *registry.Registry) (*Service, error) {
 	if err := reg.FleetInit(); err != nil {
 		return nil, err
 	}
+	if err := reg.FleetPrune(time.Now()); err != nil {
+		return nil, err
+	}
 	return &Service{reg: reg, now: time.Now, tokens: 120}, nil
 }
 
@@ -67,7 +70,7 @@ func (s *Service) Stats(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
-	view, err := s.reg.FleetView()
+	view, err := s.reg.FleetView(s.now())
 	if err != nil {
 		w.WriteHeader(http.StatusServiceUnavailable)
 		return
@@ -91,3 +94,5 @@ func (s *Service) allow() bool {
 	s.tokens--
 	return true
 }
+
+func (s *Service) Prune(now time.Time) error { return s.reg.FleetPrune(now) }
