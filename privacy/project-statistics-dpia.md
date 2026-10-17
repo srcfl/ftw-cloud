@@ -86,10 +86,12 @@ behörigheter. Den läste inga hushållsrader och ändrade ingen AWS-resurs.
 | Patchning | Värdens fråga om tillgängliga säkerhetsuppdateringar gav inga rader och exit 0. Det bevisar inte en fortlöpande patchrutin. |
 | Insamling | `FTW_CLOUD_STATISTICS_POLICY` är tom i produktion. `/v1/stats` svarar 503 med `Ftw-Statistics-State: disabled`. |
 
-Lagringen minskar från 13 månader till 48 timmar. Underhåll går varje minut,
-även när insamlingen är avstängd. Rader över gränsen gallras vid nästa körning;
-vid driftstopp sker fysisk gallring när processen åter är igång. SQLite använder
-`secure_delete`; offline-raderingsverktyget tömmer även WAL. Ingen backup ingår.
+Lagringen minskar från 13 månader till 48 timmar. Starten gallrar innan tjänsten blir tillgänglig; underhåll går sedan varje minut,
+även när insamlingen är avstängd. Uppgraderingen tar bort äldre policyers grants
+och timrader. Varje kvarvarande grant anger policyn, som även filtrerar den
+publika vyn. Vid driftstopp sker gallring när processen startar igen. SQLite
+använder `secure_delete`; gallring och offline-radering tömmer även WAL. Det
+bevisar inte radering av varje fysisk kopia på underliggande SSD. Ingen backup ingår.
 Tillfälliga rättighetsutdrag ska få separat, kort livstid enligt
 [operatörsrutinen](statistics-operations.md).
 
@@ -163,7 +165,10 @@ Den nya modellen: [Core #1700](https://github.com/srcfl/ftw/pull/1700),
 Ägaren granskade de renderade Core-vyerna den 17 oktober. Det godkänner inte
 att timinsamlingen startar. Relevanta tester täcker fält och
 signering, äldre samtycke, serverns avstängda läge, gruppstorlek, dominans,
-dubbletter, okända värden, återkallande, radering och gallring. En lokal testsvit
+dubbletter, okända värden, återkallande, radering och gallring vid start. Uppgraderingsprovet skapar den verkliga äldre
+databasformen utan policykolumn och visar att dess grants och timmar inte kan
+publiceras under v3. Ett separat prov visar att ett lagringsfel vid läsning av
+rättighetsspärrar stoppar återställningen, i stället för att dölja hem. En lokal testsvit
 bevisar inte alla produktionskontroller eller ett giltigt rättsligt samtycke.
 
 | Ursprunglig öppen punkt | Nuvarande bevis och det som återstår |

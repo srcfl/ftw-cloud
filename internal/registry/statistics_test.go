@@ -136,3 +136,59 @@ func TestStatisticsRetention(t *testing.T) {
 		t.Fatal("row older than 48 hours remains", n)
 	}
 }
+
+func TestStatisticsMigratesLegacyGrantsAndFiltersEarlierPolicies(t *testing.T) {
+	r := open(t)
+	now := time.Now()
+	_, err := r.db.Exec(`CREATE TABLE statistics_grants(home TEXT PRIMARY KEY,stats_id BLOB NOT NULL,since_ms INTEGER NOT NULL);
+	CREATE TABLE statistics_hours(home TEXT NOT NULL,hour_ms INTEGER NOT NULL,metrics BLOB NOT NULL,PRIMARY KEY(home,hour_ms));`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range 20 {
+		home := fmt.Sprint("home", i)
+		if err := r.Claim(home, []byte("key"), now); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := r.db.Exec(`INSERT INTO statistics_grants VALUES(?,?,?)`, home, bytes.Repeat([]byte{1}, 16), now.Add(-2*time.Hour).UnixMilli()); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := r.db.Exec(`INSERT INTO statistics_hours VALUES(?,?,?)`, home, now.Truncate(time.Hour).Add(-time.Hour).UnixMilli(), []byte(`{"pv_generation_wh":100}`)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := r.StatisticsInit(); err != nil {
+		t.Fatal(err)
+	}
+	var count int
+	if err := r.rd.QueryRow(`SELECT COUNT(*) FROM statistics_grants`).Scan(&count); err != nil || count != 0 {
+		t.Fatal("legacy grants survived migration", count, err)
+	}
+	if err := r.rd.QueryRow(`SELECT COUNT(*) FROM statistics_hours`).Scan(&count); err != nil || count != 0 {
+		t.Fatal("legacy hours survived migration", count, err)
+	}
+	g := cloudwire.Grant{TermsPolicy: cloudwire.CloudTermsPolicy, Controller: cloudwire.ControllerSourceful, Purposes: []string{protocol.CloudPurposeServe, protocol.CloudPurposeStats}, StatsID: bytes.Repeat([]byte{2}, 16), StatsPolicy: cloudwire.StatsPolicy, StatsSinceMs: now.Add(-2 * time.Hour).UnixMilli()}
+	for i := range 20 {
+		statsHome(t, r, now, g, fmt.Sprint("home", i), 1000)
+	}
+	if err := r.StatisticsInit(); err != nil {
+		t.Fatal(err)
+	}
+	v, err := r.StatisticsView(now)
+	if err != nil || v.Installations.State != "visible" {
+		t.Fatal("current grants lost on restart", err)
+	}
+	if _, err := r.db.Exec(`UPDATE statistics_grants SET policy='ftw-project-stats-2026-10-v2'`); err != nil {
+		t.Fatal(err)
+	}
+	v, err = r.StatisticsView(now)
+	if err != nil || v.Installations.State != "empty" {
+		t.Fatal("older policy contributed to public v3 cells", err)
+	}
+	if err := r.StatisticsInit(); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.rd.QueryRow(`SELECT COUNT(*) FROM statistics_hours`).Scan(&count); err != nil || count != 0 {
+		t.Fatal("older policy hours not erased", count, err)
+	}
+}

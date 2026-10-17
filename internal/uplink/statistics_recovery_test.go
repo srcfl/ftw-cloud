@@ -168,3 +168,19 @@ func TestOfflineRightsErasureSurvivesCloudRestartAndBoxReconnect(t *testing.T) {
 		t.Fatal("restricted home could not be deleted")
 	}
 }
+
+func TestRestoreReturnsRestrictionStorageFailure(t *testing.T) {
+	s := newService(t)
+	b := newBox(t)
+	if _, err := b.connect(s, nil); err != nil {
+		t.Fatal(err)
+	}
+	b.send(cloudwire.MsgRoster, b.roster())
+	wait(t, "stored roster", func() bool { h, ok, _ := s.reg.Get(b.home); return ok && h.RosterSeq == 1 })
+	// The legacy registry has rosters but no statistics restriction table.
+	fresh := New(store.New(nil), s.reg, s.key, s.up.log)
+	fresh.StatisticsStore = true
+	if _, err := fresh.Restore(); err == nil {
+		t.Fatal("restriction lookup failure became a healthy empty service")
+	}
+}

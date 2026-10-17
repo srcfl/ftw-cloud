@@ -59,11 +59,11 @@ def handle_request(database, request, output, erase=False):
             if db.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()[0] != 0:
                 raise sqlite3.OperationalError("WAL checkpoint incomplete")
             return {"case_id": case["case_id"], "erased_rows": count, "restricted": True}
-        grant = db.execute("SELECT stats_id,since_ms FROM statistics_grants WHERE home=?", (home,)).fetchone()
+        grant = db.execute("SELECT stats_id,since_ms,policy FROM statistics_grants WHERE home=?", (home,)).fetchone()
         hours = db.execute("SELECT hour_ms,metrics FROM statistics_hours WHERE home=? ORDER BY hour_ms", (home,)).fetchall()
         body = {"schema": "ftw.statistics-subject-export/1", "case_id": case["case_id"],
                 "home": home, "generated_at": dt.datetime.now(dt.timezone.utc).isoformat(),
-                "grant": {"statistics_id": grant[0].hex(), "since_ms": grant[1]} if grant else None,
+                "grant": {"statistics_id": grant[0].hex(), "since_ms": grant[1], "policy": grant[2]} if grant else None,
                 "hours": [{"hour_ms": hour, "metrics": json.loads(metrics)} for hour, metrics in hours]}
         fd = os.open(output, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
         try:

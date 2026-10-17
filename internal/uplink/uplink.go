@@ -363,6 +363,13 @@ func (u *Uplink) Restore() (int, error) {
 	if err != nil {
 		return 0, err
 	}
+	var restricted map[string]bool
+	if u.Statistics || u.StatisticsStore {
+		restricted, err = u.registry.StatisticsRestrictions()
+		if err != nil {
+			return 0, err
+		}
+	}
 	// Checking a signature is most of the work, so the rosters are checked
 	// side by side, one worker per core: a deploy admits phones sooner.
 	var n, bad atomic.Int64
@@ -373,12 +380,8 @@ func (u *Uplink) Restore() (int, error) {
 		go func() {
 			defer wg.Done()
 			for h := range work {
-				if u.Statistics || u.StatisticsStore {
-					held, err := u.registry.StatisticsRestricted(h.ID)
-					if err != nil || held {
-						bad.Add(1)
-						continue
-					}
+				if restricted[h.ID] {
+					continue
 				}
 				r, ok := verifiedRoster(h)
 				if !ok || (u.Statistics && !statisticsAccess(*r)) {

@@ -36,6 +36,9 @@ func TestStatisticsSubjectExportIsPrivateScopedAndOffline(t *testing.T) {
 	if out, err := run(); err == nil {
 		t.Fatalf("export ran with the service's registry open: %s", out)
 	}
+	if out, err := exec.Command("python3", "../../scripts/statistics-subject-request.py", "--database", path, "--request", request, "--erase").CombinedOutput(); err == nil {
+		t.Fatalf("erasure ran with Cloud open: %s", out)
+	}
 	if _, err := os.Stat(output); !os.IsNotExist(err) {
 		t.Fatal("refused export left a file")
 	}

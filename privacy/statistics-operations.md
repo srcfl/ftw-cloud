@@ -68,7 +68,7 @@ operatörens intygande, inte ett kryptografiskt bevis.
    python3 scripts/statistics-subject-request.py --database "$FTW_REGISTRY" --request "$FTW_CASE" --output "$FTW_EXPORT"
    ```
 
-   Utdraget innehåller endast det angivna hemmets statistik-id, starttid och
+   Utdraget innehåller endast det angivna hemmets statistik-id, policy, starttid och
    timrader. Det läser inte nycklar, roster, tokens eller andra hem. Utfilen
    skapas med 0600; verktyget vägrar skriva över en fil eller följa en utfilslänk.
 5. För verifierad radering eller tillfällig begränsning av statistik:
@@ -78,15 +78,17 @@ operatörens intygande, inte ett kryptografiskt bevis.
    ```
 
    Åtgärden raderar timrader och statistikgrant och sparar en spärr för hemmet.
-   Den skriver över raderade SQLite-celler och tömmer WAL. En gammal box eller
+   Den använder SQLite `secure_delete` och tömmer WAL. Det bevisar inte
+   radering av varje fysisk kopia på underliggande SSD. En gammal box eller
    ny policy får inte börja ladda upp igen. Cloud-åtkomst väntar också medan
    ärendet är spärrat, eftersom Cloud omfattar statistik. Detta är ingen
    vanlig inställning för att välja bort statistik inom Cloud. Informera den
    berörda personen om följden före åtgärden. Lokal drift fortsätter.
-Om verktyget avslutas med fel: utgå inte från att inget har ändrats. Behåll
-Cloud stoppat, kontrollera ärendet och databasens tillstånd och försök igen
-med samma verifierade ärende. Radering är upprepningsbar. En tom databas får
-aldrig ersätta originalet för att dölja ett fel.
+
+   Om verktyget avslutas med fel: utgå inte från att inget har ändrats. Behåll
+   Cloud stoppat, kontrollera ärendet och databasens tillstånd och försök igen
+   med samma verifierade ärende. Radering är upprepningsbar. En tom databas får
+   aldrig ersätta originalet för att dölja ett fel.
 
 6. Starta Cloud med insamlingens tidigare aktiveringsläge. Kontrollera hälsa,
    att andra hem kan återansluta och att det spärrade hemmet inte återställs.
@@ -114,9 +116,15 @@ De provar inte en faktisk persons identitet eller leveranskanal.
 
 ## Lagring, backup och incident
 
-- Hushållstimmar: gallring vid 48 timmars ålder från timstart. Underhåll kör
-  varje minut, även med insamlingen av. Ett driftstopp kan skjuta upp fysisk
-  gallring tills processen är tillbaka. Publik vy använder bara senaste dygnet.
+- Hushållstimmar: gallring vid 48 timmars ålder från timstart. Starten gallrar
+  innan tjänsten blir tillgänglig; därefter kör underhåll varje minut, även
+  med insamlingen av. Uppgraderingen tar bort äldre policyers grants och
+  timmar. Ett driftstopp skjuter upp gallring tills processen startar igen.
+  Publik vy använder bara senaste dygnet och aktuell policy.
+- `TestStatisticsMigratesLegacyGrantsAndFiltersEarlierPolicies` provar den
+  äldre tabellformen och policybytet. `TestStartupPrunesOldHoursEvenWithCollectionDisabled`
+  provar startgallringen utan aktivering. `TestRestoreReturnsRestrictionStorageFailure`
+  visar att databasfel i rättighetsspärrar stoppar starten.
 - Ingen backup av statistikdatabasen ingår. En trasig värd kan förlora
   statistik; boxen behåller sin egen historik. Inför ingen snapshot eller
   databasdump utan ny bedömning av lagring och radering.

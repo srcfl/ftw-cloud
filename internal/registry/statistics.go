@@ -15,16 +15,41 @@ import (
 // Statistics tables contain only versioned, owner-approved closed-hour values.
 // They have no staff read route, and leave with the home's purge.
 func (r *Registry) StatisticsInit() error {
-	_, err := r.db.Exec(`CREATE TABLE IF NOT EXISTS statistics_grants (
+	tx, err := r.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	_, err = tx.Exec(`CREATE TABLE IF NOT EXISTS statistics_grants (
 	 home TEXT PRIMARY KEY REFERENCES homes(home) ON DELETE CASCADE,
-	 stats_id BLOB NOT NULL, since_ms INTEGER NOT NULL);
+	 stats_id BLOB NOT NULL, since_ms INTEGER NOT NULL, policy TEXT NOT NULL DEFAULT '');
 	 CREATE TABLE IF NOT EXISTS statistics_hours (
 	 home TEXT NOT NULL REFERENCES homes(home) ON DELETE CASCADE,
 	 hour_ms INTEGER NOT NULL, metrics BLOB NOT NULL, PRIMARY KEY(home,hour_ms));
 	 CREATE TABLE IF NOT EXISTS statistics_restrictions (
 	 home TEXT PRIMARY KEY REFERENCES homes(home) ON DELETE CASCADE);
 	 CREATE INDEX IF NOT EXISTS statistics_hours_time ON statistics_hours(hour_ms);`)
-	return err
+	if err != nil {
+		return err
+	}
+	var column int
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('statistics_grants') WHERE name='policy'`).Scan(&column); err != nil {
+		return err
+	}
+	if column == 0 {
+		if _, err := tx.Exec(`ALTER TABLE statistics_grants ADD COLUMN policy TEXT NOT NULL DEFAULT ''`); err != nil {
+			return err
+		}
+	}
+	// A stored grant from an older binary proves no acceptance of this policy.
+	if _, err := tx.Exec(`DELETE FROM statistics_hours WHERE NOT EXISTS
+	 (SELECT 1 FROM statistics_grants g WHERE g.home=statistics_hours.home AND g.policy=?)`, cloudwire.StatsPolicy); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM statistics_grants WHERE policy<>?`, cloudwire.StatsPolicy); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // StatisticsGrant clears old consent rows before a changed grant may send.
@@ -35,7 +60,8 @@ func (r *Registry) StatisticsGrant(home string, g cloudwire.Grant) error {
 	}
 	defer tx.Rollback()
 	var old []byte
-	err = tx.QueryRow(`SELECT stats_id FROM statistics_grants WHERE home=?`, home).Scan(&old)
+	var oldPolicy string
+	err = tx.QueryRow(`SELECT stats_id,policy FROM statistics_grants WHERE home=?`, home).Scan(&old, &oldPolicy)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return err
 	}
@@ -52,7 +78,7 @@ func (r *Registry) StatisticsGrant(home string, g cloudwire.Grant) error {
 			return errors.New("statistics: subject request restricts this home")
 		}
 	}
-	if !on || !bytes.Equal(old, g.StatsID) {
+	if !on || !bytes.Equal(old, g.StatsID) || oldPolicy != cloudwire.StatsPolicy {
 		if _, err := tx.Exec(`DELETE FROM statistics_hours WHERE home=?`, home); err != nil {
 			return err
 		}
@@ -61,8 +87,8 @@ func (r *Registry) StatisticsGrant(home string, g cloudwire.Grant) error {
 		}
 	}
 	if on {
-		if _, err := tx.Exec(`INSERT INTO statistics_grants(home,stats_id,since_ms) VALUES(?,?,?)
-		 ON CONFLICT(home) DO UPDATE SET stats_id=excluded.stats_id,since_ms=excluded.since_ms`, home, g.StatsID, g.StatsSinceMs); err != nil {
+		if _, err := tx.Exec(`INSERT INTO statistics_grants(home,stats_id,since_ms,policy) VALUES(?,?,?,?)
+		 ON CONFLICT(home) DO UPDATE SET stats_id=excluded.stats_id,since_ms=excluded.since_ms,policy=excluded.policy`, home, g.StatsID, g.StatsSinceMs, g.StatsPolicy); err != nil {
 			return err
 		}
 	}
@@ -80,10 +106,28 @@ func (r *Registry) StatisticsPut(home string, report cloudwire.Stats, now time.T
 	// Consent and the write are one SQL statement: a withdrawn grant cannot
 	// race a pending report back into storage. Reconnects replace one hour.
 	_, err = r.db.Exec(`INSERT INTO statistics_hours(home,hour_ms,metrics)
-	 SELECT home,?,? FROM statistics_grants WHERE home=? AND stats_id=? AND since_ms<=?
+	 SELECT home,?,? FROM statistics_grants WHERE home=? AND stats_id=? AND since_ms<=? AND policy=?
 	 AND NOT EXISTS (SELECT 1 FROM statistics_restrictions x WHERE x.home=statistics_grants.home)
-	 ON CONFLICT(home,hour_ms) DO UPDATE SET metrics=excluded.metrics`, report.HourMS, data, home, report.StatsID, report.HourMS)
+	 ON CONFLICT(home,hour_ms) DO UPDATE SET metrics=excluded.metrics`, report.HourMS, data, home, report.StatsID, report.HourMS, cloudwire.StatsPolicy)
 	return err
+}
+
+// StatisticsRestrictions is read once before restoring the in-memory homes.
+func (r *Registry) StatisticsRestrictions() (map[string]bool, error) {
+	rows, err := r.rd.Query(`SELECT home FROM statistics_restrictions`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	homes := map[string]bool{}
+	for rows.Next() {
+		var home string
+		if err := rows.Scan(&home); err != nil {
+			return nil, err
+		}
+		homes[home] = true
+	}
+	return homes, rows.Err()
 }
 
 // StatisticsRestricted is an operator-imposed rights hold, never an owner
@@ -96,7 +140,17 @@ func (r *Registry) StatisticsRestricted(home string) (bool, error) {
 
 func (r *Registry) StatisticsPrune(now time.Time) error {
 	_, err := r.db.Exec(`DELETE FROM statistics_hours WHERE hour_ms<?`, now.UnixMilli()-cloudwire.StatsRetentionMS)
-	return err
+	if err != nil {
+		return err
+	}
+	var busy, frames, done int
+	if err := r.db.QueryRow(`PRAGMA wal_checkpoint(TRUNCATE)`).Scan(&busy, &frames, &done); err != nil {
+		return err
+	}
+	if busy != 0 {
+		return errors.New("statistics: WAL checkpoint busy")
+	}
+	return nil
 }
 
 type StatisticsCell struct {
@@ -143,7 +197,7 @@ func (r *Registry) StatisticsView(now time.Time) (StatisticsView, error) {
 	v := StatisticsView{Schema: "ftw.project-usage/1", ObservedAt: now.UTC().Format(time.RFC3339),
 		WindowStart: start.Format(time.RFC3339), WindowEnd: end.Format(time.RFC3339), Minimum: cloudwire.StatsMinimumHomes, Metrics: map[string]StatisticsCell{}}
 	rows, err := r.rd.Query(`SELECT h.home,h.hour_ms,h.metrics FROM statistics_hours h
-	 JOIN statistics_grants g ON g.home=h.home WHERE h.hour_ms>=? AND h.hour_ms<? ORDER BY h.hour_ms DESC`, start.UnixMilli(), end.UnixMilli())
+	 JOIN statistics_grants g ON g.home=h.home WHERE g.policy=? AND h.hour_ms>=? AND h.hour_ms<? ORDER BY h.hour_ms DESC`, cloudwire.StatsPolicy, start.UnixMilli(), end.UnixMilli())
 	if err != nil {
 		return v, err
 	}

@@ -22,6 +22,9 @@ func New(reg *registry.Registry) (*Service, error) {
 	if err := reg.StatisticsInit(); err != nil {
 		return nil, err
 	}
+	if err := reg.StatisticsPrune(time.Now()); err != nil {
+		return nil, err
+	}
 	return &Service{Reg: reg}, nil
 }
 
