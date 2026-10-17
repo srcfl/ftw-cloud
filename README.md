@@ -411,10 +411,10 @@ consent. Native apps keep the old scope until their consent screen adopts
 this policy. The first contributing hour starts after consent; the sender
 does not upload earlier ledger history.
 
-Deploying this ingestion scope still needs the signed C8 DPIA and the
-updated consent text described by Core's ADR 0008. This change does not
-claim that sign-off, change an owner's saved choice, or release a Core
-update. The paired native consent change requires a fresh choice for this policy.
+Enabling this collection scope needs the signed C8 DPIA and the updated
+consent text described by Core's ADR 0008. A deployment with collection off
+does not claim that sign-off or change an owner's saved choice. The paired
+native consent change requires a fresh choice for this policy.
 
 
 The separate anonymous daily-report feed is `GET /v1/fleet/public`. It exposes
