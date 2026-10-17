@@ -32,8 +32,8 @@ maintains it.
   never from a body field. Every later box message but `tun` must verify
   with that key. `tun` is unsigned: its `d` is a phone's ciphertext, which
   the service routes by `dev` and `sid` and never reads.
-- **Live readings stay in memory.** The separate, versioned project statistics
-  consent permits rounded closed-hour energy and configured capacities on
+- **Live readings stay in memory.** The versioned project statistics
+  scope covers rounded closed-hour energy and configured capacities on
   disk for 13 months. Only group cells pass `/v1/stats`; no staff route reads
   a home. Withdrawal and home purge delete its unpublished statistics.
   Memory holds live readings, and only while the roster's

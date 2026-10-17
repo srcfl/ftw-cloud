@@ -374,7 +374,7 @@ func (u *Uplink) Restore() (int, error) {
 			defer wg.Done()
 			for h := range work {
 				r, ok := verifiedRoster(h)
-				if !ok {
+				if !ok || (u.Statistics && !statisticsAccess(*r)) {
 					bad.Add(1)
 					continue
 				}
@@ -890,9 +890,10 @@ func (c *boxConn) roster(env cloudwire.Envelope) error {
 	}
 	g := r.Grant
 	on := len(g.ID) == cloudwire.GrantIDBytes && slices.Contains(g.Purposes, protocol.CloudPurposeServe)
+	only := statisticsOnly(r)
 	bare := len(g.Scopes) == 0 && len(g.Purposes) == 0
 	withdrawn := len(g.ID) == cloudwire.GrantIDBytes && bare
-	if !(on || withdrawn || (len(g.ID) == 0 && bare)) || g.Controller == "" || r.TTLS <= 0 ||
+	if !(on || only || withdrawn || (len(g.ID) == 0 && bare)) || g.Controller == "" || r.TTLS <= 0 ||
 		!within(g.Scopes, protocol.CloudScopes) || !within(g.Purposes, protocol.CloudPurposes) {
 		return fmt.Errorf("%w: a roster outside what FTW Cloud may hold", errProtocol)
 	}
@@ -909,13 +910,23 @@ func (c *boxConn) roster(env cloudwire.Envelope) error {
 			return fmt.Errorf("%w: a pairing code the service cannot hold", errProtocol)
 		}
 	}
-	if !c.handle.SetRoster(&r) {
-		return nil // older than what is held: ignored
+	if r.RosterSeq < c.rosterSeq() {
+		return nil
 	}
 	if c.u.Statistics || c.u.StatisticsStore {
+		// A signed withdrawal must erase rows even when updated terms also
+		// require this home to leave Cloud.
 		if err := c.u.registry.StatisticsGrant(c.home, g); err != nil {
 			return err
 		}
+	}
+	if c.u.Statistics && !statisticsAccess(r) {
+		c.handle.DropCopy()
+		c.u.store.Forget(c.home)
+		return fmt.Errorf("%w: updated Cloud terms including statistics are required", errProtocol)
+	}
+	if !c.handle.SetRoster(&r) {
+		return nil
 	}
 	if withdrawn {
 		if err := c.dropCopy(g.ID); err != nil {
@@ -980,4 +991,15 @@ func (c *boxConn) purge() error {
 		c.u.OnPurge(c.home)
 	}
 	return c.send(purged{AtMs: now.UnixMilli(), What: cloudwire.PurgedHome, GrantID: grantID})
+}
+
+// statisticsOnly exposes the signed upload path and no remote recipient.
+func statisticsOnly(r cloudwire.Roster) bool {
+	g := r.Grant
+	return len(g.ID) == cloudwire.GrantIDBytes && g.Controller == cloudwire.ControllerSourceful && len(g.Scopes) == 0 && len(g.Purposes) == 1 && g.Purposes[0] == protocol.CloudPurposeStats && g.StatsPolicy == cloudwire.StatsPolicy && g.TermsPolicy == cloudwire.StatsPolicy && len(g.StatsID) == 16 && len(r.Devices) == 0 && len(r.Pending) == 0 && len(r.Noise) == 0 && len(r.WebPush) == 0
+}
+
+func statisticsAccess(r cloudwire.Roster) bool {
+	g := r.Grant
+	return statisticsOnly(r) || (len(g.ID) == cloudwire.GrantIDBytes && g.Controller == cloudwire.ControllerSourceful && g.TermsPolicy == cloudwire.CloudTermsPolicy && g.StatsPolicy == cloudwire.StatsPolicy && len(g.StatsID) == 16 && g.StatsSinceMs > 0 && slices.Contains(g.Purposes, protocol.CloudPurposeServe) && slices.Contains(g.Purposes, protocol.CloudPurposeStats))
 }

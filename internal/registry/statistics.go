@@ -12,7 +12,7 @@ import (
 	"github.com/srcfl/ftw/go/protocol/cloudwire"
 )
 
-// Statistics tables contain only separately consented, closed-hour values.
+// Statistics tables contain only versioned, owner-approved closed-hour values.
 // They have no staff read route, and leave with the home's purge.
 func (r *Registry) StatisticsInit() error {
 	_, err := r.db.Exec(`CREATE TABLE IF NOT EXISTS statistics_grants (
@@ -38,8 +38,7 @@ func (r *Registry) StatisticsGrant(home string, g cloudwire.Grant) error {
 		return err
 	}
 	on := g.Controller == cloudwire.ControllerSourceful && g.StatsPolicy == cloudwire.StatsPolicy &&
-		len(g.StatsID) == 16 && g.StatsSinceMs > 0 && slices.Contains(g.Purposes, protocol.CloudPurposeStats) &&
-		slices.Contains(g.Purposes, protocol.CloudPurposeServe)
+		len(g.StatsID) == 16 && g.StatsSinceMs > 0 && slices.Contains(g.Purposes, protocol.CloudPurposeStats)
 	if !on || !bytes.Equal(old, g.StatsID) {
 		if _, err := tx.Exec(`DELETE FROM statistics_hours WHERE home=?`, home); err != nil {
 			return err
