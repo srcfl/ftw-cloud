@@ -1,9 +1,9 @@
 # Running FTW Cloud
 
 FTW Cloud runs on one `t4g.small` in AWS eu-north-1 (Stockholm) and answers
-at `https://cloud.ftw.energy`. No box sends to it yet: release builds of Core
-name no service, and a home can turn FTW Cloud on only from a Core built with
-the uplink (srcfl/ftw#1595), after its owner decides to.
+at `https://cloud.ftw.energy`. Current Core and native clients can use it after
+the owner enables Cloud. Local control stays on the box. Hourly project
+statistics remain off until the C8 review and policy approval are complete.
 
 ## The host
 
@@ -25,7 +25,7 @@ Every AWS resource carries the tag `Project=ftw-cloud`.
 
 ## Shape
 
-- One instance, one container (`compose.yml`), no standby. A rebuilt host
+- One instance, `ftwcloudd` and the separate keys service (`compose.yml`), no standby. A rebuilt host
   starts empty and boxes fill it again when they reconnect.
 - `ftwcloudd` ends TLS 1.3 itself and gets its certificate from Let's Encrypt
   by TLS-ALPN-01 on 443, so port 80 stays shut. **No TLS-terminating proxy in
@@ -43,7 +43,9 @@ Every AWS resource carries the tag `Project=ftw-cloud`.
   supplies `compose.yml`.
 - The Docker volume `ftw-cloud_ftw-cloud-state` holds the SQLite registry
   (home ids, box keys, signed rosters, tombstones) and the ACME cache, on the
-  encrypted root disk. No readings. No backup.
+  encrypted root disk. With the reviewed statistics policy enabled, it also
+  holds rounded closed-hour reports for 48 hours. Live readings stay in
+  memory. No statistics backup.
 
 ## The service key
 
@@ -70,7 +72,8 @@ secret the same way.
 - Swap off (`swapoff -a`, no swap in fstab) and core dumps off: the kernel
   pipes cores to `/bin/false`, systemd-coredump stores nothing, `compose.yml`
   sets `ulimits: core: 0`, and `ftwcloudd` marks itself not dumpable.
-  Household readings exist only in this process's memory.
+  Live readings stay in process memory. The separate project-statistics
+  scope stores only its approved closed-hour fields on disk for 48 hours.
 - Nothing comes in but 443, TCP and UDP. There is no SSH and no key pair;
   administration is through SSM. Session logs to a separate account are not set up yet.
 - Outbound is open. The host now needs only GitHub and `ghcr.io` (the image
@@ -373,6 +376,9 @@ Cloud data; the images on `ghcr.io` hold only code.
 The APNs key ([apns.md](apns.md)) and the Noise key phones dial
 ([noise.md](noise.md)) come from Parameter Store. HTTP/3 needs UDP 443 in the
 security group ([http3.md](http3.md)). Widget tokens need no
-secret: the registry holds their hashes. Statistics (C7–C8) add secrets,
-egress and storage when they land. The erase test, canary homes
-and the external heartbeat that pages Sourceful belong with the first homes.
+secret: the registry holds their hashes. Statistics (C8) have their own
+[review](../privacy/project-statistics-dpia.md) and
+[rights and retention procedure](../privacy/statistics-operations.md). The
+policy flag stays empty until that review is signed off. Signed deletion,
+offline rights handling and startup retention have tests. Canary homes and
+the external heartbeat that pages Sourceful still need production evidence.
