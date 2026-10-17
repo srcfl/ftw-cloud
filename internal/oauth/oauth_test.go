@@ -931,7 +931,8 @@ func TestTheConsentPage(t *testing.T) {
 		"a program on this computer", "<svg", AppLink, scopeWords[ScopeDispatchHold], "Control lasts minutes",
 		// The QR code or the link opens the app; the code is for an owner
 		// who has neither, in the app or on the box's own page.
-		"scan the QR code with your phone, or open the link", "Type this code in the FTW app, or on your box's own page under Settings, then Access",
+		"scan the QR code with your phone's camera, or tap the button on your phone",
+		"Type this code in the FTW app under Settings → Assistants and support → Add an assistant, or on your box's own page under Settings → Access",
 		"in the FTW app or on your box"} {
 		if !strings.Contains(page, want) {
 			t.Fatalf("the page lacks %q", want)

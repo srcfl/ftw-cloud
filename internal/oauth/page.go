@@ -130,9 +130,9 @@ var consentTmpl = template.Must(template.New("consent").Parse(`<!doctype html>
 <div class="approve">
 <div class="qr">{{.QR}}</div>
 <div>
-<p>Approve in the FTW app: scan the QR code with your phone, or open the link.</p>
+<p>Approve in the FTW app: scan the QR code with your phone's camera, or tap the button on your phone.</p>
 <p><a class="button" href="{{.Link}}">Open the FTW app</a></p>
-<p class="muted">Can't scan or open the link? Type this code in the FTW app, or on your box's own page under Settings, then Access.</p>
+<p class="muted">Can't do either? Type this code in the FTW app under Settings → Assistants and support → Add an assistant, or on your box's own page under Settings → Access.</p>
 <p class="code">{{.Code}}</p>
 </div>
 </div>
