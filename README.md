@@ -380,3 +380,32 @@ events scope and suspension before sending. A readable-copy grant is not
 needed. The roster holds the delivery endpoints and ciphertext; a separate
 per-home row holds only the current outage's sent ids. Purge removes both.
 The sender refuses redirects, proxies and local destinations.
+
+## Project usage statistics
+
+`GET /v1/stats` publishes only group cells under
+`ftw-project-stats-2026-10-v1`. Boxes send signed `stats` hours only after the
+owner accepts that policy. The previous statistics policy sends no new
+fields. Reporting installations in the last 24 closed hours are not people
+or total FTW installs. Power and capacity are configured; energy sums
+recorded hours, including partial hours. Missing data is unknown.
+
+Cloud stores consented hourly values for 13 months, upserts reconnects, and
+deletes household rows on a signed withdrawal or purge. Cells need 20 homes
+and no home above 30 percent of the sum. The stats Worker polls this public
+view; it receives no home id or per-home value. One instance supplies its
+local shard only; public multi-shard totals need an explicit safe collector.
+
+Owner acceptance uses the existing box API. On the box's loopback interface,
+read `GET /api/cloud/stats-policy`, accept its terms, then
+`POST /api/cloud/stats` with `{"policy":"ftw-project-stats-2026-10-v1"}`.
+The readable Cloud grant must already be on. `DELETE /api/cloud/stats`
+withdraws this choice. Do not enable it for someone else or reuse an older
+consent. Native apps keep the old scope until their consent screen adopts
+this policy. The first contributing hour starts after consent; the sender
+does not upload earlier ledger history.
+
+Deploying this ingestion scope still needs the signed C8 DPIA and the
+updated consent text described by Core's ADR 0008. This change does not
+claim that sign-off, change an owner's saved choice, or release a Core
+update. The existing app statistics switch does not accept the new policy.

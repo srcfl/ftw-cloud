@@ -101,11 +101,13 @@ func TunDropped() int64 { return dropTunUp.Load() + dropTunDown.Load() }
 
 // Uplink is the /v1/box handler.
 type Uplink struct {
-	store    *store.Store
-	registry *registry.Registry
-	key      *ecdsa.PrivateKey
-	log      *slog.Logger
-	now      func() time.Time
+	// Statistics is set before serving, after the consent tables exist.
+	Statistics bool
+	store      *store.Store
+	registry   *registry.Registry
+	key        *ecdsa.PrivateKey
+	log        *slog.Logger
+	now        func() time.Time
 
 	mu    sync.Mutex
 	conns map[string]*boxConn
@@ -752,6 +754,15 @@ func (c *boxConn) apply(env cloudwire.Envelope) (stop bool, err error) {
 	switch env.T {
 	case cloudwire.MsgRoster:
 		return false, c.roster(env)
+	case cloudwire.MsgStats:
+		if !c.u.Statistics {
+			return false, nil
+		}
+		var report cloudwire.Stats
+		if err := cloudwire.Unmarshal(env.B, &report); err != nil {
+			return true, err
+		}
+		return false, c.u.registry.StatisticsPut(c.home, report, c.u.now())
 	case cloudwire.MsgBye:
 		var b cloudwire.Bye
 		if err := cloudwire.Unmarshal(env.B, &b); err != nil {
@@ -895,6 +906,11 @@ func (c *boxConn) roster(env cloudwire.Envelope) error {
 	}
 	if !c.handle.SetRoster(&r) {
 		return nil // older than what is held: ignored
+	}
+	if c.u.Statistics {
+		if err := c.u.registry.StatisticsGrant(c.home, g); err != nil {
+			return err
+		}
 	}
 	if withdrawn {
 		if err := c.dropCopy(g.ID); err != nil {

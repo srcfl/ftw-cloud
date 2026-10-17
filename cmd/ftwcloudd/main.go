@@ -47,6 +47,7 @@ import (
 	"github.com/srcfl/ftw-cloud/internal/registry"
 	"github.com/srcfl/ftw-cloud/internal/server"
 	"github.com/srcfl/ftw-cloud/internal/shard"
+	"github.com/srcfl/ftw-cloud/internal/statistics"
 	"github.com/srcfl/ftw-cloud/internal/store"
 	"github.com/srcfl/ftw-cloud/internal/token"
 	"github.com/srcfl/ftw-cloud/internal/uplink"
@@ -139,6 +140,11 @@ func serve(args []string) error {
 	st.UseSuspensions(reg.Suspended)
 	up := uplink.New(st, reg, key, log)
 	up.Shards = shards
+	usageSvc, err := statistics.New(reg)
+	if err != nil {
+		return err
+	}
+	up.Statistics = true
 	// A restart is a deploy, and commands ride through here: phones are
 	// admitted by the rosters their boxes signed before, without waiting
 	// for every box to reconnect.
@@ -154,7 +160,7 @@ func serve(args []string) error {
 	}
 	tokens := token.New(st, reg, log)
 	tokens.Shards = shards
-	srv := &server.Server{Store: st, Registry: reg, Uplink: up, Tokens: tokens, Fleet: fleetSvc, Log: log}
+	srv := &server.Server{Store: st, Registry: reg, Uplink: up, Tokens: tokens, Fleet: fleetSvc, Statistics: usageSvc, Log: log}
 
 	// Assistants: the authorization server, with agent keys in ftwkeysd.
 	agentKeys := keys.Dial(*keysSocket)
