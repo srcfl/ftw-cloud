@@ -9,7 +9,7 @@ require (
 	github.com/fxamacker/cbor/v2 v2.9.4
 	github.com/gorilla/websocket v1.5.3
 	github.com/quic-go/quic-go v0.63.0
-	github.com/srcfl/ftw/go/protocol v0.0.0-20261017144639-11756627d4d7
+	github.com/srcfl/ftw/go/protocol v0.0.0-20261017145623-2b1cc2563972
 	golang.org/x/crypto v0.57.0
 	golang.org/x/net v0.58.0
 	golang.org/x/sys v0.48.0
