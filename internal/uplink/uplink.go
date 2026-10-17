@@ -373,6 +373,13 @@ func (u *Uplink) Restore() (int, error) {
 		go func() {
 			defer wg.Done()
 			for h := range work {
+				if u.Statistics || u.StatisticsStore {
+					held, err := u.registry.StatisticsRestricted(h.ID)
+					if err != nil || held {
+						bad.Add(1)
+						continue
+					}
+				}
 				r, ok := verifiedRoster(h)
 				if !ok || (u.Statistics && !statisticsAccess(*r)) {
 					bad.Add(1)
@@ -916,6 +923,16 @@ func (c *boxConn) roster(env cloudwire.Envelope) error {
 	}
 	allowed := statisticsAccess(r)
 	c.statsAllowed = false
+	if c.u.Statistics || c.u.StatisticsStore {
+		held, err := c.u.registry.StatisticsRestricted(c.home)
+		if err != nil {
+			return err
+		}
+		if held && !withdrawn {
+			c.u.store.Forget(c.home)
+			return fmt.Errorf("%w: Cloud is restricted pending a subject request", errProtocol)
+		}
+	}
 	if c.u.Statistics && !allowed && !withdrawn {
 		if err := c.u.registry.StatisticsGrant(c.home, cloudwire.Grant{}); err != nil {
 			return err

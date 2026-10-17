@@ -21,6 +21,8 @@ func (r *Registry) StatisticsInit() error {
 	 CREATE TABLE IF NOT EXISTS statistics_hours (
 	 home TEXT NOT NULL REFERENCES homes(home) ON DELETE CASCADE,
 	 hour_ms INTEGER NOT NULL, metrics BLOB NOT NULL, PRIMARY KEY(home,hour_ms));
+	 CREATE TABLE IF NOT EXISTS statistics_restrictions (
+	 home TEXT PRIMARY KEY REFERENCES homes(home) ON DELETE CASCADE);
 	 CREATE INDEX IF NOT EXISTS statistics_hours_time ON statistics_hours(hour_ms);`)
 	return err
 }
@@ -41,6 +43,15 @@ func (r *Registry) StatisticsGrant(home string, g cloudwire.Grant) error {
 		(g.TermsPolicy == cloudwire.StatsPolicy && len(g.Scopes) == 0 && len(g.Purposes) == 1 && g.Purposes[0] == protocol.CloudPurposeStats)
 	on := terms && g.Controller == cloudwire.ControllerSourceful && g.StatsPolicy == cloudwire.StatsPolicy &&
 		len(g.StatsID) == 16 && g.StatsSinceMs > 0 && slices.Contains(g.Purposes, protocol.CloudPurposeStats)
+	if on {
+		var restricted int
+		if err := tx.QueryRow(`SELECT COUNT(*) FROM statistics_restrictions WHERE home=?`, home).Scan(&restricted); err != nil {
+			return err
+		}
+		if restricted != 0 {
+			return errors.New("statistics: subject request restricts this home")
+		}
+	}
 	if !on || !bytes.Equal(old, g.StatsID) {
 		if _, err := tx.Exec(`DELETE FROM statistics_hours WHERE home=?`, home); err != nil {
 			return err
@@ -70,12 +81,21 @@ func (r *Registry) StatisticsPut(home string, report cloudwire.Stats, now time.T
 	// race a pending report back into storage. Reconnects replace one hour.
 	_, err = r.db.Exec(`INSERT INTO statistics_hours(home,hour_ms,metrics)
 	 SELECT home,?,? FROM statistics_grants WHERE home=? AND stats_id=? AND since_ms<=?
+	 AND NOT EXISTS (SELECT 1 FROM statistics_restrictions x WHERE x.home=statistics_grants.home)
 	 ON CONFLICT(home,hour_ms) DO UPDATE SET metrics=excluded.metrics`, report.HourMS, data, home, report.StatsID, report.HourMS)
 	return err
 }
 
+// StatisticsRestricted is an operator-imposed rights hold, never an owner
+// setting. Only the offline rights procedure writes it with Cloud stopped.
+func (r *Registry) StatisticsRestricted(home string) (bool, error) {
+	var n int
+	err := r.rd.QueryRow(`SELECT COUNT(*) FROM statistics_restrictions WHERE home=?`, home).Scan(&n)
+	return n != 0, err
+}
+
 func (r *Registry) StatisticsPrune(now time.Time) error {
-	_, err := r.db.Exec(`DELETE FROM statistics_hours WHERE hour_ms<?`, now.UTC().AddDate(0, -13, 0).UnixMilli())
+	_, err := r.db.Exec(`DELETE FROM statistics_hours WHERE hour_ms<?`, now.UnixMilli()-cloudwire.StatsRetentionMS)
 	return err
 }
 

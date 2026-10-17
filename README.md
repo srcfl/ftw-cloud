@@ -384,7 +384,7 @@ The sender refuses redirects, proxies and local destinations.
 ## Project usage statistics
 
 `GET /v1/stats` publishes only group cells under
-`ftw-project-stats-2026-10-v2`. Collection stays off until the signed C8 DPIA
+`ftw-project-stats-2026-10-v3`. Collection stays off until the signed C8 DPIA
 and the legal basis for both flows have been reviewed. Empty
 `FTW_CLOUD_STATISTICS_POLICY` keeps it off; an exact approved policy is needed
 to advertise collection. While paused, `/v1/stats` returns 503 with
@@ -393,7 +393,7 @@ The unsigned [review draft](privacy/project-statistics-dpia.md) records the
 open decisions. Clear terms alone do not establish a lawful basis.
 
 Statistics are included for every FTW Cloud user under
-`ftw-cloud-2026-10-v2`. Owners accept the current scope through
+`ftw-cloud-2026-10-v3`. Owners accept the current scope through
 `POST /api/cloud/grant`. There is no separate statistics opt-out within Cloud;
 `DELETE /api/cloud` ends Cloud and requests deletion. Old terms do not accept
 the new scope. Deploy compatible Core and clients, show the new terms, and
@@ -408,7 +408,7 @@ no phone keys, pairing codes, Noise key, live cache or remote access.
 `DELETE /api/cloud/stats` stops this local contribution. A current Cloud grant
 refuses that separate stop with 409. Never answer for another household.
 
-Cloud stores the approved hourly fields for 13 months and deletes unpublished
+Cloud stores the approved hourly fields for 48 hours and deletes unpublished
 household rows on withdrawal or purge. Only closed hours starting after the
 new choice contribute; no earlier ledger history is uploaded. Group values
 need 20 homes and no home above 30 percent of a sum. The stats Worker receives

@@ -112,7 +112,12 @@ func TestStatisticsWithdrawalPolicyRotationPurgeAndConsentWindow(t *testing.T) {
 func TestStatisticsRetention(t *testing.T) {
 	r, now, g := statsFixture(t)
 	statsHome(t, r, now, g, "home", 1000)
-	if _, err := r.db.Exec(`UPDATE statistics_hours SET hour_ms=?`, now.AddDate(-2, 0, 0).UnixMilli()); err != nil {
+	cutoff := now.Add(-48 * time.Hour).UnixMilli()
+	if _, err := r.db.Exec(`UPDATE statistics_hours SET hour_ms=?`, cutoff-1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.db.Exec(`INSERT INTO statistics_hours(home,hour_ms,metrics) VALUES(?,?,?),(?,?,?)`,
+		"home", cutoff, []byte(`{"pv_generation_wh":100}`), "home", cutoff+1, []byte(`{"pv_generation_wh":100}`)); err != nil {
 		t.Fatal(err)
 	}
 	if err := r.StatisticsPrune(now); err != nil {
@@ -120,7 +125,14 @@ func TestStatisticsRetention(t *testing.T) {
 	}
 	var n int
 	_ = r.rd.QueryRow(`SELECT COUNT(*) FROM statistics_hours`).Scan(&n)
-	if n != 0 {
-		t.Fatal("old rows remain")
+	if n != 2 {
+		t.Fatal("48 hour boundary pruned the wrong rows", n)
+	}
+	if err := r.StatisticsPrune(now.Add(time.Millisecond)); err != nil {
+		t.Fatal(err)
+	}
+	_ = r.rd.QueryRow(`SELECT COUNT(*) FROM statistics_hours`).Scan(&n)
+	if n != 1 {
+		t.Fatal("row older than 48 hours remains", n)
 	}
 }
