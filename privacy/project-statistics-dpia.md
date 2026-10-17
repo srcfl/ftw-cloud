@@ -117,8 +117,13 @@ risker får inte döljas med en sammanlagd poäng. Bedöm behovet av ytterligare
 
 ## Bevis och återstående beslut
 
-Kod: srcfl/ftw#1693, srcfl/ftw-cloud#31, samtyckesändringen i srcfl/ftw-app
-samt integritetstexten i srcfl/ftw-web. Relevanta tester täcker fält och
+Kodgrund: srcfl/ftw#1693 och srcfl/ftw-cloud#31.
+Den nya modellen: [Core #1700](https://github.com/srcfl/ftw/pull/1700),
+[Cloud #32](https://github.com/srcfl/ftw-cloud/pull/32),
+[iOS #87](https://github.com/srcfl/ftw-app/pull/87) och
+[integritetstext #23](https://github.com/srcfl/ftw-web/pull/23).
+Ägaren granskade de renderade Core-vyerna den 17 oktober. Det godkänner inte
+att timinsamlingen startar. Relevanta tester täcker fält och
 signering, äldre samtycke, serverns avstängda läge, gruppstorlek, dominans,
 dubbletter, okända värden, återkallande, radering och gallring. En lokal testsvit
 bevisar inte alla produktionskontroller eller ett giltigt rättsligt samtycke.
