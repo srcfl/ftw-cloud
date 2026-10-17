@@ -615,7 +615,8 @@ func (s *Store) Seed(id string, r *cloudwire.Roster, at time.Time) {
 }
 
 // Forget drops a home the registry has deleted, as after 90 days without a
-// roster. It is called by upkeep, never by a request.
+// roster. Upkeep uses it after expiry; a signed roster without required Cloud terms
+// also loses every cached session until its box submits the current terms.
 func (s *Store) Forget(id string) {
 	s.mu.Lock()
 	h := s.homes[id]

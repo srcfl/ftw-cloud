@@ -374,7 +374,7 @@ func (u *Uplink) Restore() (int, error) {
 			defer wg.Done()
 			for h := range work {
 				r, ok := verifiedRoster(h)
-				if !ok {
+				if !ok || (u.Statistics && !statisticsAccess(*r)) {
 					bad.Add(1)
 					continue
 				}
@@ -445,8 +445,9 @@ type boxConn struct {
 	// connection. Over QUIC an hb or a live may come as a datagram, out of
 	// order; one older than what the service holds is dropped. tableRev is
 	// the srcRev of the newest table held from this connection.
-	newest   map[string]uint64
-	tableRev uint64
+	newest       map[string]uint64
+	tableRev     uint64
+	statsAllowed bool // current connection accepted the full statistics roster
 }
 
 // bucket is a token bucket.
@@ -760,7 +761,7 @@ func (c *boxConn) apply(env cloudwire.Envelope) (stop bool, err error) {
 	case cloudwire.MsgRoster:
 		return false, c.roster(env)
 	case cloudwire.MsgStats:
-		if !c.u.Statistics {
+		if !c.u.Statistics || !c.statsAllowed {
 			return false, nil
 		}
 		var report cloudwire.Stats
@@ -890,9 +891,10 @@ func (c *boxConn) roster(env cloudwire.Envelope) error {
 	}
 	g := r.Grant
 	on := len(g.ID) == cloudwire.GrantIDBytes && slices.Contains(g.Purposes, protocol.CloudPurposeServe)
+	only := statisticsOnly(r)
 	bare := len(g.Scopes) == 0 && len(g.Purposes) == 0
 	withdrawn := len(g.ID) == cloudwire.GrantIDBytes && bare
-	if !(on || withdrawn || (len(g.ID) == 0 && bare)) || g.Controller == "" || r.TTLS <= 0 ||
+	if !(on || only || withdrawn || (len(g.ID) == 0 && bare)) || g.Controller == "" || r.TTLS <= 0 ||
 		!within(g.Scopes, protocol.CloudScopes) || !within(g.Purposes, protocol.CloudPurposes) {
 		return fmt.Errorf("%w: a roster outside what FTW Cloud may hold", errProtocol)
 	}
@@ -909,11 +911,28 @@ func (c *boxConn) roster(env cloudwire.Envelope) error {
 			return fmt.Errorf("%w: a pairing code the service cannot hold", errProtocol)
 		}
 	}
+	if r.RosterSeq < c.rosterSeq() {
+		return nil
+	}
+	allowed := statisticsAccess(r)
+	c.statsAllowed = false
+	if c.u.Statistics && !allowed && !withdrawn {
+		if err := c.u.registry.StatisticsGrant(c.home, cloudwire.Grant{}); err != nil {
+			return err
+		}
+		c.handle.DropCopy()
+		c.u.store.Forget(c.home)
+		return fmt.Errorf("%w: updated Cloud terms including statistics are required", errProtocol)
+	}
 	if !c.handle.SetRoster(&r) {
-		return nil // older than what is held: ignored
+		return nil
 	}
 	if c.u.Statistics || c.u.StatisticsStore {
-		if err := c.u.registry.StatisticsGrant(c.home, g); err != nil {
+		grant := g
+		if !allowed {
+			grant = cloudwire.Grant{}
+		}
+		if err := c.u.registry.StatisticsGrant(c.home, grant); err != nil {
 			return err
 		}
 	}
@@ -938,7 +957,16 @@ func (c *boxConn) roster(env cloudwire.Envelope) error {
 	for _, d := range r.Devices {
 		epochs[d.ID] = d.Epoch
 	}
-	return c.u.registry.PruneSuspensions(c.home, epochs)
+	if err := c.u.registry.PruneSuspensions(c.home, epochs); err != nil {
+		return err
+	}
+	c.statsAllowed = allowed
+	if c.u.Statistics && withdrawn {
+		// Persist and acknowledge the withdrawal before ending remote access.
+		c.u.store.Forget(c.home)
+		return fmt.Errorf("%w: Cloud ended after withdrawal", errProtocol)
+	}
+	return nil
 }
 
 // dropCopy deletes what the service holds under a grant its owner withdrew,
@@ -980,4 +1008,15 @@ func (c *boxConn) purge() error {
 		c.u.OnPurge(c.home)
 	}
 	return c.send(purged{AtMs: now.UnixMilli(), What: cloudwire.PurgedHome, GrantID: grantID})
+}
+
+// statisticsOnly exposes the signed upload path and no remote recipient.
+func statisticsOnly(r cloudwire.Roster) bool {
+	g := r.Grant
+	return len(g.ID) == cloudwire.GrantIDBytes && g.Controller == cloudwire.ControllerSourceful && len(g.Scopes) == 0 && len(g.Purposes) == 1 && g.Purposes[0] == protocol.CloudPurposeStats && g.StatsPolicy == cloudwire.StatsPolicy && g.TermsPolicy == cloudwire.StatsPolicy && len(g.StatsID) == 16 && g.StatsSinceMs > 0 && len(r.Devices) == 0 && len(r.Pending) == 0 && len(r.Noise) == 0 && len(r.WebPush) == 0
+}
+
+func statisticsAccess(r cloudwire.Roster) bool {
+	g := r.Grant
+	return statisticsOnly(r) || (len(g.ID) == cloudwire.GrantIDBytes && g.Controller == cloudwire.ControllerSourceful && g.TermsPolicy == cloudwire.CloudTermsPolicy && g.StatsPolicy == cloudwire.StatsPolicy && len(g.StatsID) == 16 && g.StatsSinceMs > 0 && slices.Contains(g.Purposes, protocol.CloudPurposeServe) && slices.Contains(g.Purposes, protocol.CloudPurposeStats))
 }

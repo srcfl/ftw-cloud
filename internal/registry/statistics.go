@@ -12,7 +12,7 @@ import (
 	"github.com/srcfl/ftw/go/protocol/cloudwire"
 )
 
-// Statistics tables contain only separately consented, closed-hour values.
+// Statistics tables contain only versioned, owner-approved closed-hour values.
 // They have no staff read route, and leave with the home's purge.
 func (r *Registry) StatisticsInit() error {
 	_, err := r.db.Exec(`CREATE TABLE IF NOT EXISTS statistics_grants (
@@ -37,9 +37,10 @@ func (r *Registry) StatisticsGrant(home string, g cloudwire.Grant) error {
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return err
 	}
-	on := g.Controller == cloudwire.ControllerSourceful && g.StatsPolicy == cloudwire.StatsPolicy &&
-		len(g.StatsID) == 16 && g.StatsSinceMs > 0 && slices.Contains(g.Purposes, protocol.CloudPurposeStats) &&
-		slices.Contains(g.Purposes, protocol.CloudPurposeServe)
+	terms := (g.TermsPolicy == cloudwire.CloudTermsPolicy && slices.Contains(g.Purposes, protocol.CloudPurposeServe)) ||
+		(g.TermsPolicy == cloudwire.StatsPolicy && len(g.Scopes) == 0 && len(g.Purposes) == 1 && g.Purposes[0] == protocol.CloudPurposeStats)
+	on := terms && g.Controller == cloudwire.ControllerSourceful && g.StatsPolicy == cloudwire.StatsPolicy &&
+		len(g.StatsID) == 16 && g.StatsSinceMs > 0 && slices.Contains(g.Purposes, protocol.CloudPurposeStats)
 	if !on || !bytes.Equal(old, g.StatsID) {
 		if _, err := tx.Exec(`DELETE FROM statistics_hours WHERE home=?`, home); err != nil {
 			return err

@@ -230,10 +230,23 @@ func TestHbAndLiveTravelAsDatagrams(t *testing.T) {
 		t.Fatalf("before the phone spoke, an hb came as %d", hb[0])
 	}
 	phone.say(cloudwire.MsgWatch, cloudwire.Watch{Hz: cloudwire.HzLooking})
-	time.Sleep(50 * time.Millisecond)
-	box.writeAs(wire.Datagram, mustSeal(t, box, cloudwire.MsgLive,
-		cloudwire.Live{Header: box.header(), Fields: map[string]int64{"2": 2000}, SrcRev: 1, Ages: map[string]int64{"m": 50}}))
-	box.writeAs(wire.Datagram, mustSeal(t, box, cloudwire.MsgHB, cloudwire.HB{Header: box.header(), Clock: cloudwire.ClockNTP, SrcRev: 1}))
+	// Observing a datagram proves the phone's watch was processed. A sleep
+	// does not order the independent control stream and datagram path.
+	eventually(t, "an hb datagram after the phone spoke", func() bool {
+		if slices.Contains(phone.kindsOf(cloudwire.MsgHB), wire.Datagram) {
+			return true
+		}
+		box.writeAs(wire.Datagram, mustSeal(t, box, cloudwire.MsgHB, cloudwire.HB{Header: box.header(), Clock: cloudwire.ClockNTP, SrcRev: 1}))
+		return false
+	})
+	eventually(t, "a live datagram before the later source table", func() bool {
+		if len(phone.kindsOf(cloudwire.MsgLive)) > 0 {
+			return true
+		}
+		box.writeAs(wire.Datagram, mustSeal(t, box, cloudwire.MsgLive,
+			cloudwire.Live{Header: box.header(), Fields: map[string]int64{"2": 2000}, SrcRev: 1, Ages: map[string]int64{"m": 50}}))
+		return false
+	})
 	box.send(cloudwire.MsgLive, full2(box))
 	eventually(t, "two lives and an hb at the phone", func() bool {
 		return len(phone.kindsOf(cloudwire.MsgLive)) >= 2 && len(phone.kindsOf(cloudwire.MsgHB)) >= 1
@@ -284,10 +297,24 @@ func TestALateTableStillCounts(t *testing.T) {
 	box.roster(2, grantServe, nil, key.Public())
 	table := map[string]cloudwire.Source{"m": {Kind: "driver", State: protocol.SourceLive, StaleAfterMs: 10_000}}
 	box.send(cloudwire.MsgLive, cloudwire.Live{Header: box.header(), Fields: map[string]int64{"2": 1}, Sources: table, SrcRev: 1, Ages: map[string]int64{}})
+	// The grant and first table must arrive before the overtaking datagram.
+	waitHeldN(t, s, box.home, key, 1)
 	withTable := mustSeal(t, box, cloudwire.MsgLive, cloudwire.Live{Header: box.header(), Fields: map[string]int64{"2": 2},
 		Sources: table, FieldSources: map[string][]string{"2": {"m"}}, SrcRev: 2, Ages: map[string]int64{}})
 	box.writeAs(wire.Datagram, mustSeal(t, box, cloudwire.MsgLive, cloudwire.Live{Header: box.header(), Fields: map[string]int64{"2": 3}, SrcRev: 2, Ages: map[string]int64{}}))
-	time.Sleep(100 * time.Millisecond)
+	eventually(t, "the overtaking live held before its late table", func() bool {
+		for _, raw := range heldSnapshot(t, s, box.home, key).Envelopes {
+			env, _ := cloudwire.DecodeEnvelope(raw)
+			if env.T != cloudwire.MsgLive {
+				continue
+			}
+			var live cloudwire.Live
+			if cloudwire.Unmarshal(env.B, &live) == nil && live.Fields["2"] == 3 {
+				return true
+			}
+		}
+		return false
+	})
 	box.writeAs(websocket.BinaryMessage, withTable)
 	box.send(cloudwire.MsgHB, cloudwire.HB{Header: box.header(), Clock: cloudwire.ClockNTP, SrcRev: 2})
 	waitHeldN(t, s, box.home, key, 3)

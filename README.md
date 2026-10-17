@@ -257,7 +257,7 @@ Not built yet:
 | Step | What | Where |
 |---|---|---|
 | C6 | Tiles | `internal/server` |
-| C7–C8 | Statistics | not started |
+| C7–C8 | Statistics | implemented with collection off; review pending |
 
 ## How it holds a home
 
@@ -384,42 +384,44 @@ The sender refuses redirects, proxies and local destinations.
 ## Project usage statistics
 
 `GET /v1/stats` publishes only group cells under
-`ftw-project-stats-2026-10-v1`. Boxes send signed `stats` hours only after the
-owner accepts that policy and the service advertises it in signed `hello_ok`.
-The service starts with collection off. After the signed C8 DPIA review,
-operators can set `FTW_CLOUD_STATISTICS_POLICY` to that exact policy in the
-host's compose environment; empty keeps it off. An unapproved policy makes
-`/v1/stats` return 503 with `FTW-Statistics-State: disabled`. Withdrawal,
-purge and retention remain active while collection is off. The review draft
-is in [privacy/project-statistics-dpia.md](privacy/project-statistics-dpia.md). The previous statistics policy sends no new
-fields. Reporting installations in the last 24 closed hours are not people
-or total FTW installs. Power and capacity are configured; energy sums
-recorded hours, including partial hours. Missing data is unknown.
+`ftw-project-stats-2026-10-v2`. Collection stays off until the signed C8 DPIA
+and the legal basis for both flows have been reviewed. Empty
+`FTW_CLOUD_STATISTICS_POLICY` keeps it off; an exact approved policy is needed
+to advertise collection. While paused, `/v1/stats` returns 503 with
+`FTW-Statistics-State: disabled`. Withdrawal, purge and retention still run.
+The unsigned [review draft](privacy/project-statistics-dpia.md) records the
+open decisions. Clear terms alone do not establish a lawful basis.
 
-Cloud stores consented hourly values for 13 months, upserts reconnects, and
-deletes household rows on a signed withdrawal or purge. Cells need 20 homes
-and no home above 30 percent of the sum. The stats Worker polls this public
-view; it receives no home id or per-home value. One instance supplies its
-local shard only; public multi-shard totals need an explicit safe collector.
+Statistics are included for every FTW Cloud user under
+`ftw-cloud-2026-10-v2`. Owners accept the current scope through
+`POST /api/cloud/grant`. There is no separate statistics opt-out within Cloud;
+`DELETE /api/cloud` ends Cloud and requests deletion. Old terms do not accept
+the new scope. Deploy compatible Core and clients, show the new terms, and
+review the migration before policy activation. When activated, the service
+refuses legacy rosters and does not restore their cached access after restart.
+Until activation, existing Cloud traffic continues under the old scope.
 
-Owner acceptance uses the existing box API. On the box's loopback interface,
-read `GET /api/cloud/stats-policy`, accept its terms, then
-`POST /api/cloud/stats` with `{"policy":"ftw-project-stats-2026-10-v1"}`.
-The readable Cloud grant must already be on. `DELETE /api/cloud/stats`
-withdraws this choice. Do not enable it for someone else or reuse an older
-consent. Native apps keep the old scope until their consent screen adopts
-this policy. The first contributing hour starts after consent; the sender
-does not upload earlier ledger history.
+Local FTW users can instead answer Yes or No on the box. Yes is the suggested
+action, but no new report starts without an answer. `POST /api/cloud/stats`
+with the current statistics policy creates a statistics-only signed uplink:
+no phone keys, pairing codes, Noise key, live cache or remote access.
+`DELETE /api/cloud/stats` stops this local contribution. A current Cloud grant
+refuses that separate stop with 409. Never answer for another household.
 
-Enabling this collection scope needs the signed C8 DPIA and the updated
-consent text described by Core's ADR 0008. A deployment with collection off
-does not claim that sign-off or change an owner's saved choice. The paired
-native consent change requires a fresh choice for this policy.
-
+Cloud stores the approved hourly fields for 13 months and deletes unpublished
+household rows on withdrawal or purge. Only closed hours starting after the
+new choice contribute; no earlier ledger history is uploaded. Group values
+need 20 homes and no home above 30 percent of a sum. The stats Worker receives
+no home id or per-home value. Counts describe reporting installations, not
+people or all-time installs. Capacity and power are configured limits, not
+proof of physical control. Energy includes only recorded hours, which can be
+partial; missing data is unknown. One instance supplies its local shard only;
+public multi-shard totals need an explicit safe collector.
 
 The separate anonymous daily-report feed is `GET /v1/fleet/public`. It exposes
 only daily counts and dimension labels with at least 10 reports, for at most
 90 days. It contains imported relay history and new reports received by Cloud;
 consumers replace the old archive rather than adding both. It needs no hourly
-energy policy. Averaging seven complete UTC days gives an estimate of active
+energy activation. Updated Core sends it only after the current project
+statistics answer; legacy versions retain their existing daily-report setting. Averaging seven complete UTC days gives an estimate of active
 reporting installations, never people or all installations ever made.
