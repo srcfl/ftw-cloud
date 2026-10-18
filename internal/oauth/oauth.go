@@ -226,6 +226,8 @@ func (s *Server) Mount(mux *http.ServeMux) {
 	mux.HandleFunc("GET /.well-known/ftw-offer-key", s.serveOfferKey)
 	mux.HandleFunc("GET /oauth/requests", s.serveRequestByCode)
 	mux.HandleFunc("GET /oauth/requests/{rid}", s.serveRequest)
+	mux.HandleFunc("GET /oauth/requests/{rid}/connect", s.serveConnect)
+	mux.HandleFunc("POST /oauth/requests/{rid}/mode", s.serveMode)
 	mux.HandleFunc("GET /oauth/requests/{rid}/events", s.serveEvents)
 	mux.HandleFunc("POST /oauth/requests/{rid}/deny", s.serveDeny)
 	mux.HandleFunc("POST /oauth/requests/{rid}/invite", s.serveInvite)

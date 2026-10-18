@@ -43,6 +43,14 @@ type pageError struct {
 }
 
 func (s *Server) consentPage(w http.ResponseWriter, rid string, c consent) {
+	if c.Offer == "" {
+		if c.Scope == "" {
+			s.modePage(w, rid, c)
+		} else {
+			s.authorizePage(w, http.StatusGone, pageError{Title: "Connect again", Text: "This request is incomplete. Start a new connection from your assistant."})
+		}
+		return
+	}
 	u, _ := url.Parse(c.RedirectURI)
 	d := pageData{Nonce: randomToken(16), RID: rid, Name: c.ClientName, Host: c.ClientHost, Verified: c.Verified, FromDocument: isCIMD(c.ClientID),
 		RedirectHost: asciiHostPort(u), Local: u.Scheme == "http" && isLoopback(u.Hostname()),
@@ -194,3 +202,51 @@ var errorTmpl = template.Must(template.New("error").Parse(`<!doctype html>
 <title>Connect an assistant · FTW Cloud</title><style nonce="{{.Nonce}}">` + pageStyle + `</style></head>
 <body><main><h1>{{.Title}}</h1><p>{{.Text}}</p>
 {{if .Back}}<p><a class="button" href="{{.Back}}">Go back to {{.BackHost}}</a></p>{{end}}</main></body></html>`))
+
+func (s *Server) modePage(w http.ResponseWriter, rid string, c consent) {
+	d := pageData{Nonce: randomToken(16), RID: rid, Name: c.ClientName, Host: c.ClientHost, Verified: c.Verified, FromDocument: isCIMD(c.ClientID)}
+	pageHeaders(w, d.Nonce)
+	w.WriteHeader(http.StatusOK)
+	_ = modeTmpl.Execute(w, d)
+}
+
+var modeTmpl = template.Must(template.New("mode").Parse(`<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Choose your connection · FTW Cloud</title><style nonce="{{.Nonce}}">` + pageStyle + `
+.choice{display:block;width:100%;text-align:left;background:var(--card);padding:18px;margin:16px 0}
+.choice strong,.choice span{display:block}.choice span{font-size:.9rem;margin-top:4px;color:var(--muted)}
+</style></head><body><main id="main" data-rid="{{.RID}}">
+<h1>How will you use {{.Name}} with FTW?</h1>
+<p class="muted">From {{.Host}}. {{if .Verified}}A client FTW Cloud knows.{{else if .FromDocument}}FTW Cloud does not know this client: check the name and the address.{{else}}This name is what the assistant registered with. FTW Cloud has not checked it.{{end}}</p>
+<p>Choose what this connection can ask for. You will approve it for your home in the next step, or use an invitation code from its owner.</p>
+<form id="mode-form">
+<button class="choice" type="submit" name="mode" value="read"><strong>Read and troubleshoot</strong><span>Check history, energy, logs and all technical details. No settings change.</span></button>
+<button class="choice" type="submit" name="mode" value="setup"><strong>Set up and configure</strong><span>Everything above, plus help with equipment and electrical settings. Review and confirm each save in your assistant.</span></button>
+</form>
+<p class="muted">Neither choice grants temporary control. The home owner decides the final rights. You can remove access at any time in FTW.</p>
+<p id="mode-status" role="status"></p>
+<p><a id="continue" class="button" hidden>Continue with the saved choice</a></p>
+<p><button id="cancel" type="button">Cancel</button></p>
+<noscript><p>This page needs JavaScript. Enable it and open the connection again.</p></noscript>
+</main><script nonce="{{.Nonce}}">
+(function(){
+ var rid=document.getElementById('main').dataset.rid, form=document.getElementById('mode-form'), note=document.getElementById('mode-status');
+ form.addEventListener('submit',async function(e){
+  e.preventDefault();var choice=e.submitter&&e.submitter.value;if(!choice)return;
+  var buttons=Array.from(form.querySelectorAll('button'));buttons.forEach(function(b){b.disabled=true});note.textContent='Saving your choice…';
+  try{
+   var response=await fetch('/oauth/requests/'+encodeURIComponent(rid)+'/mode',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({mode:choice})});
+   if(!response.ok&&response.status!==409)throw new Error(await response.text());
+   var result=await response.json();
+   if(response.ok){location.replace(result.connect);return}
+   note.textContent='Another tab already saved a choice. Continue with that choice, or cancel and connect again.';
+   var link=document.getElementById('continue');link.href=result.connect;link.hidden=false;
+  }catch(e){note.textContent=e.message||'Your choice is not confirmed. Try the same choice again.';buttons.forEach(function(b){b.disabled=false})}
+ });
+ document.getElementById('cancel').addEventListener('click',async function(){
+  try{var response=await fetch('/oauth/requests/'+encodeURIComponent(rid)+'/deny',{method:'POST'});if(!response.ok)throw new Error();
+   note.textContent='Connection cancelled. You can close this page.';form.hidden=true;
+  }catch(_){note.textContent='Cancellation is not confirmed. Try Cancel again.'}
+ });
+})();
+</script></body></html>`))

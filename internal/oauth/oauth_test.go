@@ -193,6 +193,19 @@ func (g *rig) start(clientID, redirect, scope string) *flow {
 	if f.cookie == nil || !f.cookie.Secure || !f.cookie.HttpOnly {
 		g.t.Fatalf("the browser's cookie: %+v", f.cookie)
 	}
+	if !q.Has("scope") {
+		req, _ := http.NewRequest(http.MethodPost, g.srv.URL+"/oauth/requests/"+f.rid+"/mode", strings.NewReader(`{"mode":"read"}`))
+		req.Header.Set("Origin", Issuer)
+		req.AddCookie(f.cookie)
+		chosen, err := noFollow.Do(req)
+		if err != nil {
+			g.t.Fatal(err)
+		}
+		chosen.Body.Close()
+		if chosen.StatusCode != http.StatusOK {
+			g.t.Fatalf("choose read mode: %d", chosen.StatusCode)
+		}
+	}
 	f.view = g.details(f.rid)
 	return f
 }
@@ -1187,7 +1200,7 @@ func TestTheOfferIsSignedAndCarriesTheConsent(t *testing.T) {
 		t.Fatal("an offer opened at its end")
 	}
 	// The page's link and QR carry the same offer, in the fragment.
-	q, _ := g.authorizeParams(cimdID, cimdBack, "")
+	q, _ := g.authorizeParams(cimdID, cimdBack, ScopeLiveRead)
 	resp, _ := noFollow.Get(g.srv.URL + "/oauth/authorize?" + q.Encode())
 	page, _ := io.ReadAll(resp.Body)
 	if !regexp.MustCompile(`href="https://app\.ftw\.energy/a#[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{200,}"`).Match(page) {

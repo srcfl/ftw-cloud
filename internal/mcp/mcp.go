@@ -372,9 +372,10 @@ func (s *Server) call(w http.ResponseWriter, r *http.Request, id json.RawMessage
 		writeRPCError(w, status, id, codeInvalidParams, "Unknown tool: "+p.Name, nil)
 		return
 	}
-	if t.scope != "" && !g.Has(t.scope) {
+	required := t.requiredScopes()
+	if slices.ContainsFunc(required, func(scope string) bool { return !g.Has(scope) }) {
 		// Step up: the client asks the owner for the right, then retries.
-		scopes := append(slices.Clone(g.Scopes), t.scope)
+		scopes := append(slices.Clone(g.Scopes), required...)
 		slices.Sort(scopes)
 		scopes = slices.Compact(scopes)
 		challenge := oauth.InsufficientScope(scopes...)

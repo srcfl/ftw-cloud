@@ -31,6 +31,18 @@ type tool struct {
 	run         func(ctx context.Context, cc *callCtx, args json.RawMessage) (any, error)
 }
 
+// Setup writes need the diagnostic reads that let the assistant understand
+// the schema, review a draft and check a save after a lost reply.
+func (t *tool) requiredScopes() []string {
+	if t.scope == oauth.ScopeSetupWrite {
+		return []string{oauth.ScopeDiagRun, oauth.ScopeSetupWrite}
+	}
+	if t.scope == "" {
+		return []string{}
+	}
+	return []string{t.scope}
+}
+
 // callCtx is one call's grant and the way to its home.
 type callCtx struct {
 	s     *Server
@@ -90,10 +102,7 @@ func (s *Server) tool(name string) *tool {
 func (s *Server) listing() []map[string]any {
 	out := make([]map[string]any, 0, len(s.tools))
 	for _, t := range s.tools {
-		scopes := []string{}
-		if t.scope != "" {
-			scopes = append(scopes, t.scope)
-		}
+		scopes := t.requiredScopes()
 		schemes := []map[string]any{{"type": "oauth2", "scopes": scopes}}
 		out = append(out, map[string]any{
 			"name":            t.name,
