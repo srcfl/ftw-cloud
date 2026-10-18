@@ -49,13 +49,14 @@ const (
 
 // clientMetadata is the part of a metadata document the service reads.
 type clientMetadata struct {
-	ClientID                string   `json:"client_id"`
-	ClientName              string   `json:"client_name"`
-	ClientURI               string   `json:"client_uri"`
-	RedirectURIs            []string `json:"redirect_uris"`
-	GrantTypes              []string `json:"grant_types"`
-	ResponseTypes           []string `json:"response_types"`
-	TokenEndpointAuthMethod string   `json:"token_endpoint_auth_method"`
+	ClientID                          string   `json:"client_id"`
+	ClientName                        string   `json:"client_name"`
+	ClientURI                         string   `json:"client_uri"`
+	RedirectURIs                      []string `json:"redirect_uris"`
+	GrantTypes                        []string `json:"grant_types"`
+	ResponseTypes                     []string `json:"response_types"`
+	TokenEndpointAuthMethod           string   `json:"token_endpoint_auth_method"`
+	TokenEndpointAuthMethodsSupported []string `json:"token_endpoint_auth_methods_supported"`
 }
 
 // Fetch refusals. Each is a reason to refuse the client, never to retry.
@@ -329,7 +330,13 @@ func parseMetadata(body []byte, clientID string) (clientMetadata, error) {
 			return clientMetadata{}, fmt.Errorf("%w: %v", errCIMDDocument, err)
 		}
 	}
-	if m := md.TokenEndpointAuthMethod; m != "" && m != authNone {
+	// The plural field lists what the client can use; the legacy field
+	// is only its preference. This server offers none for CIMD clients.
+	if _, ok := fields["token_endpoint_auth_methods_supported"]; ok {
+		if !slices.Contains(md.TokenEndpointAuthMethodsSupported, authNone) {
+			return clientMetadata{}, fmt.Errorf("%w: token_endpoint_auth_methods_supported must include %q", errCIMDDocument, authNone)
+		}
+	} else if m := md.TokenEndpointAuthMethod; m != "" && m != authNone {
 		return clientMetadata{}, fmt.Errorf("%w: token_endpoint_auth_method %q is not supported", errCIMDDocument, m)
 	}
 	// A client may list grants this server does not offer (Claude lists

@@ -485,6 +485,29 @@ func TestTheFullFlowWithAMetadataDocument(t *testing.T) {
 	}
 }
 
+func TestChatGPTMetadataFlowWithPublicClient(t *testing.T) {
+	g := newRig(t)
+	// Use the local metadata host with ChatGPT's supported methods and
+	// legacy preference. This server offers only none for CIMD clients.
+	g.docsMu.Lock()
+	g.docs["/oauth/client.json"] = `{"client_id":"` + cimdID + `","client_name":"ChatGPT","redirect_uris":["` + cimdBack + `"],` +
+		`"token_endpoint_auth_methods_supported":["none","private_key_jwt"],"token_endpoint_auth_method":"private_key_jwt"}`
+	g.docsMu.Unlock()
+	f := g.start(cimdID, cimdBack, ScopeLiveRead)
+	if f.view.Client.Name != "ChatGPT" || f.view.Status != statusPending || len(f.view.Code) != codeLen {
+		t.Fatalf("pairing request: %+v", f.view)
+	}
+	tk := g.approve(f, cimdID, ScopeLiveRead)
+	grant, aerr := g.bearer(tk.Access)
+	if aerr != nil || grant.ClientID != cimdID || !grant.Has(ScopeLiveRead) {
+		t.Fatalf("access: %+v %v", grant, aerr)
+	}
+	status, refreshed := g.token(url.Values{"grant_type": {grantRefresh}, "refresh_token": {tk.Refresh}, "client_id": {cimdID}, "resource": {Resource}})
+	if status != http.StatusOK || refreshed.Access == "" || refreshed.Refresh == "" || refreshed.Refresh == tk.Refresh {
+		t.Fatalf("refresh: %d %+v", status, refreshed)
+	}
+}
+
 // A code works once; presenting it again revokes what it got.
 func TestACodeWorksOnce(t *testing.T) {
 	g := newRig(t)

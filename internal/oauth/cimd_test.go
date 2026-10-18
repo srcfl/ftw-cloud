@@ -288,3 +288,38 @@ func TestClaudesDocumentIsAccepted(t *testing.T) {
 		}
 	}
 }
+
+func TestCIMDTokenEndpointAuthMethods(t *testing.T) {
+	for _, tt := range []struct {
+		name, fields string
+		accept       bool
+	}{
+		{"legacy omitted", ``, true},
+		{"legacy none", `,"token_endpoint_auth_method":"none"`, true},
+		{"legacy jwt", `,"token_endpoint_auth_method":"private_key_jwt"`, false},
+		{"legacy secret", `,"token_endpoint_auth_method":"client_secret_post"`, false},
+		{"plural none", `,"token_endpoint_auth_methods_supported":["none"]`, true},
+		{"plural without legacy", `,"token_endpoint_auth_methods_supported":["none","private_key_jwt"]`, true},
+		{"chatgpt transition", `,"token_endpoint_auth_methods_supported":["none","private_key_jwt"],"token_endpoint_auth_method":"private_key_jwt"`, true},
+		{"plural reversed", `,"token_endpoint_auth_methods_supported":["private_key_jwt","none"],"token_endpoint_auth_method":"private_key_jwt"`, true},
+		{"plural only jwt", `,"token_endpoint_auth_methods_supported":["private_key_jwt"]`, false},
+		{"plural overrides legacy none", `,"token_endpoint_auth_methods_supported":["private_key_jwt"],"token_endpoint_auth_method":"none"`, false},
+		{"plural secret", `,"token_endpoint_auth_methods_supported":["client_secret_post"]`, false},
+		{"plural empty", `,"token_endpoint_auth_methods_supported":[],"token_endpoint_auth_method":"none"`, false},
+		{"plural null", `,"token_endpoint_auth_methods_supported":null,"token_endpoint_auth_method":"none"`, false},
+		{"plural string", `,"token_endpoint_auth_methods_supported":"none"`, false},
+		{"plural wrong element", `,"token_endpoint_auth_methods_supported":["none",1]`, false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			const id = "https://chatgpt.com/oauth/client.json"
+			doc := `{"client_id":"` + id + `","client_name":"ChatGPT","redirect_uris":["https://chatgpt.com/connector_platform_oauth_redirect"]` + tt.fields + `}`
+			_, err := parseMetadata([]byte(doc), id)
+			if tt.accept && err != nil {
+				t.Fatalf("metadata refused: %v", err)
+			}
+			if !tt.accept && !errors.Is(err, errCIMDDocument) {
+				t.Fatalf("want invalid metadata, got %v", err)
+			}
+		})
+	}
+}
