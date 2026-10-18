@@ -109,7 +109,7 @@ var scopeWords = map[string]string{
 	ScopeEventsRead:   "See alerts and events",
 	ScopeLogsRead:     "Read the box's logs, with secrets removed",
 	ScopeConfigRead:   "Read the settings, with secrets removed",
-	ScopeDiagRun:      "Run checks that change nothing",
+	ScopeDiagRun:      "Read full technical diagnostics, source, logs and backups; backups can contain saved credentials",
 	ScopeDispatchHold: "Hold the battery or charge the car for a short, capped time",
 	ScopeGoalsRequest: "Ask for changes to goals and schedules, which wait for your yes",
 }

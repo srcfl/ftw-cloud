@@ -961,9 +961,6 @@ func (c *boxConn) roster(env cloudwire.Envelope) error {
 			return err
 		}
 	}
-	if c.u.OnRoster != nil {
-		c.u.OnRoster(c.home, &r)
-	}
 	raw, err := env.Encode()
 	if err != nil {
 		return err
@@ -979,6 +976,11 @@ func (c *boxConn) roster(env cloudwire.Envelope) error {
 	}
 	if err := c.u.registry.PruneSuspensions(c.home, epochs); err != nil {
 		return err
+	}
+	// OAuth can issue a token from this callback. Its very first MCP call
+	// needs the signed box key from the committed roster, not the old row.
+	if c.u.OnRoster != nil {
+		c.u.OnRoster(c.home, &r)
 	}
 	c.statsAllowed = allowed
 	if c.u.Statistics && withdrawn {

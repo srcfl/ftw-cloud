@@ -72,6 +72,37 @@ func TestAnEventReachesPushUnchanged(t *testing.T) {
 	}
 }
 
+func TestRosterCallbackSeesTheCommittedSignedRoster(t *testing.T) {
+	s := newService(t)
+	committed := make(chan bool, 2)
+	s.up.OnRoster = func(home string, roster *cloudwire.Roster) {
+		h, found, err := s.reg.Get(home)
+		if err != nil || !found || h.RosterSeq != roster.RosterSeq {
+			committed <- false
+			return
+		}
+		env, err := cloudwire.DecodeEnvelope(h.Roster)
+		var saved cloudwire.Roster
+		committed <- err == nil && cloudwire.Unmarshal(env.B, &saved) == nil && saved.RosterSeq == roster.RosterSeq && bytes.Equal(saved.Noise, roster.Noise)
+	}
+	b := newBox(t)
+	_, _ = b.connect(s, nil)
+	for seq := uint64(1); seq <= 2; seq++ {
+		r := b.roster(protocol.ScopeLiveRead)
+		r.RosterSeq = seq
+		r.Noise = bytes.Repeat([]byte{byte(seq)}, 32)
+		b.send(cloudwire.MsgRoster, r)
+		select {
+		case ok := <-committed:
+			if !ok {
+				t.Fatal("OAuth callback ran before its signed roster was readable")
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("roster callback did not run")
+		}
+	}
+}
+
 // Every envelope the service holds reaches push with its class, so prices
 // and a car plugged in can reload widgets. A roster is not held this way.
 func TestEveryHeldEnvelopeReachesPushWithItsClass(t *testing.T) {

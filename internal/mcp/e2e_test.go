@@ -140,19 +140,23 @@ type stubBox struct {
 	seq    uint64
 	rseq   uint64
 
-	mu         sync.Mutex
-	agents     map[string]*agentGrant // by device id
-	sessions   map[string]*boxSession
-	handshakes int
-	ends       int
-	frames     [][]byte // every decrypted frame, for the passthrough check
-	asked      []string // each request's type and body, in order
-	inflight   int
-	maxFlight  int
-	delay      time.Duration
-	cmds       []protocol.Cmd
-	cmdReply   func(protocol.Cmd) []any
-	requests   []protocol.AgentRequest
+	mu             sync.Mutex
+	agents         map[string]*agentGrant // by device id
+	sessions       map[string]*boxSession
+	handshakes     int
+	ends           int
+	frames         [][]byte // every decrypted frame, for the passthrough check
+	asked          []string // each request's type and body, in order
+	inflight       int
+	maxFlight      int
+	delay          time.Duration
+	cmds           []protocol.Cmd
+	cmdReply       func(protocol.Cmd) []any
+	apiBadSequence bool
+	apiUnsupported bool
+	apiStarted     chan struct{}
+	apiRelease     chan struct{}
+	requests       []protocol.AgentRequest
 	// noNoise is a box from before the agent contract: its roster names no
 	// Noise key.
 	noNoise bool
@@ -475,6 +479,64 @@ func (b *stubBox) handle(s *boxSession, env appwire.Envelope) {
 	case protocol.MsgAPIReq:
 		// The passthrough is priced for an owner, never for an agent.
 		b.reply(s, protocol.MsgError, env.ID, protocol.ErrorBody{Code: protocol.ErrScopeDenied})
+	case protocol.MsgAPIRead:
+		b.mu.Lock()
+		unsupported := b.apiUnsupported
+		b.mu.Unlock()
+		if unsupported {
+			b.reply(s, protocol.MsgError, env.ID, protocol.ErrorBody{Code: protocol.ErrScopeDenied})
+			return
+		}
+		b.mu.Lock()
+		started, release := b.apiStarted, b.apiRelease
+		b.mu.Unlock()
+		if started != nil {
+			close(started)
+		}
+		if release != nil {
+			<-release
+		}
+		var q protocol.APIRead
+		if err := protocol.Unmarshal(env.B, &q); err != nil {
+			b.t.Fatal(err)
+		}
+		data := []byte(`{"scope":"asset","points":[{"asset_id":"opaque-asset","energy_wh":12,"source":"hardware_counter","quality":"measured","provenance":"counter","sample_count":2}],"counter":9007199254740993}`)
+		if q.Path == "/api/energy/assets" {
+			data = []byte(`{"assets":[{"asset_id":"opaque-asset","kind":"grid_meter"}]}`)
+		}
+		if q.Path == "/api/status" {
+			data, _ = json.Marshal(map[string]any{"text": strings.Repeat("x", 8000)})
+		}
+		if q.Path == protocol.AgentAPICatalogPath {
+			data = []byte(`{"routes":[{"path":"/api/energy/history"},{"path":"/api/series"},{"path":"/api/mpc/diagnose/at"},{"path":"/api/drivers/{id}/source"},{"path":"/api/future/read"}],"troubleshooting":{"core":{"version":"0.151.0-beta.1","source":"https://github.com/srcfl/ftw/tree/v0.151.0-beta.1"},"workflow":["Collect reproduction steps and incident time with timezone"]}}`)
+		}
+		if q.Path == "/api/test/archive" {
+			data, _ = json.Marshal(map[string]any{"body": q.ArchiveMember, "encoding": "utf-8", "complete": true})
+		}
+		if q.Path == "/api/test/pages" {
+			data, _ = json.Marshal(map[string]any{"encoding": "utf-8", "body": "charger 192.168.1.9 9007199254740993", "offset": q.Offset, "next_offset": q.Offset + 64, "sha256": q.IfSHA256, "more": true})
+		}
+		if q.Path == "/api/test/metadata" {
+			data = []byte(`{"path":"device original path","status":"faulted","counter":9007199254740993}`)
+		}
+		// This deliberately broken stub truncates a wire answer; real Core
+		// returns explicit byte pages within the wire bound instead.
+		truncated := q.MaxBytes > 0 && int64(len(data)) > q.MaxBytes
+		if truncated {
+			data = data[:q.MaxBytes]
+		}
+		b.reply(s, protocol.MsgAPIHead, env.ID, protocol.APIHeadMsg{Status: 200, Headers: map[string]string{"Content-Type": "application/json"}})
+		cut := len(data) / 2
+		b.mu.Lock()
+		badSequence := b.apiBadSequence
+		b.mu.Unlock()
+		first := uint32(0)
+		if badSequence {
+			first = 1
+		}
+		b.reply(s, protocol.MsgAPIChunk, env.ID, protocol.APIChunk{Seq: first, Data: data[:cut]})
+		b.reply(s, protocol.MsgAPIChunk, env.ID, protocol.APIChunk{Seq: 1, Data: data[cut:]})
+		b.reply(s, protocol.MsgAPIEnd, env.ID, protocol.APIEnd{Bytes: int64(len(data)), Truncated: truncated})
 	case protocol.MsgLiveGet:
 		// The box's live body: field ids, and a source whose text is a
 		// device's to write.
