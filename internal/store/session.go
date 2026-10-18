@@ -94,7 +94,7 @@ type Session struct {
 // sends falls between them. A second session from the same device replaces
 // the first.
 func (x *Handle) Open() (Snapshot, *Session, error) {
-	if x.kind != Device && x.kind != Agent {
+	if x.kind != Device && !isAgentKind(x.kind) {
 		return Snapshot{}, nil, ErrDenied
 	}
 	x.h.mu.Lock()
@@ -102,7 +102,11 @@ func (x *Handle) Open() (Snapshot, *Session, error) {
 	// The access checked in For may have changed since: check it again
 	// under the lock that roster changes take. A pairing hash is spent here,
 	// once the session is sure to open, so a busy home does not burn it.
-	if x.pairing {
+	if x.inviting {
+		if _, ok := x.s.invite(x.h, Principal{Invite: x.pair, DeviceKey: x.device.Key}); !ok {
+			return Snapshot{}, nil, ErrDenied
+		}
+	} else if x.pairing {
 		if x.h.countLocked(false) >= MaxSessionsPerHome {
 			return Snapshot{}, nil, ErrBusy
 		}
@@ -117,8 +121,8 @@ func (x *Handle) Open() (Snapshot, *Session, error) {
 			sess.endLocked(cloudwire.CloseReplaced)
 		}
 	}
-	if x.kind == Agent && x.h.countLocked(true) >= MaxAgentSessionsPerHome ||
-		x.kind != Agent && x.h.countLocked(false) >= MaxSessionsPerHome {
+	if isAgentKind(x.kind) && x.h.countLocked(true) >= MaxAgentSessionsPerHome ||
+		!isAgentKind(x.kind) && x.h.countLocked(false) >= MaxSessionsPerHome {
 		return Snapshot{}, nil, ErrBusy
 	}
 	sess := &Session{x: x, c: make(chan Out, SessionQueue), tun: make(chan TunOut, TunQueue),
@@ -269,9 +273,11 @@ func (x *Handle) MayRead(class string) bool {
 func (h *home) countLocked(agents bool) int {
 	n := 0
 	for sess := range h.sessions {
-		if (sess.x.kind == Agent) == agents {
+		if isAgentKind(sess.x.kind) == agents {
 			n++
 		}
 	}
 	return n
 }
+
+func isAgentKind(k Kind) bool { return k == Agent || k == AgentInvite }

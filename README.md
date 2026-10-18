@@ -192,6 +192,29 @@ to it yet.
   or the box purging its home; a key the keys part could not forget stays
   queued until it has. Only each home's newest roster is applied.
 
+- **An owner can share access with six characters.** The owner creates a
+  strong, single-use invitation on Core, with chosen rights and access expiry.
+  Their page or app publishes that proof through TLS to `POST /oauth/invitations`.
+  The service checks its home, box and verifier against the current signed
+  roster, then returns a unique code such as `K7M-4PX`, valid for at most ten
+  minutes. No cookie grants the right to publish. The recipient pastes the
+  short code into their own OAuth connection page. Its original browser
+  cookie, Origin and separate rate limits apply before lookup. A pending key
+  can open only a typed invitation Noise handshake; Core consumes the
+  invitation after proof of that key and intersects the chosen rights with
+  the recipient's request. Only the new signed roster permits Keep, PKCE
+  completion and normal MCP access. Cancellation and revocation still belong
+  to Core. The short code does not give an owner role.
+
+  The alias-to-proof mapping stays in memory and expires within ten minutes;
+  the normal minute sweep removes expired mappings. SQLite holds only keyed
+  digest reservations and expiry. A MAC key derived from `oauth-route.key`,
+  outside that database, protects those reservations. A restart cannot assign
+  an unexpired code to a different invitation. After a restart the owner can
+  republish the same proof for a working code without another Core grant.
+  No raw code, proof or secret enters a log, URL or database. This mapping
+  currently requires the single OAuth process used by the deployment.
+
 - **MCP at `/mcp`, Streamable HTTP.** It speaks revision 2026-07-28, which
   is stateless: each request carries its version and capabilities in
   `_meta`, mirrored in `MCP-Protocol-Version`, `Mcp-Method` and `Mcp-Name`,

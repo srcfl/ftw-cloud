@@ -182,6 +182,8 @@ func serve(args []string) error {
 	// takes no agents yet, and the tools say so.
 	agents := mcp.NewPool(st, up, agentKeys, mcp.RosterBoxKey(reg), log)
 	auth.OnRevoke = agents.Drop
+	auth.ClaimInvite = agents.ClaimInvite
+	auth.Invitation = st.Invitation
 	srv.MCP = mcp.New(auth, agents, log)
 
 	// Alerts: the box's signed events to its phones through Apple, and

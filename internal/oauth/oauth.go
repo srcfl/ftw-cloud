@@ -167,6 +167,12 @@ type Server struct {
 	// OnRevoke hears that an agent is gone: its owner revoked it, or it
 	// ran out. The MCP server drops its warm session. It must not block.
 	OnRevoke func(home, agent string)
+	// ClaimInvite proves a pending key to the box through its invitation door.
+	ClaimInvite                          func(context.Context, InviteClaim) error
+	Invitation                           func(home string, hash, box []byte) (time.Time, bool)
+	aliases                              inviteAliases
+	invitePublishLimit, inviteClaimLimit limiter
+	invitePublishByIP, inviteClaimByIP   *ipLimiter
 }
 
 // New opens the authorization server's state at path.
@@ -192,6 +198,8 @@ func newServer(path string, keys AgentKeys, log *slog.Logger, roots *x509.CertPo
 		authorizeByIP: newIPLimiter(10, 0.2), registerByIP: newIPLimiter(5, 1.0/60), lookupByIP: newIPLimiter(10, 1),
 		streams: streams{per: map[string]int{}},
 		pending: map[string]*homeEvent{}, retries: map[string]*approvalRetry{}, wake: make(chan struct{}, 1)}
+	s.invitePublishLimit, s.inviteClaimLimit = newLimiter(20, 1), newLimiter(20, 0.2)
+	s.invitePublishByIP, s.inviteClaimByIP = newIPLimiter(5, 1.0/60), newIPLimiter(5, 1.0/60)
 	return s, nil
 }
 
@@ -203,7 +211,7 @@ func (s *Server) Close() error { return s.st.close() }
 var Routes = []string{
 	"/.well-known/oauth-authorization-server", "/.well-known/oauth-protected-resource",
 	"/.well-known/oauth-protected-resource/mcp", "/oauth/authorize", "/oauth/token", "/oauth/register",
-	"/oauth/revoke", "/oauth/requests", "/.well-known/ftw-offer-key",
+	"/oauth/revoke", "/oauth/requests", "/oauth/invitations", "/.well-known/ftw-offer-key",
 }
 
 // Mount adds the authorization server's routes to mux.
@@ -220,6 +228,9 @@ func (s *Server) Mount(mux *http.ServeMux) {
 	mux.HandleFunc("GET /oauth/requests/{rid}", s.serveRequest)
 	mux.HandleFunc("GET /oauth/requests/{rid}/events", s.serveEvents)
 	mux.HandleFunc("POST /oauth/requests/{rid}/deny", s.serveDeny)
+	mux.HandleFunc("POST /oauth/requests/{rid}/invite", s.serveInvite)
+	mux.HandleFunc("POST /oauth/invitations", s.servePublishInvitation)
+	mux.HandleFunc("OPTIONS /oauth/invitations", s.servePublishInvitation)
 }
 
 // --------------------------------------------------------------------------
@@ -450,6 +461,7 @@ func (s *Server) approve(ctx context.Context, home string, listed map[string]clo
 		c.Granted = strings.Join(intersect(splitScope(c.Scope), d.Agent.Scopes), " ")
 		if err := s.st.approve(ridHash, c, grantOf(d, now), now); err != nil {
 			s.log.Warn("could not record an approval", "err", err)
+			retry = true
 			continue
 		}
 		s.hub.notify(string(ridHash))
@@ -549,6 +561,7 @@ func (s *Server) forgetPending(ctx context.Context) {
 
 func (s *Server) sweep(ctx context.Context) {
 	now := s.now()
+	s.pruneInvitationAliases(now)
 	if err := s.st.sweep(now); err != nil {
 		s.log.Warn("oauth upkeep failed", "err", err)
 	}

@@ -42,6 +42,8 @@ const (
 	// carries `agent`, which keeps it off /v1/app and /v1/app/once, and it
 	// is admitted only before the end the entry names, by this clock.
 	Agent
+	// AgentInvite admits only a pending key carrying an invitation proof.
+	AgentInvite
 )
 
 // Principal is who is asking for a home.
@@ -52,7 +54,8 @@ type Principal struct {
 	DeviceKey []byte
 	// Pair is the pairing hash a new phone proved in its handshake, for a
 	// Device the roster does not list yet. It admits one session, once.
-	Pair []byte
+	Invite []byte
+	Pair   []byte
 	// DeviceID and Epoch are the roster entry a token is bound to, for
 	// Token.
 	DeviceID string
@@ -112,8 +115,9 @@ type home struct {
 	// pending is each pairing hash the roster lists, by its hex, until it
 	// runs out; spent marks the ones a phone has used, so a roster sent
 	// again does not reopen them.
-	pending map[string]time.Time
-	spent   map[string]time.Time
+	pending       map[string]time.Time
+	spent         map[string]time.Time
+	invitePending map[string]time.Time
 }
 
 // Held is one envelope as received.
@@ -135,6 +139,7 @@ type Handle struct {
 	scopes []string
 	// pairing is a new phone admitted by a pairing hash until its pairing
 	// runs out at pairedUntil, or the roster lists its key.
+	inviting    bool
 	pairing     bool
 	pairedUntil time.Time
 	pair        []byte
@@ -158,6 +163,14 @@ func (s *Store) For(p Principal) (*Handle, error) {
 	switch p.Kind {
 	case Box:
 		return &Handle{s: s, id: p.Home, h: h, kind: Box}, nil
+	case AgentInvite:
+		h.mu.Lock()
+		defer h.mu.Unlock()
+		until, ok := s.invite(h, p)
+		if !ok {
+			return nil, ErrDenied
+		}
+		return &Handle{s: s, id: p.Home, h: h, kind: AgentInvite, inviting: true, pair: bytes.Clone(p.Invite), pairedUntil: until, device: cloudwire.Device{ID: cloudwire.DeviceID(p.DeviceKey), Key: bytes.Clone(p.DeviceKey)}}, nil
 	case Device, Agent:
 		h.mu.Lock()
 		defer h.mu.Unlock()
@@ -192,7 +205,7 @@ func (s *Store) For(p Principal) (*Handle, error) {
 
 func newHome() *home {
 	return &home{latest: map[string]Held{}, sessions: map[*Session]struct{}{},
-		pending: map[string]time.Time{}, spent: map[string]time.Time{}}
+		pending: map[string]time.Time{}, spent: map[string]time.Time{}, invitePending: map[string]time.Time{}}
 }
 
 // pair checks a pending pairing hash for a key the roster does not list at
@@ -218,6 +231,21 @@ func (s *Store) pair(h *home, p Principal) (time.Time, bool) {
 		return time.Time{}, false
 	}
 	return until, true
+}
+
+// invite admits only the typed agent bootstrap door, without spending the
+// hint. Only Core's proved claim consumes an invitation.
+func (s *Store) invite(h *home, p Principal) (time.Time, bool) {
+	if len(p.Invite) != 32 || len(p.DeviceKey) != 32 || h.roster == nil || !s.now().Before(h.rosterAt.Add(time.Duration(h.roster.TTLS)*time.Second)) {
+		return time.Time{}, false
+	}
+	for _, d := range h.roster.Devices {
+		if bytes.Equal(d.Key, p.DeviceKey) {
+			return time.Time{}, false
+		}
+	}
+	until, ok := h.invitePending[hex.EncodeToString(p.Invite)]
+	return until, ok && s.now().Before(until)
 }
 
 // spendLocked takes a pending pairing hash for good. False means it went
@@ -418,7 +446,17 @@ func (x *Handle) SetRoster(r *cloudwire.Roster) bool {
 // A hash already spent stays spent. The caller holds h.mu.
 func (h *home) setPendingLocked(r *cloudwire.Roster, at time.Time) {
 	listed := map[string]bool{}
+	h.invitePending = map[string]time.Time{}
 	for _, p := range r.Pending {
+		if p.Kind == protocol.RoleAgent {
+			if len(p.Hash) == 32 && p.TTLS > 0 && p.TTLS <= protocol.AgentInviteClaimMaxMs/1000 {
+				h.invitePending[hex.EncodeToString(p.Hash)] = at.Add(time.Duration(p.TTLS) * time.Second)
+			}
+			continue
+		}
+		if p.Kind != "" {
+			continue
+		}
 		key := hex.EncodeToString(p.Hash)
 		listed[key] = true
 		if _, spent := h.spent[key]; !spent && len(p.Hash) == cloudwire.PairingHashBytes && p.TTLS > 0 {
@@ -448,8 +486,18 @@ func (x *Handle) Recheck() {
 
 func (x *Handle) recheckLocked() {
 	for sess := range x.h.sessions {
-		dev, scopes, ok := x.s.admit(sess.x.kind, x.id, x.h, byKey(sess.x.device.Key))
+		kind := sess.x.kind
+		if kind == AgentInvite {
+			kind = Agent
+		}
+		dev, scopes, ok := x.s.admit(kind, x.id, x.h, byKey(sess.x.device.Key))
 		switch {
+		case sess.x.inviting && ok:
+			sess.x.device, sess.x.scopes, sess.x.inviting, sess.x.kind = dev, scopes, false, Agent
+		case sess.x.inviting:
+			if until, ok := x.h.invitePending[hex.EncodeToString(sess.x.pair)]; !ok || !x.s.now().Before(until) {
+				sess.endLocked(cloudwire.CloseDenied)
+			}
 		case sess.x.pairing && ok:
 			// The box paired the phone: its session takes the roster's
 			// entry and stays open.
@@ -547,7 +595,7 @@ func (x *Handle) Now() (Snapshot, error) {
 }
 
 func (x *Handle) mayRead(class string) bool {
-	if x.kind == Agent {
+	if x.kind == Agent || x.kind == AgentInvite {
 		// An agent reads through its box, which audits and enforces
 		// revoke; never from the copy.
 		return false
@@ -584,7 +632,7 @@ func (s *Store) Sweep() {
 		}
 		// A pairing the box did not complete ends with its code.
 		for sess := range h.sessions {
-			if sess.x.pairing && !now.Before(sess.x.pairedUntil) {
+			if (sess.x.pairing || sess.x.inviting) && !now.Before(sess.x.pairedUntil) {
 				sess.endLocked(cloudwire.CloseDenied)
 			}
 		}
