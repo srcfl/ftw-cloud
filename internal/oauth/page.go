@@ -117,7 +117,8 @@ a.button{display:inline-block;background:var(--accent);color:#fff;text-decoratio
 @media (prefers-color-scheme:dark){a.button{color:#0b1a12}}
 button{font:inherit;background:none;border:1px solid var(--line);color:var(--fg);padding:8px 14px;border-radius:8px;cursor:pointer}
 #status{margin-top:24px;font-weight:600}
-details{margin:24px 0}summary{cursor:pointer;font-weight:600}textarea{display:block;width:100%;margin-top:8px;padding:10px;border:1px solid var(--line);border-radius:8px;background:var(--card);color:var(--fg);font:14px/1.4 ui-monospace,monospace}
+details{margin:24px 0}summary{cursor:pointer;font-weight:600}
+#invite-code{display:block;width:11ch;margin-top:8px;padding:10px;border:1px solid var(--line);border-radius:8px;background:var(--card);color:var(--fg);font:1.5rem/1.4 ui-monospace,monospace;letter-spacing:.08em;text-transform:uppercase}
 `
 
 var consentTmpl = template.Must(template.New("consent").Parse(`<!doctype html>
@@ -165,6 +166,9 @@ var consentTmpl = template.Must(template.New("consent").Parse(`<!doctype html>
   es.addEventListener('approved',function(e){go(e,'Approved. Going back…',true)});
   es.addEventListener('denied',function(e){go(e,'Not approved.',true)});
   es.addEventListener('expired',function(e){go(e,'This request ran out. Connect again from the assistant.',false)});
+  document.getElementById('invitation').addEventListener('toggle',function(){
+    if(this.open) document.getElementById('invite-code').focus();
+  });
   document.getElementById('invite-form').addEventListener('submit',async function(e){
     e.preventDefault();
     var button=document.getElementById('invite-connect'), code=document.getElementById('invite-code'), note=document.getElementById('invite-status');
