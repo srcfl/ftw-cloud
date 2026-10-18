@@ -3,6 +3,7 @@ package oauth
 import (
 	"crypto/aes"
 	"crypto/cipher"
+	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -35,7 +36,10 @@ const (
 
 // routeKey seals a home into a token's route. Every instance that routes
 // tokens holds the same one.
-type routeKey struct{ aead cipher.AEAD }
+type routeKey struct {
+	aead          cipher.AEAD
+	invitationMAC [32]byte
+}
 
 // loadRouteKey reads the route key, making it on first start.
 func loadRouteKey(path string) (routeKey, error) {
@@ -70,7 +74,19 @@ func loadRouteKey(path string) (routeKey, error) {
 	if err != nil {
 		return routeKey{}, err
 	}
-	return routeKey{aead: aead}, nil
+	derive := hmac.New(sha256.New, key)
+	derive.Write([]byte("ftw.agent.invite.reservation.key.v1\x00"))
+	var invitationMAC [32]byte
+	copy(invitationMAC[:], derive.Sum(nil))
+	return routeKey{aead: aead, invitationMAC: invitationMAC}, nil
+}
+
+// The database alone cannot enumerate the short codes from reservations.
+// The MAC key comes from the existing key file outside that database.
+func (k routeKey) invitationCodeHash(code string) []byte {
+	h := hmac.New(sha256.New, k.invitationMAC[:])
+	h.Write([]byte("ftw.agent.invite.alias.v1\x00" + code))
+	return h.Sum(nil)
 }
 
 // newToken is prefix, the home sealed with a fresh nonce, a dot and 32

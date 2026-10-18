@@ -117,13 +117,14 @@ a.button{display:inline-block;background:var(--accent);color:#fff;text-decoratio
 @media (prefers-color-scheme:dark){a.button{color:#0b1a12}}
 button{font:inherit;background:none;border:1px solid var(--line);color:var(--fg);padding:8px 14px;border-radius:8px;cursor:pointer}
 #status{margin-top:24px;font-weight:600}
+details{margin:24px 0}summary{cursor:pointer;font-weight:600}textarea{display:block;width:100%;margin-top:8px;padding:10px;border:1px solid var(--line);border-radius:8px;background:var(--card);color:var(--fg);font:14px/1.4 ui-monospace,monospace}
 `
 
 var consentTmpl = template.Must(template.New("consent").Parse(`<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Connect an assistant · FTW Cloud</title><style nonce="{{.Nonce}}">` + pageStyle + `</style></head>
 <body><main id="main" data-rid="{{.RID}}" data-verified="{{.Verified}}">
-<h1>Let {{.Name}} into your home?</h1>
+<h1>Connect {{.Name}} to FTW</h1>
 <p class="muted">{{if .Verified}}A client FTW Cloud knows, from {{.Host}}.{{else if .FromDocument}}From {{.Host}}. FTW Cloud does not know this client: check the name and the address.{{else}}This name is what the assistant registered with. FTW Cloud has not checked it.{{end}}</p>
 <div class="card">
 <p>After you approve, this window goes back to <strong>{{.RedirectHost}}</strong>.{{if .Local}} <span class="warn">That is a program on this computer. Approve only if you started it.</span>{{end}}</p>
@@ -131,6 +132,13 @@ var consentTmpl = template.Must(template.New("consent").Parse(`<!doctype html>
 <ul>{{range .Scopes}}<li>{{.}}</li>{{end}}</ul>
 <p class="muted">{{if .Control}}Control lasts minutes at a time, within limits your box sets. {{end}}{{if .Setup}}Setup lets it save equipment and electrical settings after you review and confirm the exact draft in the assistant. These settings can affect operation. It can restart the box to apply them after you confirm the brief interruption; your box keeps its safety checks.{{else}}It can change nothing lasting by itself.{{end}} You can remove it at any time, in the FTW app or on your box's own page.</p>
 </div>
+<details id="invitation"><summary>I have an invitation code</summary>
+<p>Someone who owns the home can give you a code from FTW's Access settings. It connects your own assistant with the rights they chose. It does not pair your phone as an owner.</p>
+<form id="invite-form" autocomplete="off"><label for="invite-code">Invitation code from the owner</label>
+<input id="invite-code" type="text" placeholder="K7M-4PX" spellcheck="false" autocapitalize="characters" maxlength="9" required>
+<p><button type="submit" id="invite-connect">Connect using this code</button></p>
+<p id="invite-status" role="status"></p></form></details>
+<h2>Or approve as the owner</h2>
 <div class="approve">
 <div class="qr">{{.QR}}</div>
 <div>
@@ -157,6 +165,19 @@ var consentTmpl = template.Must(template.New("consent").Parse(`<!doctype html>
   es.addEventListener('approved',function(e){go(e,'Approved. Going back…',true)});
   es.addEventListener('denied',function(e){go(e,'Not approved.',true)});
   es.addEventListener('expired',function(e){go(e,'This request ran out. Connect again from the assistant.',false)});
+  document.getElementById('invite-form').addEventListener('submit',async function(e){
+    e.preventDefault();
+    var button=document.getElementById('invite-connect'), code=document.getElementById('invite-code'), note=document.getElementById('invite-status');
+    button.disabled=true; code.readOnly=true; note.textContent='Connecting to the box… Keep this page open.';
+    try {
+      var response=await fetch('/oauth/requests/'+encodeURIComponent(rid)+'/invite',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({code:code.value.trim()})});
+      if(!response.ok) throw new Error(await response.text());
+      code.value=''; note.textContent='The box accepted the connection. Waiting for its signed confirmation…';
+    } catch(e) {
+      note.textContent=e.message||'The connection is not confirmed. Keep this page open and try the same code again.';
+      button.disabled=false; code.readOnly=false;
+    }
+  });
   document.getElementById('cancel').addEventListener('click',function(){
     fetch('/oauth/requests/'+encodeURIComponent(rid)+'/deny',{method:'POST'});
   });

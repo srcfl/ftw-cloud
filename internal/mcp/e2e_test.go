@@ -58,7 +58,8 @@ type world struct {
 	mu    sync.Mutex
 	boxes map[string]*stubBox
 	// heard is each /mcp request's version and method headers.
-	heard []string
+	heard           []string
+	claimInvitation func(rid string, cookie *http.Cookie)
 }
 
 func newWorld(t *testing.T, opts ...func(*world)) *world {
@@ -89,6 +90,8 @@ func newWorld(t *testing.T, opts ...func(*world)) *world {
 	w.mcp = New(w.auth, w.pool, log)
 	w.up.OnRoster = w.auth.Roster
 	w.auth.OnRevoke = w.pool.Drop
+	w.auth.ClaimInvite = w.pool.ClaimInvite
+	w.auth.Invitation = w.st.Invitation
 	for _, o := range opts {
 		o(w)
 	}
@@ -130,15 +133,17 @@ type agentGrant struct {
 }
 
 type stubBox struct {
-	t      *testing.T
-	w      *world
-	key    *ecdsa.PrivateKey
-	home   string
-	static appwire.KeyPair
-	conn   *websocket.Conn
-	wmu    sync.Mutex
-	seq    uint64
-	rseq   uint64
+	inviteAdmission func(key, payload []byte) (func(), bool)
+	inviteHints     []cloudwire.Pending
+	t               *testing.T
+	w               *world
+	key             *ecdsa.PrivateKey
+	home            string
+	static          appwire.KeyPair
+	conn            *websocket.Conn
+	wmu             sync.Mutex
+	seq             uint64
+	rseq            uint64
 
 	mu             sync.Mutex
 	agents         map[string]*agentGrant // by device id
@@ -171,9 +176,10 @@ type stubBox struct {
 }
 
 type boxSession struct {
-	sid uint32
-	tr  *appwire.Transport
-	dev string
+	claim func()
+	sid   uint32
+	tr    *appwire.Transport
+	dev   string
 }
 
 func (w *world) connectBox() *stubBox {
@@ -315,6 +321,7 @@ func (b *stubBox) sendRoster() {
 			Agent: &cloudwire.Agent{Scopes: a.scopes, Ops: a.ops, Caps: a.caps, ExpiresAtMs: a.until.UnixMilli(),
 				Principal: protocol.Principal{Client: "Test assistant", ClientID: a.clientID}}})
 	}
+	r.Pending = append([]cloudwire.Pending(nil), b.inviteHints...)
 	noNoise := b.noNoise
 	b.mu.Unlock()
 	// The box names its Noise key in the roster it signs.
@@ -374,6 +381,10 @@ func (b *stubBox) inner(t cloudwire.Tun) {
 		if err != nil {
 			return
 		}
+		if s.claim != nil {
+			s.claim()
+			s.claim = nil
+		}
 		b.mu.Lock()
 		b.frames = append(b.frames, frame)
 		b.mu.Unlock()
@@ -388,12 +399,17 @@ func (b *stubBox) inner(t cloudwire.Tun) {
 	if err != nil {
 		return
 	}
-	if _, err := hs.ReadMessage(t.D); err != nil {
+	payload, err := hs.ReadMessage(t.D)
+	if err != nil {
 		return
 	}
 	b.mu.Lock()
+	var claim func()
 	a, ok := b.allowed(t.Dev)
 	ok = ok && bytes.Equal(a.key, hs.RemoteStatic()) && cloudwire.DeviceID(hs.RemoteStatic()) == t.Dev
+	if !ok && b.inviteAdmission != nil && cloudwire.DeviceID(hs.RemoteStatic()) == t.Dev {
+		claim, ok = b.inviteAdmission(hs.RemoteStatic(), payload)
+	}
 	if ok {
 		b.handshakes++
 	}
@@ -409,7 +425,7 @@ func (b *stubBox) inner(t cloudwire.Tun) {
 	reply, _ := hs.WriteMessage(nil)
 	split, _ := hs.Split()
 	b.mu.Lock()
-	b.sessions[t.Dev] = &boxSession{sid: t.Sid, tr: appwire.NewTransport(split), dev: t.Dev}
+	b.sessions[t.Dev] = &boxSession{sid: t.Sid, tr: appwire.NewTransport(split), dev: t.Dev, claim: claim}
 	b.mu.Unlock()
 	b.tun(cloudwire.Tun{Dev: t.Dev, Sid: t.Sid, D: reply})
 }
@@ -778,7 +794,11 @@ func (w *world) connect(b *stubBox, scope string, granted ...string) *assistant 
 	if len(granted) == 0 {
 		granted = oauth.ReadScopes
 	}
-	b.approve(agentKey, reg.ClientID, granted...)
+	if w.claimInvitation != nil {
+		w.claimInvitation(rid, cookie)
+	} else {
+		b.approve(agentKey, reg.ClientID, granted...)
+	}
 	var ev string
 	select {
 	case ev = <-events:

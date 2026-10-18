@@ -1,6 +1,7 @@
 package keys
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdh"
 	"crypto/rand"
@@ -15,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/srcfl/ftw/go/protocol"
 	"github.com/srcfl/ftw/go/protocol/appwire"
 )
 
@@ -166,6 +168,8 @@ func (s *Server) handle(req request) response {
 		err = s.keep(req.Kid)
 	case opForget:
 		err = s.forget(req.Kid)
+	case opOpenInvite:
+		resp.Sess, resp.D, err = s.openPayload(req.Kid, req.RS, req.D, true)
 	case opOpen:
 		resp.Sess, resp.D, err = s.open(req.Kid, req.RS)
 	case opFinish:
@@ -311,16 +315,25 @@ func (s *Server) forget(kid string) error {
 
 // unseal reads a kept key. A key whose approval is still pending opens no
 // session.
-func (s *Server) unseal(kid string) ([]byte, error) {
+func (s *Server) unseal(kid string) ([]byte, error) { return s.unsealFrom(kid, false) }
+
+func (s *Server) unsealFrom(kid string, pending bool) ([]byte, error) {
 	if !validKid(kid) {
 		return nil, ErrUnknownKey
 	}
-	raw, err := os.ReadFile(filepath.Join(s.dir, "kept", kid))
+	kind := "kept"
+	if pending {
+		kind = "pending"
+	}
+	raw, err := os.ReadFile(filepath.Join(s.dir, kind, kid))
 	if err != nil {
 		return nil, ErrUnknownKey
 	}
 	var rec record
 	if err := decMode.Unmarshal(raw, &rec); err != nil || rec.Kid != kid || len(rec.Pub) != appwire.DHBytes {
+		return nil, ErrUnknownKey
+	}
+	if pending && !s.now().Before(time.UnixMilli(rec.At).Add(PendingFor)) {
 		return nil, ErrUnknownKey
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), unwrapTimeout)
@@ -350,6 +363,10 @@ func (s *Server) unseal(kid string) ([]byte, error) {
 // The secret is wiped once message 1 is written; the handshake state keeps
 // what it needs to read message 2.
 func (s *Server) open(kid string, rs []byte) (string, []byte, error) {
+	return s.openPayload(kid, rs, nil, false)
+}
+
+func (s *Server) openPayload(kid string, rs, payload []byte, pending bool) (string, []byte, error) {
 	if len(rs) != appwire.DHBytes {
 		return "", nil, ErrRefused
 	}
@@ -359,7 +376,7 @@ func (s *Server) open(kid string, rs []byte) (string, []byte, error) {
 	if full {
 		return "", nil, ErrBusy
 	}
-	secret, err := s.unseal(kid)
+	secret, err := s.unsealFrom(kid, pending)
 	if err != nil {
 		return "", nil, err
 	}
@@ -368,13 +385,26 @@ func (s *Server) open(kid string, rs []byte) (string, []byte, error) {
 	if err != nil {
 		return "", nil, err
 	}
+	if pending {
+		claim, err := protocol.ParseAgentInviteClaim(payload)
+		if err != nil || s.offer == nil {
+			return "", nil, ErrRefused
+		}
+		pub := s.offer.Public()
+		offer, err := protocol.OpenOffer(map[string][]byte{OfferKid(pub): pub}, claim.Offer, s.now().UnixMilli())
+		if err != nil || offer.Role != protocol.RoleAgent || !bytes.Equal(offer.Key, kp.Public()) {
+			return "", nil, ErrRefused
+		}
+	} else if len(payload) > 0 {
+		return "", nil, ErrRefused
+	}
 	init, err := appwire.NewInitiator(appwire.InitiatorOptions{StaticKey: kp, RemoteStatic: rs, Prologue: SessionPrologue(rs)})
 	if err != nil {
 		return "", nil, err
 	}
 	// A paired device's message 1 carries no payload: the box knows it by
 	// its static key.
-	msg1, err := init.WriteMessage(nil)
+	msg1, err := init.WriteMessage(payload)
 	if err != nil {
 		return "", nil, err
 	}
@@ -387,6 +417,13 @@ func (s *Server) open(kid string, rs []byte) (string, []byte, error) {
 	defer s.mu.Unlock()
 	if len(s.sessions) >= MaxSessions {
 		return "", nil, ErrBusy
+	}
+	kind := "kept"
+	if pending {
+		kind = "pending"
+	}
+	if _, err := os.Stat(filepath.Join(s.dir, kind, kid)); err != nil {
+		return "", nil, ErrUnknownKey
 	}
 	s.sessions[sess] = &session{kid: kid, init: init, used: s.now()}
 	return sess, msg1, nil

@@ -31,14 +31,15 @@ import (
 
 // Operations.
 const (
-	opNew    = "new"    // make a key pair; answers kid and pub
-	opKeep   = "keep"   // the owner approved the agent: keep its key
-	opForget = "forget" // delete a key and close its sessions
-	opOpen   = "open"   // unseal kid, start a session to rs; answers sess and d (message 1)
-	opFinish = "finish" // read message 2 in d
-	opSeal   = "seal"   // encrypt frame d of sess; answers d
-	opUnseal = "unseal" // decrypt message d of sess; answers d
-	opClose  = "close"  // end sess
+	opNew        = "new"         // make a key pair; answers kid and pub
+	opKeep       = "keep"        // the owner approved the agent: keep its key
+	opForget     = "forget"      // delete a key and close its sessions
+	opOpenInvite = "open.invite" // pending agent key; only the typed invitation proof
+	opOpen       = "open"        // unseal kid, start a session to rs; answers sess and d (message 1)
+	opFinish     = "finish"      // read message 2 in d
+	opSeal       = "seal"        // encrypt frame d of sess; answers d
+	opUnseal     = "unseal"      // decrypt message d of sess; answers d
+	opClose      = "close"       // end sess
 	// offer.pub and offer.sign are in offer.go.
 )
 

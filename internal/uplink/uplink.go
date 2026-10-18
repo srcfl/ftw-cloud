@@ -913,14 +913,29 @@ func (c *boxConn) roster(env cloudwire.Envelope) error {
 			return fmt.Errorf("%w: a roster device the service cannot use", errProtocol)
 		}
 	}
-	if len(r.Pending) > maxPending {
-		return fmt.Errorf("%w: %d pairing codes in one roster", errProtocol, len(r.Pending))
-	}
+	phones, invites := 0, 0
+	seenPending := map[string]bool{}
 	for _, p := range r.Pending {
-		if len(p.Hash) != cloudwire.PairingHashBytes || p.TTLS <= 0 || p.TTLS > maxPendingTTL {
-			return fmt.Errorf("%w: a pairing code the service cannot hold", errProtocol)
+		maxTTL := int64(maxPendingTTL)
+		switch p.Kind {
+		case "":
+			phones++
+		case protocol.RoleAgent:
+			invites++
+			maxTTL = protocol.AgentInviteClaimMaxMs / 1000
+		default:
+			return fmt.Errorf("%w: unknown pending kind", errProtocol)
 		}
+		key := string(p.Hash)
+		if len(p.Hash) != cloudwire.PairingHashBytes || p.TTLS <= 0 || p.TTLS > maxTTL || seenPending[key] {
+			return fmt.Errorf("%w: invalid pending admission", errProtocol)
+		}
+		seenPending[key] = true
 	}
+	if phones > maxPending || invites > protocol.AgentInviteRowsMax {
+		return fmt.Errorf("%w: too many pending admissions", errProtocol)
+	}
+
 	if r.RosterSeq < c.rosterSeq() {
 		return nil
 	}

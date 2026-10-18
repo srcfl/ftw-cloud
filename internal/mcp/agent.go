@@ -1,6 +1,7 @@
 package mcp
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/binary"
@@ -350,11 +351,22 @@ func (c *agentConn) idleSince(now time.Time) time.Duration {
 // from the keys part, message 2 from the box. Then hello goes, without
 // waiting for its answer.
 func (c *agentConn) open(ctx context.Context, sub oauth.Subject) error {
+	return c.openFor(ctx, sub, nil)
+}
+
+func (c *agentConn) openFor(ctx context.Context, sub oauth.Subject, invite *oauth.InviteClaim) error {
 	boxStatic, ok := c.p.boxKey(sub.Home)
 	if !ok {
 		return errNoAgents
 	}
-	h, err := c.p.store.For(store.Principal{Kind: store.Agent, Home: sub.Home, DeviceKey: sub.Key})
+	principal := store.Principal{Kind: store.Agent, Home: sub.Home, DeviceKey: sub.Key}
+	if invite != nil {
+		if !bytes.Equal(boxStatic, invite.Box) {
+			return errDenied
+		}
+		principal.Kind, principal.Invite = store.AgentInvite, invite.Hash
+	}
+	h, err := c.p.store.For(principal)
 	if err != nil {
 		return errDenied
 	}
@@ -380,7 +392,19 @@ func (c *agentConn) open(ctx context.Context, sub oauth.Subject) error {
 	c.msg2, c.opened = make(chan []byte, 1), make(chan struct{})
 	go c.read(sess, sid)
 
-	ksess, msg1, err := c.p.keys.Open(ctx, sub.Kid, boxStatic)
+	var ksess string
+	var msg1 []byte
+	if invite != nil {
+		k, ok := c.p.keys.(interface {
+			OpenInvite(context.Context, string, []byte, []byte) (string, []byte, error)
+		})
+		if !ok {
+			return errNoAgents
+		}
+		ksess, msg1, err = k.OpenInvite(ctx, sub.Kid, boxStatic, invite.Payload)
+	} else {
+		ksess, msg1, err = c.p.keys.Open(ctx, sub.Kid, boxStatic)
+	}
 	if err != nil {
 		c.p.log.Warn("the keys part could not open an agent session", "err", err)
 		return userError("FTW Cloud could not open a session for this assistant.")

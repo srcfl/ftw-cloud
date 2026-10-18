@@ -41,6 +41,14 @@ Every AWS resource carries the tag `Project=ftw-cloud`.
 - The host runs one image, named by its digest, never by a tag.
   `/opt/ftw-cloud` is checked out at the commit that image was built from and
   supplies `compose.yml`.
+- Six-character MCP invitation codes expire within ten minutes. Their
+  mapping stays in the OAuth process's memory until the minute sweep removes
+  it. Keep one OAuth instance until that mapping has shared
+  routing. A restart ends unused short codes; the owner can check status and
+  republish the same strong invitation for a working code. Existing grants
+  and tokens remain valid. Keep `oauth-route.key` with the service state:
+  its derived MAC also keeps unexpired code reservations distinct after a
+  restart, without storing a bearer mapping in SQLite.
 - The Docker volume `ftw-cloud_ftw-cloud-state` holds the SQLite registry
   (home ids, box keys, signed rosters, tombstones) and the ACME cache, on the
   encrypted root disk. With the reviewed statistics policy enabled, it also

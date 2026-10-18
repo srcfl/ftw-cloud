@@ -108,6 +108,10 @@ CREATE TABLE IF NOT EXISTS spent_codes (
 CREATE TABLE IF NOT EXISTS forgets (
 	kid TEXT PRIMARY KEY,
 	at_ms INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS invitation_code_reservations (
+	hash BLOB PRIMARY KEY,
+	expires_ms INTEGER NOT NULL
 );`)
 	if err != nil {
 		_ = db.Close()
@@ -654,6 +658,7 @@ func (s *store) sweep(now time.Time) error {
 	for _, q := range []string{
 		`DELETE FROM tokens WHERE expires_ms <= ?`,
 		`DELETE FROM spent_codes WHERE expires_ms <= ?`,
+		`DELETE FROM invitation_code_reservations WHERE expires_ms <= ?`,
 	} {
 		if _, err := tx.Exec(q, ms); err != nil {
 			return err

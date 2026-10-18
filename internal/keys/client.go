@@ -172,3 +172,10 @@ func (c *Client) End(ctx context.Context, sess string) error {
 	_, err := c.call(ctx, request{Op: opClose, Sess: sess})
 	return err
 }
+
+// OpenInvite opens a pending key only for a typed agent invitation claim.
+// It grants no ordinary session until Core claims it and its roster arrives.
+func (c *Client) OpenInvite(ctx context.Context, kid string, boxStatic, payload []byte) (string, []byte, error) {
+	resp, err := c.call(ctx, request{Op: opOpenInvite, Kid: kid, RS: boxStatic, D: payload})
+	return resp.Sess, resp.D, err
+}

@@ -1007,7 +1007,7 @@ func TestTheConsentPage(t *testing.T) {
 	resp, _ := noFollow.Get(g.srv.URL + "/oauth/authorize?" + q.Encode())
 	body, _ := io.ReadAll(resp.Body)
 	page := string(body)
-	for _, want := range []string{"Let Claude into your home?", "From example.com. FTW Cloud does not know this client", "127.0.0.1:8123",
+	for _, want := range []string{"Connect Claude to FTW", "I have an invitation code", "Invitation code from the owner", "From example.com. FTW Cloud does not know this client", "127.0.0.1:8123",
 		"a program on this computer", "<svg", AppLink, scopeWords[ScopeDispatchHold], "Control lasts minutes",
 		// The QR code or the link opens the app; the code is for an owner
 		// who has neither, in the app or on the box's own page.
