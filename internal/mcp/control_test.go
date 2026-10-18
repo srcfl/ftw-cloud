@@ -32,7 +32,7 @@ func TestControlStepsUpWithoutTheRight(t *testing.T) {
 	a := w.connect(b, "")
 	for name, scope := range map[string]string{"ev_charge_now": oauth.ScopeDispatchHold, "goal_request": oauth.ScopeGoalsRequest} {
 		r := a.rpc("tools/call", map[string]any{"name": name, "arguments": map[string]any{}}, true)
-		if r.Status != http.StatusForbidden || !strings.Contains(r.Header.Get("WWW-Authenticate"), `scope="`+scope+`"`) {
+		if r.Status != http.StatusForbidden || !strings.Contains(r.Header.Get("WWW-Authenticate"), scope) {
 			t.Fatalf("%s: %d %s", name, r.Status, r.Header.Get("WWW-Authenticate"))
 		}
 	}

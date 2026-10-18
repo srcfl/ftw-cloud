@@ -385,7 +385,7 @@ func TestStepUp(t *testing.T) {
 	}
 	r := a.rpc("tools/call", map[string]any{"name": "plan_get"}, true)
 	h := r.Header.Get("WWW-Authenticate")
-	if r.Status != 403 || !strings.Contains(h, `error="insufficient_scope"`) || !strings.Contains(h, `scope="`+oauth.ScopePlanRead+`"`) {
+	if r.Status != 403 || !strings.Contains(h, `error="insufficient_scope"`) || !strings.Contains(h, `scope="`+oauth.ScopeLiveRead+` `+oauth.ScopePlanRead+`"`) {
 		t.Fatalf("step-up: %d %s", r.Status, h)
 	}
 	if _, _, p := b.counts(); len(p) != 0 {

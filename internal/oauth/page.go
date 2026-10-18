@@ -26,6 +26,7 @@ type pageData struct {
 	Local        bool
 	Scopes       []string
 	Control      bool
+	Setup        bool
 	Code         string
 	Link         string
 	QR           template.HTML
@@ -48,8 +49,11 @@ func (s *Server) consentPage(w http.ResponseWriter, rid string, c consent) {
 		Code: showCode(c.Code), Link: appLink(rid, c.Offer)}
 	for _, sc := range splitScope(c.Scope) {
 		d.Scopes = append(d.Scopes, scopeWords[sc])
-		if !slices.Contains(ReadScopes, sc) {
+		if slices.Contains(ControlScopes, sc) {
 			d.Control = true
+		}
+		if sc == ScopeSetupWrite {
+			d.Setup = true
 		}
 	}
 	d.QR = qrSVG(d.Link)
@@ -125,7 +129,7 @@ var consentTmpl = template.Must(template.New("consent").Parse(`<!doctype html>
 <p>After you approve, this window goes back to <strong>{{.RedirectHost}}</strong>.{{if .Local}} <span class="warn">That is a program on this computer. Approve only if you started it.</span>{{end}}</p>
 <h2>It asks to</h2>
 <ul>{{range .Scopes}}<li>{{.}}</li>{{end}}</ul>
-<p class="muted">{{if .Control}}Control lasts minutes at a time, within limits your box sets. {{end}}It can change nothing lasting by itself. You can remove it at any time, in the FTW app or on your box's own page.</p>
+<p class="muted">{{if .Control}}Control lasts minutes at a time, within limits your box sets. {{end}}{{if .Setup}}Setup lets it save equipment and electrical settings after you review and confirm the exact draft in the assistant. These settings can affect operation. It can restart the box to apply them after you confirm the brief interruption; your box keeps its safety checks.{{else}}It can change nothing lasting by itself.{{end}} You can remove it at any time, in the FTW app or on your box's own page.</p>
 </div>
 <div class="approve">
 <div class="qr">{{.QR}}</div>
