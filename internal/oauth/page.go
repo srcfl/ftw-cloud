@@ -221,7 +221,7 @@ var modeTmpl = template.Must(template.New("mode").Parse(`<!doctype html>
 <p>Choose what this connection can ask for. You will approve it for your home in the next step, or use an invitation code from its owner.</p>
 <form id="mode-form">
 <button class="choice" type="submit" name="mode" value="read"><strong>Read and troubleshoot</strong><span>Check history, energy, logs and all technical details. No settings change.</span></button>
-<button class="choice" type="submit" name="mode" value="setup"><strong>Set up and configure</strong><span>Everything above, plus help setting up a new system or changing equipment and electrical settings. Review and confirm each save in your assistant.</span></button>
+<button class="choice" type="submit" name="mode" value="setup"><strong>Set up and configure</strong><span>Everything above, plus help with equipment and electrical settings. Review and confirm each save in your assistant.</span></button>
 </form>
 <p class="muted">Neither choice grants temporary control. The home owner decides the final rights. You can remove access at any time in FTW.</p>
 <p id="mode-status" role="status"></p>
