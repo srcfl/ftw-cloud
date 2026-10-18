@@ -74,6 +74,20 @@ func TestDiagnosticGrantCoversAllTechnicalReadsWithoutExtraScopes(t *testing.T) 
 	}
 }
 
+func TestTransportMetadataDoesNotReplaceBoxEvidence(t *testing.T) {
+	w := newWorld(t)
+	b := w.connectBox()
+	a := w.connect(b, oauth.ScopeDiagRun)
+	res, isErr, text := a.call("api_read", map[string]any{"path": "/api/test/metadata"})
+	if isErr || !strings.Contains(text, `"path":"device original path"`) || !strings.Contains(text, `"status":"faulted"`) || !strings.Contains(text, `"counter":9007199254740993`) {
+		t.Fatalf("box evidence was changed: %+v %s", res, text)
+	}
+	data := res["structuredContent"].(map[string]any)["data"].(map[string]any)
+	if data["path"] != "/api/test/metadata" || data["status"] != float64(200) {
+		t.Fatalf("missing transport metadata: %+v", data)
+	}
+}
+
 func TestDiagnosticPageArgumentsAndTechnicalTextSurviveOAuthAndNoise(t *testing.T) {
 	w := newWorld(t)
 	b := w.connectBox()

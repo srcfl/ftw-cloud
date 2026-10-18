@@ -516,6 +516,9 @@ func (b *stubBox) handle(s *boxSession, env appwire.Envelope) {
 		if q.Path == "/api/test/pages" {
 			data, _ = json.Marshal(map[string]any{"encoding": "utf-8", "body": "charger 192.168.1.9 9007199254740993", "offset": q.Offset, "next_offset": q.Offset + 64, "sha256": q.IfSHA256, "more": true})
 		}
+		if q.Path == "/api/test/metadata" {
+			data = []byte(`{"path":"device original path","status":"faulted","counter":9007199254740993}`)
+		}
 		// This deliberately broken stub truncates a wire answer; real Core
 		// returns explicit byte pages within the wire bound instead.
 		truncated := q.MaxBytes > 0 && int64(len(data)) > q.MaxBytes

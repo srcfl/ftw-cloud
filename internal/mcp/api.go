@@ -117,10 +117,9 @@ func diagnosticAPIRead(ctx context.Context, cc *callCtx, read protocol.APIRead) 
 	if !json.Valid(body) || dec.Decode(&data) != nil || data == nil {
 		return nil, userError("The box's diagnostic answer was not a JSON object.")
 	}
-	data["path"], data["status"] = read.Path, head.Status
 	// Preserve the box's technical evidence, including exact json.Number
 	// values. Existing typed reads retain their own display sanitization.
-	return data, nil
+	return map[string]any{"path": read.Path, "status": head.Status, "response": data}, nil
 }
 
 // apiRead collects the bounded api.* stream. A missing head, a skipped

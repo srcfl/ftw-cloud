@@ -196,8 +196,9 @@ func (p *Pool) get(ctx context.Context, sub oauth.Subject) (*agentConn, error) {
 		}
 		return c, nil
 	}
-	if len(p.conns) >= maxConns {
-		p.evictLocked()
+	if len(p.conns) >= maxConns && !p.evictLocked() {
+		p.mu.Unlock()
+		return nil, errBusy
 	}
 	c = &agentConn{p: p, home: sub.Home, agent: sub.Agent, ready: make(chan struct{}), done: make(chan struct{}),
 		turn: make(chan struct{}, 1), waiting: map[uint32]chan appwire.Envelope{}, byCmd: map[string]chan appwire.Envelope{},
@@ -223,21 +224,39 @@ func (p *Pool) get(ctx context.Context, sub oauth.Subject) (*agentConn, error) {
 	return c, nil
 }
 
-func (p *Pool) evictLocked() {
+func (p *Pool) evictLocked() bool {
 	var oldest connKey
 	var at time.Time
 	for k, c := range p.conns {
 		c.mu.Lock()
+		busy := c.queued > 0 || len(c.turn) > 0
 		u := c.used
 		c.mu.Unlock()
+		select {
+		case <-c.ready:
+		default:
+			continue
+		}
+		if busy {
+			continue
+		}
 		if at.IsZero() || u.Before(at) {
 			oldest, at = k, u
 		}
 	}
 	if c := p.conns[oldest]; c != nil {
+		c.mu.Lock()
+		if c.queued > 0 || len(c.turn) > 0 {
+			c.mu.Unlock()
+			return false
+		}
+		c.evicting = true
+		c.mu.Unlock()
 		delete(p.conns, oldest)
 		go c.close(errIdle)
+		return true
 	}
+	return false
 }
 
 // Errors a tool turns into words for the model.
@@ -280,6 +299,7 @@ type agentConn struct {
 	closing  bool
 	closeErr error
 	queued   int
+	evicting bool
 	used     time.Time
 	nextID   uint32
 	waiting  map[uint32]chan appwire.Envelope
@@ -541,6 +561,10 @@ func (c *agentConn) send(ctx context.Context, t string, id *uint32, body any) er
 // take waits for the session's turn. At most maxWaiting calls wait.
 func (c *agentConn) take(ctx context.Context) (func(), error) {
 	c.mu.Lock()
+	if c.evicting {
+		c.mu.Unlock()
+		return nil, errIdle
+	}
 	if c.queued >= maxWaiting {
 		c.mu.Unlock()
 		return nil, errBusy
