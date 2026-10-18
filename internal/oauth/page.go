@@ -204,7 +204,7 @@ var errorTmpl = template.Must(template.New("error").Parse(`<!doctype html>
 {{if .Back}}<p><a class="button" href="{{.Back}}">Go back to {{.BackHost}}</a></p>{{end}}</main></body></html>`))
 
 func (s *Server) modePage(w http.ResponseWriter, rid string, c consent) {
-	d := pageData{Nonce: randomToken(16), RID: rid, Name: c.ClientName}
+	d := pageData{Nonce: randomToken(16), RID: rid, Name: c.ClientName, Host: c.ClientHost, Verified: c.Verified, FromDocument: isCIMD(c.ClientID)}
 	pageHeaders(w, d.Nonce)
 	w.WriteHeader(http.StatusOK)
 	_ = modeTmpl.Execute(w, d)
@@ -217,6 +217,7 @@ var modeTmpl = template.Must(template.New("mode").Parse(`<!doctype html>
 .choice strong,.choice span{display:block}.choice span{font-size:.9rem;margin-top:4px;color:var(--muted)}
 </style></head><body><main id="main" data-rid="{{.RID}}">
 <h1>How will you use {{.Name}} with FTW?</h1>
+<p class="muted">From {{.Host}}. {{if .Verified}}A client FTW Cloud knows.{{else if .FromDocument}}FTW Cloud does not know this client: check the name and the address.{{else}}This name is what the assistant registered with. FTW Cloud has not checked it.{{end}}</p>
 <p>Choose what this connection can ask for. You will approve it for your home in the next step, or use an invitation code from its owner.</p>
 <form id="mode-form">
 <button class="choice" type="submit" name="mode" value="read"><strong>Read and troubleshoot</strong><span>Check history, energy, logs and all technical details. No settings change.</span></button>
