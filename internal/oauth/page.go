@@ -107,7 +107,7 @@ func qrSVG(text string) template.HTML {
 const pageStyle = `
 :root{--bg:#f6f5f2;--fg:#17181a;--muted:#5d6066;--card:#fff;--line:#e2e0db;--accent:#1f6f4a;--warn:#8a4b00}
 @media (prefers-color-scheme:dark){:root{--bg:#111214;--fg:#eceae6;--muted:#a3a6ab;--card:#1b1c1f;--line:#2c2e32;--accent:#5cc28f;--warn:#f0a34a}}
-*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif}
+*{box-sizing:border-box}[hidden]{display:none!important}body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif}
 main{max-width:560px;margin:0 auto;padding:32px 16px}h1{font-size:1.5rem;line-height:1.25;margin:0 0 8px}h2{font-size:1rem;margin:24px 0 8px}
 .muted{color:var(--muted)}.warn{color:var(--warn)}.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px}
 ul{margin:0;padding-left:20px}.approve{display:flex;gap:16px;align-items:center;flex-wrap:wrap;margin-top:24px}
