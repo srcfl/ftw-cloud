@@ -489,11 +489,6 @@ func (b *stubBox) handle(s *boxSession, env appwire.Envelope) {
 		if err := protocol.Unmarshal(env.B, &q); err != nil {
 			b.t.Fatal(err)
 		}
-		route, ok := protocol.AgentAPIPath(q.Path)
-		if !ok || !slices.Contains(a.scopes, route.Scope) {
-			b.reply(s, protocol.MsgError, env.ID, protocol.ErrorBody{Code: protocol.ErrScopeDenied})
-			return
-		}
 		data := []byte(`{"scope":"asset","points":[{"asset_id":"opaque-asset","energy_wh":12,"source":"hardware_counter","quality":"measured","provenance":"counter","sample_count":2}],"counter":9007199254740993}`)
 		if q.Path == "/api/energy/assets" {
 			data = []byte(`{"assets":[{"asset_id":"opaque-asset","kind":"grid_meter"}]}`)
@@ -501,7 +496,18 @@ func (b *stubBox) handle(s *boxSession, env appwire.Envelope) {
 		if q.Path == "/api/status" {
 			data, _ = json.Marshal(map[string]any{"text": strings.Repeat("x", 8000)})
 		}
-		truncated := int64(len(data)) > q.MaxBytes
+		if q.Path == protocol.AgentAPICatalogPath {
+			data = []byte(`{"routes":[{"path":"/api/energy/history"},{"path":"/api/series"},{"path":"/api/mpc/diagnose/at"},{"path":"/api/drivers/{id}/source"},{"path":"/api/future/read"}],"troubleshooting":{"core":{"version":"0.151.0-beta.1","source":"https://github.com/srcfl/ftw/tree/v0.151.0-beta.1"},"workflow":["Collect reproduction steps and incident time with timezone"]}}`)
+		}
+		if q.Path == "/api/test/archive" {
+			data, _ = json.Marshal(map[string]any{"body": q.ArchiveMember, "encoding": "utf-8", "complete": true})
+		}
+		if q.Path == "/api/test/pages" {
+			data, _ = json.Marshal(map[string]any{"encoding": "utf-8", "body": "charger 192.168.1.9 9007199254740993", "offset": q.Offset, "next_offset": q.Offset + 64, "sha256": q.IfSHA256, "more": true})
+		}
+		// This deliberately broken stub truncates a wire answer; real Core
+		// returns explicit byte pages within the wire bound instead.
+		truncated := q.MaxBytes > 0 && int64(len(data)) > q.MaxBytes
 		if truncated {
 			data = data[:q.MaxBytes]
 		}

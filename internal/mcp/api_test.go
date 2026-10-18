@@ -17,6 +17,9 @@ func TestAnAssistantReadsTheDiagnosticAPIThroughItsBox(t *testing.T) {
 	if isErr || !strings.Contains(text, "/api/energy/history") || !strings.Contains(text, "/api/series") || !strings.Contains(text, "/api/mpc/diagnose/at") {
 		t.Fatalf("diagnostic catalogue: %+v %s", res, text)
 	}
+	if res["structuredContent"].(map[string]any)["source"] != "box" {
+		t.Fatal("the catalogue did not identify its box source")
+	}
 	_, isErr, text = a.call("api_read", map[string]any{"path": "/api/energy/assets"})
 	if isErr || !strings.Contains(text, "opaque-asset") {
 		t.Fatalf("assets: %s", text)
@@ -31,12 +34,12 @@ func TestAnAssistantReadsTheDiagnosticAPIThroughItsBox(t *testing.T) {
 		t.Fatalf("wrong box reads: %s", joined)
 	}
 	for _, args := range []map[string]any{
-		{"path": "/api/config"},
-		{"path": "/api/scan"},
 		{"path": "/api/energy/history", "method": "POST"},
 		{"path": "/api/energy/history?scope=system"},
-		{"path": "/api/series", "query": map[string]string{"format": "csv"}},
 		{"path": "/api/energy/history", "max_bytes": 1048577},
+		{"path": "/api/energy/history", "offset": -1},
+		{"path": "/api/energy/history", "if_sha256": "bad"},
+		{"path": "/api/../config"},
 	} {
 		if _, isErr, text := a.call("api_read", args); !isErr {
 			t.Errorf("invalid diagnostic request accepted: %+v %s", args, text)
@@ -44,21 +47,40 @@ func TestAnAssistantReadsTheDiagnosticAPIThroughItsBox(t *testing.T) {
 	}
 }
 
-func TestDiagnosticAPITokenNeedsTheDataScopeToo(t *testing.T) {
+func TestDiagnosticGrantCoversAllTechnicalReadsWithoutExtraScopes(t *testing.T) {
 	w := newWorld(t)
 	b := w.connectBox()
 	a := w.connect(b, oauth.ScopeDiagRun)
-	_, isErr, text := a.call("api_catalog", nil)
-	if isErr || strings.Contains(text, "/api/energy/history") {
-		t.Fatalf("catalogue lists ungranted data: %s", text)
+	for _, path := range []string{protocol.AgentAPICatalogPath, "/api/config", "/api/drivers/driver-192.168.1.9/source", "/api/logs", "/api/future/read", "/api/series"} {
+		_, isErr, text := a.call("api_read", map[string]any{"path": path, "query": map[string]string{"future_parameter": "yes"}})
+		if isErr {
+			t.Fatalf("diagnostic read %s: %s", path, text)
+		}
 	}
-	r := a.rpc("tools/call", map[string]any{"name": "api_read", "arguments": map[string]any{"path": "/api/energy/history"}}, true)
-	if r.Status != http.StatusForbidden {
-		t.Fatalf("data scope should require a new grant: %d %+v", r.Status, r.Body)
+	_, isErr, text := a.call("api_catalog", nil)
+	if isErr || !strings.Contains(text, "/api/energy/history") || !strings.Contains(text, "https://github.com/srcfl/ftw/tree/v0.151.0-beta.1") || !strings.Contains(text, "reproduction steps") {
+		t.Fatalf("debug context missing: %s", text)
 	}
 	_, _, asked := b.counts()
-	if len(asked) != 0 {
-		t.Fatalf("a denied request reached the box: %+v", asked)
+	if !strings.Contains(strings.Join(asked, "\n"), protocol.AgentAPICatalogPath) {
+		t.Fatal("catalogue did not come from the connected Core")
+	}
+	// A deliberately narrower token still cannot use the diagnostic grant.
+	narrow := w.connect(b, oauth.ScopeHistoryRead)
+	r := narrow.rpc("tools/call", map[string]any{"name": "api_read", "arguments": map[string]any{"path": "/api/energy/history"}}, true)
+	if r.Status != http.StatusForbidden {
+		t.Fatalf("diagnostic grant not checked: %d", r.Status)
+	}
+}
+
+func TestDiagnosticPageArgumentsAndTechnicalTextSurviveOAuthAndNoise(t *testing.T) {
+	w := newWorld(t)
+	b := w.connectBox()
+	a := w.connect(b, oauth.ScopeDiagRun)
+	digest := strings.Repeat("a", 64)
+	_, isErr, text := a.call("api_read", map[string]any{"path": "/api/test/pages", "offset": int64(1048576), "if_sha256": digest})
+	if isErr || !strings.Contains(text, "192.168.1.9") || !strings.Contains(text, "9007199254740993") || !strings.Contains(text, `"offset":1048576`) || !strings.Contains(text, digest) {
+		t.Fatalf("page: %s", text)
 	}
 }
 
@@ -115,5 +137,15 @@ func TestDiagnosticAPITimesAcceptTheUsersTimezone(t *testing.T) {
 	}
 	if _, isErr, text := a.call("api_read", map[string]any{"path": "/api/mpc/diagnose/history", "query": map[string]string{"since": "yesterday"}}); !isErr {
 		t.Fatalf("an ambiguous time silently selected another range: %s", text)
+	}
+}
+
+func TestDiagnosticArchiveMemberArgumentReachesTheBox(t *testing.T) {
+	w := newWorld(t)
+	b := w.connectBox()
+	a := w.connect(b, oauth.ScopeDiagRun)
+	_, isErr, text := a.call("api_read", map[string]any{"path": "/api/test/archive", "archive_member": "logs/global.log"})
+	if isErr || !strings.Contains(text, "logs/global.log") {
+		t.Fatalf("archive member: %s", text)
 	}
 }
