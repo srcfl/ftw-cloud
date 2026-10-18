@@ -198,12 +198,21 @@ func TestARestartResetsTheOldProcesssConnections(t *testing.T) {
 	old, oldDone := start("127.0.0.1:0")
 	addr := old.LocalAddr().String()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	conn, err := quic.DialAddr(ctx, addr, &tls.Config{RootCAs: pool, NextProtos: []string{ALPNH3}}, &quic.Config{})
+	// Finish a real HTTP/3 exchange before crashing the old process. Dial
+	// returning alone does not prove both peers finished establishing it.
+	c := newClient(t, pool)
+	response, err := c.Get("https://" + addr + "/healthz")
 	if err != nil {
 		t.Fatal(err)
 	}
+	_, err = io.Copy(io.Discard, response.Body)
+	response.Body.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.mu.Lock()
+	conn := c.conns[0]
+	c.mu.Unlock()
 	defer conn.CloseWithError(0, "")
 
 	// The old process goes without closing anything.
