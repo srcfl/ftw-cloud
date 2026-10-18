@@ -251,7 +251,7 @@ func (s *store) consentByRID(rid string) (consent, bool, error) {
 // spendCode finds a pending request by its short code, once: a code that
 // found its request finds nothing again.
 func (s *store) spendCode(code string, now time.Time) (consent, bool, error) {
-	res, err := s.db.Exec(`UPDATE requests SET code_used = 1 WHERE code = ? AND code_used = 0 AND status = ? AND expires_ms > ?`,
+	res, err := s.db.Exec(`UPDATE requests SET code_used = 1 WHERE code = ? AND code_used = 0 AND offer <> '' AND status = ? AND expires_ms > ?`,
 		code, statusPending, now.UnixMilli())
 	if err != nil {
 		return consent{}, false, err
@@ -280,7 +280,7 @@ func (s *store) browserMatches(rid, browser string) bool {
 
 // pendingByKey finds the pending consent for an agent key.
 func (s *store) pendingByKey(key []byte, now time.Time) (ridHash []byte, c consent, ok bool, err error) {
-	row := s.db.QueryRow(`SELECT rid, `+consentCols+` FROM requests WHERE agent_key = ? AND status = ? AND expires_ms > ?`,
+	row := s.db.QueryRow(`SELECT rid, `+consentCols+` FROM requests WHERE agent_key = ? AND offer <> '' AND status = ? AND expires_ms > ?`,
 		key, statusPending, now.UnixMilli())
 	c, err = scanConsent(row, &ridHash)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -308,8 +308,8 @@ func (s *store) approve(ridHash []byte, c consent, g agentGrant, now time.Time) 
 	defer tx.Rollback()
 	// The page has as long again to hand its browser the code.
 	res, err := tx.Exec(`UPDATE requests SET status = ?, home = ?, agent = ?, granted = ?, shard = ?, expires_ms = ?
-		WHERE rid = ? AND status = ?`,
-		statusApproved, c.Home, c.Agent, c.Granted, c.Shard, now.Add(RequestTTL).UnixMilli(), ridHash, statusPending)
+		WHERE rid = ? AND offer <> '' AND status = ? AND expires_ms > ?`,
+		statusApproved, c.Home, c.Agent, c.Granted, c.Shard, now.Add(RequestTTL).UnixMilli(), ridHash, statusPending, now.UnixMilli())
 	if err != nil {
 		return err
 	}

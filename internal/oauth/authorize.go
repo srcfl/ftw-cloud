@@ -119,6 +119,10 @@ func (s *Server) serveAuthorize(w http.ResponseWriter, r *http.Request) {
 	if len(req.scope) == 0 {
 		req.scope = slices.Clone(ReadScopes)
 	}
+	chooseMode := !q.Has("scope")
+	if chooseMode {
+		req.scope = nil
+	}
 
 	// The agent's key pair comes first; only its public half leaves the
 	// keys part, to be shown to the owner and listed by the box.
@@ -145,9 +149,11 @@ func (s *Server) serveAuthorize(w http.ResponseWriter, r *http.Request) {
 		Resource: Resource, Kid: kid, AgentKey: pub, Created: now, Expires: now.Add(RequestTTL), Status: statusPending}
 	for try := 0; ; try++ {
 		con.Code = shortCode()
-		if con.Offer, err = s.signOffer(ctx, kid, buildOffer(con)); err != nil {
-			s.log.Warn("the keys part could not sign an offer", "err", err)
-			break
+		if !chooseMode {
+			if con.Offer, err = s.signOffer(ctx, kid, buildOffer(con)); err != nil {
+				s.log.Warn("the keys part could not sign an offer", "err", err)
+				break
+			}
 		}
 		err = s.st.putConsent(rid, browser, con)
 		if err == nil || try == 3 {
@@ -291,6 +297,10 @@ func (s *Server) serveRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	allowApp(w, r)
+	if c.Offer == "" {
+		writeJSON(w, http.StatusConflict, map[string]string{"status": "mode_required"}, false)
+		return
+	}
 	v := s.view(c)
 	v.Request = r.PathValue("rid")
 	writeJSON(w, http.StatusOK, v, false)

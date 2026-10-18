@@ -72,7 +72,7 @@ func TestSetupScopeUpgradePreservesReadsAndSignalsChatGPT(t *testing.T) {
 		}
 		meta, _ := result["_meta"].(map[string]any)
 		challenge := meta["mcp/www_authenticate"].([]any)[0].(string)
-		if challenge != r.Header.Get("WWW-Authenticate") || !strings.Contains(challenge, `scope="ftw.config.read ftw.setup.write"`) {
+		if challenge != r.Header.Get("WWW-Authenticate") || !strings.Contains(challenge, `scope="ftw.config.read ftw.diag.run ftw.setup.write"`) {
 			t.Fatal(challenge)
 		}
 	}
@@ -82,9 +82,22 @@ func TestSetupScopeUpgradePreservesReadsAndSignalsChatGPT(t *testing.T) {
 	for _, tool := range w.mcp.listing() {
 		if tool["name"] == "setup_edit" {
 			schemes := tool["securitySchemes"].([]map[string]any)
-			if schemes[0]["scopes"].([]string)[0] != oauth.ScopeSetupWrite {
+			if !slices.Equal(schemes[0]["scopes"].([]string), []string{oauth.ScopeDiagRun, oauth.ScopeSetupWrite}) {
 				t.Fatal(schemes)
 			}
 		}
+	}
+}
+
+func TestSetupWriteWithoutDiagnosticReadsRequestsBothRights(t *testing.T) {
+	w := newWorld(t)
+	b := w.connectBox()
+	a := w.connect(b, oauth.ScopeSetupWrite, oauth.ScopeSetupWrite)
+	r := a.rpc("tools/call", map[string]any{"name": "setup_edit", "arguments": map[string]any{"revision": 0, "patch": map[string]any{}}}, false)
+	if r.Status != http.StatusForbidden || !strings.Contains(r.Header.Get("WWW-Authenticate"), `scope="ftw.diag.run ftw.setup.write"`) {
+		t.Fatal("a write-only grant bypassed the setup read requirement", r.Status, r.Body)
+	}
+	if _, _, asked := b.counts(); len(asked) != 0 {
+		t.Fatal("a write-only setup reached the box", asked)
 	}
 }

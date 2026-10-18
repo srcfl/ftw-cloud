@@ -49,6 +49,10 @@ func (s *Server) serveInvite(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "This connection request ended. Connect again from your assistant.", http.StatusGone)
 		return
 	}
+	if c.Offer == "" {
+		http.Error(w, "Choose what this connection is for first.", http.StatusConflict)
+		return
+	}
 	var body struct {
 		Code string `json:"code"`
 	}

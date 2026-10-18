@@ -161,7 +161,16 @@ to it yet.
   as the socket connects, no redirects, no proxy, 16 KiB, 5 s, cached), or
   registers at `/oauth/register` (RFC 7591), kept for ChatGPT and older
   clients. There is no account and no password: `/oauth/authorize` asks
-  `ftwkeysd` for a new agent key and has it sign the grant offer
+  `ftwkeysd` for a new agent key. If the client omits `scope`, the original
+  browser first chooses read/troubleshoot or read/configure. Nothing exposes
+  the key, offer, QR or owner code before that choice. Configure adds
+  `ftw.setup.write` to the read scopes; neither choice adds control. An
+  explicit scope parameter keeps its existing meaning, including an explicitly
+  blank value. Only the original cookie and exact issuer Origin can save a
+  mode, once, without changing the key or deadline. Competing choices read
+  the saved result; a late signature cannot revive a cancelled request.
+  Signing uses the same global and address limits as authorization.
+  Then `ftwkeysd` signs the grant offer
   (srcfl/ftw `docs/agents.md`), sent as `{o, kid, sig}`: the key, the
   client, the host it is known by and whether FTW Cloud knows it, the
   scopes, ops and caps asked for, the page's code, and an end ten minutes
@@ -241,8 +250,13 @@ to it yet.
   and the readable copy is never an agent's: every read goes through the
   box, which audits it and enforces revoke. An agent row has no tunnel of
   its own. A call without its scope gets
-  403 `insufficient_scope`, so the client can ask the owner for more. Each
-  call rides the agent's own Noise session: `ftwkeysd` seals each frame and
+  403 `insufficient_scope`, so the client can ask the owner for more. A
+  setup write asks for both `ftw.diag.run` and `ftw.setup.write`, so a fresh
+  connection can read its schema and save receipt. Tool metadata and the
+  runtime OAuth challenge name the same scopes, as required by
+  [ChatGPT's authentication flow](https://developers.openai.com/plugins/build/auth#triggering-authentication-ui).
+  Existing token scopes stay in the request; no scope is granted by inference.
+  Each call rides the agent's own Noise session: `ftwkeysd` seals each frame and
   the door carries it as `tun`, one forward to the box. The door admits an
   agent row only to these sessions, never on `/v1/app` or `/v1/app/once`,
   and only before its end. A session stays warm for 60 s and calls on one
