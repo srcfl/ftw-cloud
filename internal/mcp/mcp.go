@@ -147,7 +147,7 @@ func New(auth Authenticator, p *pool, log *slog.Logger) *Server {
 	if log == nil {
 		log = slog.Default()
 	}
-	return &Server{auth: auth, pool: p, tools: append(readTools(), controlTools()...), log: log, inflight: make(chan struct{}, maxInflight)}
+	return &Server{auth: auth, pool: p, tools: append(append(readTools(), apiTools()...), controlTools()...), log: log, inflight: make(chan struct{}, maxInflight)}
 }
 
 // Path is where the server answers.
@@ -383,6 +383,11 @@ func (s *Server) call(w http.ResponseWriter, r *http.Request, id json.RawMessage
 	ctx := r.Context()
 	data, err := t.run(ctx, &callCtx{s: s, grant: g, rpcID: string(id)}, args)
 	if err != nil {
+		var scope apiScopeError
+		if errors.As(err, &scope) {
+			oauth.Challenge(w, oauth.InsufficientScope(string(scope)))
+			return
+		}
 		var ue userError
 		if !errors.As(err, &ue) {
 			s.log.Warn("a tool call failed", "tool", t.name, "err", err)

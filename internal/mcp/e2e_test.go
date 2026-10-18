@@ -140,19 +140,21 @@ type stubBox struct {
 	seq    uint64
 	rseq   uint64
 
-	mu         sync.Mutex
-	agents     map[string]*agentGrant // by device id
-	sessions   map[string]*boxSession
-	handshakes int
-	ends       int
-	frames     [][]byte // every decrypted frame, for the passthrough check
-	asked      []string // each request's type and body, in order
-	inflight   int
-	maxFlight  int
-	delay      time.Duration
-	cmds       []protocol.Cmd
-	cmdReply   func(protocol.Cmd) []any
-	requests   []protocol.AgentRequest
+	mu             sync.Mutex
+	agents         map[string]*agentGrant // by device id
+	sessions       map[string]*boxSession
+	handshakes     int
+	ends           int
+	frames         [][]byte // every decrypted frame, for the passthrough check
+	asked          []string // each request's type and body, in order
+	inflight       int
+	maxFlight      int
+	delay          time.Duration
+	cmds           []protocol.Cmd
+	cmdReply       func(protocol.Cmd) []any
+	apiBadSequence bool
+	apiUnsupported bool
+	requests       []protocol.AgentRequest
 	// noNoise is a box from before the agent contract: its roster names no
 	// Noise key.
 	noNoise bool
@@ -475,6 +477,46 @@ func (b *stubBox) handle(s *boxSession, env appwire.Envelope) {
 	case protocol.MsgAPIReq:
 		// The passthrough is priced for an owner, never for an agent.
 		b.reply(s, protocol.MsgError, env.ID, protocol.ErrorBody{Code: protocol.ErrScopeDenied})
+	case protocol.MsgAPIRead:
+		b.mu.Lock()
+		unsupported := b.apiUnsupported
+		b.mu.Unlock()
+		if unsupported {
+			b.reply(s, protocol.MsgError, env.ID, protocol.ErrorBody{Code: protocol.ErrScopeDenied})
+			return
+		}
+		var q protocol.APIRead
+		if err := protocol.Unmarshal(env.B, &q); err != nil {
+			b.t.Fatal(err)
+		}
+		route, ok := protocol.AgentAPIPath(q.Path)
+		if !ok || !slices.Contains(a.scopes, route.Scope) {
+			b.reply(s, protocol.MsgError, env.ID, protocol.ErrorBody{Code: protocol.ErrScopeDenied})
+			return
+		}
+		data := []byte(`{"scope":"asset","points":[{"asset_id":"opaque-asset","energy_wh":12,"source":"hardware_counter","quality":"measured","provenance":"counter","sample_count":2}],"counter":9007199254740993}`)
+		if q.Path == "/api/energy/assets" {
+			data = []byte(`{"assets":[{"asset_id":"opaque-asset","kind":"grid_meter"}]}`)
+		}
+		if q.Path == "/api/status" {
+			data, _ = json.Marshal(map[string]any{"text": strings.Repeat("x", 8000)})
+		}
+		truncated := int64(len(data)) > q.MaxBytes
+		if truncated {
+			data = data[:q.MaxBytes]
+		}
+		b.reply(s, protocol.MsgAPIHead, env.ID, protocol.APIHeadMsg{Status: 200, Headers: map[string]string{"Content-Type": "application/json"}})
+		cut := len(data) / 2
+		b.mu.Lock()
+		badSequence := b.apiBadSequence
+		b.mu.Unlock()
+		first := uint32(0)
+		if badSequence {
+			first = 1
+		}
+		b.reply(s, protocol.MsgAPIChunk, env.ID, protocol.APIChunk{Seq: first, Data: data[:cut]})
+		b.reply(s, protocol.MsgAPIChunk, env.ID, protocol.APIChunk{Seq: 1, Data: data[cut:]})
+		b.reply(s, protocol.MsgAPIEnd, env.ID, protocol.APIEnd{Bytes: int64(len(data)), Truncated: truncated})
 	case protocol.MsgLiveGet:
 		// The box's live body: field ids, and a source whose text is a
 		// device's to write.
