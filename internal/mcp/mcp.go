@@ -160,6 +160,10 @@ func New(auth Authenticator, p *pool, log *slog.Logger) *Server {
 const Path = "/mcp"
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if !profileValid(r) {
+		writeRPCError(w, http.StatusBadRequest, nil, codeInvalidParams, "Unknown or repeated MCP profile", nil)
+		return
+	}
 	if !originAllowed(r.Header.Get("Origin")) {
 		writeRPCError(w, http.StatusForbidden, nil, codeInvalidRequest, "origin not allowed", nil)
 		return
@@ -185,7 +189,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	_ = http.NewResponseController(w).SetReadDeadline(time.Now().Add(10 * time.Second))
 	grant, aerr := s.auth.Authenticate(r)
 	if aerr != nil {
-		oauth.Challenge(w, aerr)
+		oauth.Challenge(w, profileAuthError(r, aerr))
 		return
 	}
 	if !s.limit.allow(grant.Subject.Home+"/"+grant.Subject.Agent, s.now()) {
@@ -265,12 +269,12 @@ func (s *Server) modern(w http.ResponseWriter, r *http.Request, req *rpcRequest,
 		writeResult(w, req.ID, true, map[string]any{
 			"supportedVersions": append([]string{Modern}, legacyVersions...),
 			"capabilities":      map[string]any{"tools": map[string]any{"listChanged": false}},
-			"instructions":      Instructions,
+			"instructions":      profileInstructions(r),
 		})
 	case "ping":
 		writeResult(w, req.ID, true, map[string]any{})
 	case "tools/list":
-		writeResult(w, req.ID, true, map[string]any{"tools": s.listing()})
+		writeResult(w, req.ID, true, map[string]any{"tools": s.profileListing(r)})
 	case "tools/call":
 		var p callParams
 		if json.Unmarshal(req.Params, &p) != nil || p.Name == "" {
@@ -335,12 +339,12 @@ func (s *Server) legacy(w http.ResponseWriter, r *http.Request, req *rpcRequest,
 			"protocolVersion": version,
 			"capabilities":    map[string]any{"tools": map[string]any{"listChanged": false}},
 			"serverInfo":      map[string]any{"name": ServerName, "title": ServerTitle, "version": ServerVersion},
-			"instructions":    Instructions,
+			"instructions":    profileInstructions(r),
 		})
 	case "ping":
 		writeResult(w, req.ID, false, map[string]any{})
 	case "tools/list":
-		writeResult(w, req.ID, false, map[string]any{"tools": s.listing()})
+		writeResult(w, req.ID, false, map[string]any{"tools": s.profileListing(r)})
 	case "tools/call":
 		var p callParams
 		if json.Unmarshal(req.Params, &p) != nil || p.Name == "" {
@@ -364,6 +368,9 @@ type callParams struct {
 
 func (s *Server) call(w http.ResponseWriter, r *http.Request, id json.RawMessage, p callParams, g *oauth.Grant, modern bool) {
 	t := s.tool(p.Name)
+	if publicProfile(r) && !publicTool(p.Name) {
+		t = nil
+	}
 	if t == nil {
 		status := http.StatusOK
 		if modern {
