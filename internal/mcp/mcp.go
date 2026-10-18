@@ -92,6 +92,7 @@ type Server struct {
 	pool  *pool
 	tools []*tool
 	log   *slog.Logger
+	now   func() time.Time
 	// Elsewhere is where a request for a home another instance holds goes
 	// (shard.Directory): the whole request, sent on inside FTW Cloud, since
 	// an assistant's client does not follow a wrong-shard answer. Nil, or a
@@ -152,7 +153,7 @@ func New(auth Authenticator, p *pool, log *slog.Logger) *Server {
 	if log == nil {
 		log = slog.Default()
 	}
-	return &Server{auth: auth, pool: p, tools: append(append(append(readTools(), apiTools()...), setupTools()...), controlTools()...), log: log, inflight: make(chan struct{}, maxInflight)}
+	return &Server{auth: auth, pool: p, tools: append(append(append(readTools(), apiTools()...), setupTools()...), controlTools()...), log: log, now: time.Now, inflight: make(chan struct{}, maxInflight)}
 }
 
 // Path is where the server answers.
@@ -187,7 +188,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		oauth.Challenge(w, aerr)
 		return
 	}
-	if !s.limit.allow(grant.Subject.Home+"/"+grant.Subject.Agent, time.Now()) {
+	if !s.limit.allow(grant.Subject.Home+"/"+grant.Subject.Agent, s.now()) {
 		w.Header().Set("Retry-After", "1")
 		writeRPCError(w, http.StatusTooManyRequests, nil, codeInternal, "too many requests; slow down", nil)
 		return
