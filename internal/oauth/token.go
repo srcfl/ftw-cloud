@@ -209,17 +209,6 @@ func (s *Server) refresh(w http.ResponseWriter, r *http.Request, cl client) {
 		tokenError(w, http.StatusBadRequest, "invalid_grant", "the refresh token is not valid")
 		return
 	}
-	fresh, err := s.st.rotate(tok, s.now())
-	if err != nil {
-		tokenError(w, http.StatusInternalServerError, "server_error", "could not refresh")
-		return
-	}
-	if !fresh {
-		// A refresh token used twice: one of the two holders stole it.
-		_ = s.st.revokeFamily(t.Family)
-		tokenError(w, http.StatusBadRequest, "invalid_grant", "the refresh token was used before")
-		return
-	}
 	scope := t.Scope
 	if asked := splitScope(r.PostForm.Get("scope")); len(asked) > 0 {
 		have := splitScope(t.Scope)
@@ -230,6 +219,17 @@ func (s *Server) refresh(w http.ResponseWriter, r *http.Request, cl client) {
 			}
 		}
 		scope = strings.Join(asked, " ")
+	}
+	fresh, err := s.st.rotate(tok, s.now())
+	if err != nil {
+		tokenError(w, http.StatusInternalServerError, "server_error", "could not refresh")
+		return
+	}
+	if !fresh {
+		// A refresh token used twice: one of the two holders stole it.
+		_ = s.st.revokeFamily(t.Family)
+		tokenError(w, http.StatusBadRequest, "invalid_grant", "the refresh token was used before")
+		return
 	}
 	a, ok, err := s.st.agent(t.Home, t.Agent)
 	if err != nil || !ok || s.agentGone(a) {
@@ -396,7 +396,7 @@ func (s *Server) Authenticate(r *http.Request) (*Grant, *AuthError) {
 
 // Challenge writes a 401 or 403 with its WWW-Authenticate header, and a
 // JSON body for clients that show one.
-func Challenge(w http.ResponseWriter, e *AuthError) {
+func ChallengeValue(e *AuthError) string {
 	parts := []string{fmt.Sprintf("resource_metadata=%q", ResourceMetadataURL)}
 	if e.Code != "" {
 		parts = append(parts, fmt.Sprintf("error=%q", e.Code))
@@ -407,7 +407,11 @@ func Challenge(w http.ResponseWriter, e *AuthError) {
 	if e.Scope != "" {
 		parts = append(parts, fmt.Sprintf("scope=%q", e.Scope))
 	}
-	w.Header().Set("WWW-Authenticate", "Bearer "+strings.Join(parts, ", "))
+	return "Bearer " + strings.Join(parts, ", ")
+}
+
+func Challenge(w http.ResponseWriter, e *AuthError) {
+	w.Header().Set("WWW-Authenticate", ChallengeValue(e))
 	body := map[string]string{"error": e.Code, "error_description": e.Desc}
 	if e.Code == "" {
 		body = map[string]string{"error": "unauthorized", "error_description": "a bearer token from " + Issuer + " is required"}

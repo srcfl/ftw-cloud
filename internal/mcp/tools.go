@@ -90,11 +90,18 @@ func (s *Server) tool(name string) *tool {
 func (s *Server) listing() []map[string]any {
 	out := make([]map[string]any, 0, len(s.tools))
 	for _, t := range s.tools {
+		scopes := []string{}
+		if t.scope != "" {
+			scopes = append(scopes, t.scope)
+		}
+		schemes := []map[string]any{{"type": "oauth2", "scopes": scopes}}
 		out = append(out, map[string]any{
-			"name":        t.name,
-			"title":       t.title,
-			"description": t.description,
-			"inputSchema": t.input,
+			"name":            t.name,
+			"title":           t.title,
+			"description":     t.description,
+			"inputSchema":     t.input,
+			"securitySchemes": schemes,
+			"_meta":           map[string]any{"securitySchemes": schemes},
 			"annotations": map[string]any{
 				"title":           t.title,
 				"readOnlyHint":    t.readOnly,

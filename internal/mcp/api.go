@@ -125,6 +125,10 @@ func diagnosticAPIRead(ctx context.Context, cc *callCtx, read protocol.APIRead) 
 // apiRead collects the bounded api.* stream. A missing head, a skipped
 // sequence or a truncated end never becomes a successful partial answer.
 func (c *agentConn) apiRead(ctx context.Context, q protocol.APIRead) (protocol.APIHeadMsg, []byte, error) {
+	return c.apiStream(ctx, protocol.MsgAPIRead, q)
+}
+
+func (c *agentConn) apiStream(ctx context.Context, message string, bodyValue any) (protocol.APIHeadMsg, []byte, error) {
 	release, err := c.take(ctx)
 	if err != nil {
 		return protocol.APIHeadMsg{}, nil, err
@@ -133,7 +137,7 @@ func (c *agentConn) apiRead(ctx context.Context, q protocol.APIRead) (protocol.A
 	id := c.newID()
 	ch := c.register(id)
 	defer c.unregister(id)
-	if err := c.send(ctx, protocol.MsgAPIRead, &id, q); err != nil {
+	if err := c.send(ctx, message, &id, bodyValue); err != nil {
 		return protocol.APIHeadMsg{}, nil, err
 	}
 	var head protocol.APIHeadMsg

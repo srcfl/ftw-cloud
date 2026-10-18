@@ -154,6 +154,7 @@ type stubBox struct {
 	cmdReply       func(protocol.Cmd) []any
 	apiBadSequence bool
 	apiUnsupported bool
+	setupLoseReply bool
 	apiStarted     chan struct{}
 	apiRelease     chan struct{}
 	requests       []protocol.AgentRequest
@@ -457,6 +458,10 @@ func (b *stubBox) handle(s *boxSession, env appwire.Envelope) {
 		b.reply(s, protocol.MsgError, env.ID, protocol.ErrorBody{Code: protocol.ErrScopeDenied})
 		return
 	}
+	if sc, ok := protocol.RegistryAgentCalls[env.T]; ok && !slices.Contains(a.scopes, sc) {
+		b.reply(s, protocol.MsgError, env.ID, protocol.ErrorBody{Code: protocol.ErrScopeDenied})
+		return
+	}
 	// A request is in flight while the box works on it, until it starts
 	// to answer. hello is the session's opening, not a request.
 	if env.T != protocol.MsgHello {
@@ -472,6 +477,29 @@ func (b *stubBox) handle(s *boxSession, env appwire.Envelope) {
 	}
 	now := time.Now()
 	switch env.T {
+	case protocol.MsgSetupSchema, protocol.MsgSetupStatus, protocol.MsgSetupEdit, protocol.MsgSetupReset, protocol.MsgSetupValidate, protocol.MsgSetupCommit, protocol.MsgSetupRestart:
+		call, err := protocol.DecodeSetupCall(env.B)
+		if err != nil {
+			b.reply(s, protocol.MsgError, env.ID, protocol.ErrorBody{Code: protocol.ErrUnknownOp})
+			return
+		}
+		status := 200
+		var request map[string]any
+		_ = json.Unmarshal(call.JSON, &request)
+		if (env.T == protocol.MsgSetupCommit || env.T == protocol.MsgSetupRestart) && request["confirmed"] != true {
+			status = 400
+		}
+		data, _ := json.Marshal(map[string]any{"operation": env.T, "received": json.RawMessage(call.JSON), "saved": env.T == protocol.MsgSetupCommit && status == 200, "hardware_verified": false})
+		b.mu.Lock()
+		lose := b.setupLoseReply
+		b.mu.Unlock()
+		if lose && status == 200 && (env.T == protocol.MsgSetupCommit || env.T == protocol.MsgSetupRestart) {
+			_ = b.conn.Close()
+			return
+		}
+		b.reply(s, protocol.MsgAPIHead, env.ID, protocol.APIHeadMsg{Status: status, Headers: map[string]string{"Content-Type": "application/json"}})
+		b.reply(s, protocol.MsgAPIChunk, env.ID, protocol.APIChunk{Seq: 0, Data: data})
+		b.reply(s, protocol.MsgAPIEnd, env.ID, protocol.APIEnd{Bytes: int64(len(data))})
 	case protocol.MsgHello:
 		b.reply(s, protocol.MsgHelloOK, nil, protocol.HelloOK{Proto: 1, Mode: protocol.BoxModeReadonly,
 			Box:   protocol.BoxInfo{ID: "box", Build: "v0.140.1-e2e", TZ: "Europe/Stockholm"},

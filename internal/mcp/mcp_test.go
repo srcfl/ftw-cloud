@@ -385,7 +385,7 @@ func TestStepUp(t *testing.T) {
 	}
 	r := a.rpc("tools/call", map[string]any{"name": "plan_get"}, true)
 	h := r.Header.Get("WWW-Authenticate")
-	if r.Status != 403 || !strings.Contains(h, `error="insufficient_scope"`) || !strings.Contains(h, `scope="`+oauth.ScopePlanRead+`"`) {
+	if r.Status != 403 || !strings.Contains(h, `error="insufficient_scope"`) || !strings.Contains(h, `scope="`+oauth.ScopeLiveRead+` `+oauth.ScopePlanRead+`"`) {
 		t.Fatalf("step-up: %d %s", r.Status, h)
 	}
 	if _, _, p := b.counts(); len(p) != 0 {
@@ -625,6 +625,10 @@ func TestADropDuringOpenLeaksNothing(t *testing.T) {
 // on the earlier path too; and each agent's requests are limited.
 func TestUnsupportedVersionsAndTheRateLimit(t *testing.T) {
 	w := newWorld(t)
+	// A larger tool listing or a slow race build must not refill the bucket
+	// while this test measures its burst allowance.
+	now := time.Now()
+	w.mcp.now = func() time.Time { return now }
 	b := w.connectBox()
 	a := w.connect(b, "")
 	req, _ := http.NewRequest(http.MethodPost, w.srv.URL+Path, strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`))

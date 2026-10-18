@@ -85,6 +85,7 @@ const (
 	ScopeLogsRead     = protocol.ScopeLogsRead
 	ScopeConfigRead   = protocol.ScopeConfigRead
 	ScopeDiagRun      = protocol.ScopeDiagRun
+	ScopeSetupWrite   = protocol.ScopeSetupWrite
 	ScopeDispatchHold = protocol.ScopeDispatchHold
 	ScopeGoalsRequest = protocol.ScopeGoalsRequest
 )
@@ -97,7 +98,7 @@ var ReadScopes = []string{ScopeLiveRead, ScopePlanRead, ScopeHistoryRead, ScopeH
 var ControlScopes = []string{ScopeDispatchHold, ScopeGoalsRequest}
 
 // AllScopes is every scope a client may ask for.
-var AllScopes = append(slices.Clone(ReadScopes), ControlScopes...)
+var AllScopes = append(append(slices.Clone(ReadScopes), ControlScopes...), ScopeSetupWrite)
 
 // scopeWords says what each scope lets an assistant do, for the consent
 // page.
@@ -110,6 +111,7 @@ var scopeWords = map[string]string{
 	ScopeLogsRead:     "Read the box's logs, with secrets removed",
 	ScopeConfigRead:   "Read the settings, with secrets removed",
 	ScopeDiagRun:      "Read full technical diagnostics, source, logs and backups; backups can contain saved credentials",
+	ScopeSetupWrite:   "Save the exact setup draft you confirm, including equipment and electrical limits, and restart to apply it when you confirm",
 	ScopeDispatchHold: "Hold the battery or charge the car for a short, capped time",
 	ScopeGoalsRequest: "Ask for changes to goals and schedules, which wait for your yes",
 }
