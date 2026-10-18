@@ -29,10 +29,10 @@ func apiTools() []*tool {
 		},
 		{
 			name: "api_read", title: "Read full technical diagnostic data",
-			description: "Use during technical troubleshooting after api_catalog. Read any listed path, replacing {id} or {name} with the real value returned by the box. Technical names, addresses, exact numbers, source code and provenance stay intact. Use /api/support/report for an overview; /api/energy/history for Wh and provenance; /api/series for original measurements; /api/mpc/diagnose/history then /api/mpc/diagnose/at for incident planning. JSON, CSV, text and binary exports are supported. Large answers have byte pages: pass next_offset as offset and sha256 as if_sha256 to detect changed data. For ZIP or tar.gz exports, use archive_member '.' to list files, then a listed member name to read its contents as text. Binary pages use base64. Time parameters accept Unix milliseconds or RFC 3339 with a timezone. Reads use the existing handlers; controls and settings use their command tools." + dataNote,
+			description: "Use during technical troubleshooting after api_catalog. Read any listed path, replacing {id} or {name} with the URL-encoded real value returned by the box. Technical names, addresses, exact numbers, source code and provenance stay intact. Use /api/support/report for an overview; /api/energy/history for Wh and provenance; /api/series for original measurements; /api/mpc/diagnose/history then /api/mpc/diagnose/at for incident planning. JSON, CSV, text and binary exports are supported. Large answers have byte pages: pass next_offset as offset and sha256 as if_sha256 to detect changed data. For ZIP or tar.gz exports, use archive_member '.' to list files, then a listed member name to read its contents as text. Binary pages use base64. Time parameters accept Unix milliseconds or RFC 3339 with a timezone. Reads use the existing handlers; controls and settings use their command tools." + dataNote,
 			scope:       readScope(protocol.MsgAPIRead), readOnly: true,
 			input: object(map[string]any{
-				"path":           map[string]any{"type": "string", "description": "Path from the connected box's api_catalog; fill path parameters"},
+				"path":           map[string]any{"type": "string", "description": "Path from api_catalog; URL-encode each path parameter"},
 				"query":          map[string]any{"type": "object", "additionalProperties": map[string]any{"type": "string"}, "description": "Existing API query parameters; all values are strings"},
 				"max_bytes":      integer("Source bytes per page; larger answers return next_offset", 4096, protocol.AgentAPIPageBytes, 64<<10),
 				"offset":         integer("Byte offset from next_offset", 0, 9007199254740991, 0),
@@ -52,7 +52,7 @@ func apiTools() []*tool {
 					return nil, err
 				}
 				if !protocol.ValidAgentAPIPath(a.Path) {
-					return nil, userError("Choose a path from api_catalog, without a query string or encoded path separators.")
+					return nil, userError("Choose a path from api_catalog without a query string or fragment. URL-encode each path parameter.")
 				}
 				if a.Offset < 0 {
 					return nil, userError("offset must be zero or a next_offset returned by the box.")

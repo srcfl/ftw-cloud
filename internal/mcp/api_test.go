@@ -149,3 +149,18 @@ func TestDiagnosticArchiveMemberArgumentReachesTheBox(t *testing.T) {
 		t.Fatalf("archive member: %s", text)
 	}
 }
+
+func TestDiagnosticReadAcceptsEncodedDriverPathParameters(t *testing.T) {
+	w := newWorld(t)
+	b := w.connectBox()
+	a := w.connect(b, oauth.ScopeDiagRun)
+	path := "/api/drivers/EV%20charger%2Fgarage/logs"
+	_, isErr, text := a.call("api_read", map[string]any{"path": path})
+	if isErr {
+		t.Fatal(text)
+	}
+	_, _, asked := b.counts()
+	if !strings.Contains(strings.Join(asked, "\n"), path) {
+		t.Fatal("encoded parameter changed before reaching the box")
+	}
+}
