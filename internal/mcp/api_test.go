@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/srcfl/ftw-cloud/internal/oauth"
 	"github.com/srcfl/ftw/go/protocol"
@@ -162,5 +163,54 @@ func TestDiagnosticReadAcceptsEncodedDriverPathParameters(t *testing.T) {
 	_, _, asked := b.counts()
 	if !strings.Contains(strings.Join(asked, "\n"), path) {
 		t.Fatal("encoded parameter changed before reaching the box")
+	}
+}
+
+func TestAWorkingDiagnosticExportOutlivesStatusTimeoutAndIdleSweep(t *testing.T) {
+	w := newWorld(t)
+	b := w.connectBox()
+	a := w.connect(b, oauth.ScopeDiagRun)
+	if _, isErr, text := a.call("api_catalog", nil); isErr {
+		t.Fatal(text)
+	}
+	w.pool.Call = 100 * time.Millisecond
+	started, release := make(chan struct{}), make(chan struct{})
+	b.mu.Lock()
+	b.apiStarted, b.apiRelease = started, release
+	b.mu.Unlock()
+	type result struct {
+		isErr bool
+		text  string
+	}
+	done := make(chan result, 1)
+	go func() {
+		_, isErr, text := a.call("api_read", map[string]any{"path": "/api/research/load/dump"})
+		done <- result{isErr, text}
+	}()
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		close(release)
+		t.Fatal("export did not start")
+	}
+	// A long-running read has sent no frames for more than the idle window.
+	// Sweep the real warm session while the fake box still holds its answer.
+	w.pool.mu.Lock()
+	for _, conn := range w.pool.conns {
+		conn.mu.Lock()
+		conn.used = w.pool.now().Add(-2 * w.pool.Idle)
+		conn.mu.Unlock()
+	}
+	w.pool.mu.Unlock()
+	w.pool.sweep()
+	time.Sleep(200 * time.Millisecond)
+	close(release)
+	select {
+	case got := <-done:
+		if got.isErr || !strings.Contains(got.text, "energy_wh") {
+			t.Fatalf("working export was cut off: %s", got.text)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("export did not finish")
 	}
 }

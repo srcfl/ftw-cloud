@@ -101,7 +101,7 @@ func diagnosticAPIRead(ctx context.Context, cc *callCtx, read protocol.APIRead) 
 	if err != nil {
 		return nil, err
 	}
-	ctx, cancel := context.WithTimeout(ctx, cc.s.pool.Call)
+	ctx, cancel := context.WithTimeout(ctx, protocol.AgentAPIReadTimeout)
 	defer cancel()
 	head, body, err := conn.apiRead(ctx, read)
 	if err != nil {

@@ -320,7 +320,7 @@ func (c *agentConn) ended() bool {
 func (c *agentConn) idleSince(now time.Time) time.Duration {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.queued > 0 {
+	if c.queued > 0 || len(c.turn) > 0 {
 		return 0
 	}
 	return now.Sub(c.used)

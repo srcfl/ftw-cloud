@@ -154,6 +154,8 @@ type stubBox struct {
 	cmdReply       func(protocol.Cmd) []any
 	apiBadSequence bool
 	apiUnsupported bool
+	apiStarted     chan struct{}
+	apiRelease     chan struct{}
 	requests       []protocol.AgentRequest
 	// noNoise is a box from before the agent contract: its roster names no
 	// Noise key.
@@ -484,6 +486,15 @@ func (b *stubBox) handle(s *boxSession, env appwire.Envelope) {
 		if unsupported {
 			b.reply(s, protocol.MsgError, env.ID, protocol.ErrorBody{Code: protocol.ErrScopeDenied})
 			return
+		}
+		b.mu.Lock()
+		started, release := b.apiStarted, b.apiRelease
+		b.mu.Unlock()
+		if started != nil {
+			close(started)
+		}
+		if release != nil {
+			<-release
 		}
 		var q protocol.APIRead
 		if err := protocol.Unmarshal(env.B, &q); err != nil {

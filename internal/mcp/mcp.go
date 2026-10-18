@@ -191,6 +191,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxBody+1))
+	// The deadline protects the request body, not a long diagnostic export.
+	_ = http.NewResponseController(w).SetReadDeadline(time.Time{})
 	if err != nil || len(body) > maxBody {
 		writeRPCError(w, http.StatusRequestEntityTooLarge, nil, codeInvalidRequest, "request too large", nil)
 		return
