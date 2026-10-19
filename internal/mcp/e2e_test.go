@@ -157,6 +157,7 @@ type stubBox struct {
 	delay          time.Duration
 	cmds           []protocol.Cmd
 	cmdReply       func(protocol.Cmd) []any
+	apiReply       func(protocol.APIRead) (int, []byte)
 	apiBadSequence bool
 	apiUnsupported bool
 	setupLoseReply bool
@@ -577,6 +578,12 @@ func (b *stubBox) handle(s *boxSession, env appwire.Envelope) {
 		}
 		if q.Path == "/api/test/metadata" {
 			data = []byte(`{"path":"device original path","status":"faulted","counter":9007199254740993}`)
+		}
+		b.mu.Lock()
+		apiReply := b.apiReply
+		b.mu.Unlock()
+		if apiReply != nil {
+			status, data = apiReply(q)
 		}
 		// This deliberately broken stub truncates a wire answer; real Core
 		// returns explicit byte pages within the wire bound instead.

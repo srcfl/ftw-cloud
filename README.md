@@ -231,13 +231,19 @@ to it yet.
   clients of 2025-03-26 to 2025-11-25 that start with `initialize`, without
   session ids or a GET stream. The read tools are `homes_list`, `status`,
   `chargers_list`, `cars_list`, `plan_get`, `plan_explain`,
-  `history_query`, `health_get`, `events_list`, `logs_tail` (both with
-  before and after cursors), `drivers_status`, `config_get` and
-  `diag_run` (names any model API accepts), each with typed arguments, each one of the box's own reads for
-  agents (`live.get`, `loadpoints.get`, `cars.get`, `plan.get`, `price.get`,
-  `hist.query`, `health.get`, `events.get`, `logs.get`, `config.get`,
-  `diag.run`, `drivers.get`; srcfl/ftw `docs/agents.md`), under the scope
-  the registry names for it. `status` keeps the box's `live` body as it
+  `history_query`, `health_get`, `logs_tail` (with before/after cursors),
+  `drivers_status`, `config_get` and `measurement_diagnostics`, each with
+  typed arguments and the scope its box operation requires.
+  `measurement_diagnostics` needs the owner's diagnostic grant. Both MCP
+  profiles offer its fixed, read-only views of measurement reasons, saved
+  charger associations, energy provenance and stored series. Names and
+  hardware identifiers become opaque selections; other private fields stay
+  out. Refresh the catalogue after a service restart. No arbitrary path,
+  settings write, control or credential export is accepted by this tool.
+  `diag_run` and `events_list` are not listed until Core serves them. Cached
+  calls get an explicit unsupported result and never reach Core.
+  Full technical reads remain separate through `api_catalog` / `api_read`
+  on the technical profile. `status` keeps the box's `live` body as it
   is, keyed by field id, and adds `readings`: each field by its registry
   name (`grid_w`, `pv_w`, `battery_soc`, ...) with its unit, sources, state
   and age, and any id the registry does not name under `unknownFields`.
