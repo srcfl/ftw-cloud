@@ -47,7 +47,7 @@ func controlTools() []*tool {
 	return []*tool{
 		{
 			name: "ev_charge_now", title: "Charge the car now", destructive: true,
-			description: "Charge the car at one charger now, at a fixed power, for a few minutes within the caps the owner granted (see homes_list), or release this assistant's own hold with stop. It ends by itself; call again to renew. An owner's own hold wins. For a car that must be full by a time, use goal_request.",
+			description: "Charge the car at one charger now, at a fixed power, for a few minutes within the caps the owner granted (see homes_list), or release this assistant's own hold with stop. It ends by itself; call again to renew. An owner's own hold wins. For a car that must reach a charge level by a time, use car_goal_request.",
 			scope:       oauth.ScopeDispatchHold,
 			input: object(map[string]any{
 				"loadpoint":  map[string]any{"type": "string", "pattern": idPattern.String(), "description": "The charger's id, from chargers_list"},
@@ -104,7 +104,7 @@ func controlTools() []*tool {
 			name:  "goal_request",
 			title: "Ask for a lasting change",
 			description: "Ask the owner for a lasting change: the home's mode, the planning style, solar-only charging at a charger, or a correction of the car's charge level. " +
-				"Nothing changes until an owner confirms it in the FTW app; requests_list shows how it ended. Put your reason, in your own words, in why.",
+				"Nothing changes until an owner confirms it in Settings → Access on the local box or in the FTW app; requests_list shows how it ended. Put your reason, in your own words, in why.",
 			scope: oauth.ScopeGoalsRequest,
 			input: object(map[string]any{
 				"kind":           enum("What to change", "mode", "planning", "surplus_only", "car_charge_level"),
@@ -184,6 +184,7 @@ func controlTools() []*tool {
 				return cc.request(ctx, protocol.AgentRequest{Op: op, Args: body, Why: clean(a.Why)})
 			},
 		},
+		carGoalTool(),
 		{
 			name: "requests_list", title: "My requests",
 			description: "This assistant's own grant on the box and the lasting changes it asked for, with how each ended: pending, approved, declined or expired." + dataNote,
@@ -206,7 +207,7 @@ func controlTools() []*tool {
 func (cc *callCtx) withinGrant(op string, args map[string]any) error {
 	g := cc.grant
 	if !slices.Contains(g.Ops, op) {
-		return userError(fmt.Sprintf("The owner's grant does not include %s. The owner can add it in the FTW app.", op))
+		return userError(fmt.Sprintf("The owner's grant does not include %s. The owner can add it in Settings → Access on the local box or in the FTW app.", op))
 	}
 	spec, ok := protocol.RegistryAgentArgs[op]
 	if !ok {
@@ -236,7 +237,7 @@ func (cc *callCtx) withinGrant(op string, args map[string]any) error {
 func checkArg(a protocol.AgentArg, v any, caps protocol.Caps) error {
 	bad := func(why string) error { return userError(fmt.Sprintf("%s %s.", a.Name, why)) }
 	switch a.Kind {
-	case "loadpoint", "mode":
+	case "loadpoint", "mode", "car":
 		if s, ok := v.(string); !ok || !idPattern.MatchString(s) {
 			return bad("must be an id the box gave")
 		}
@@ -293,7 +294,7 @@ func (cc *callCtx) request(ctx context.Context, r protocol.AgentRequest) (any, e
 		return nil, err
 	}
 	return map[string]any{"request": ok, "waitsForOwner": true,
-		"note": "Nothing changes until an owner confirms it in the FTW app. requests_list shows how it ended."}, nil
+		"note": "Nothing changes until an owner confirms it in Settings → Access on the local box or in the FTW app. requests_list shows how it ended."}, nil
 }
 
 // command sends one cmd and waits for what the box did. The box checks it

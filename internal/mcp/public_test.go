@@ -53,7 +53,8 @@ func TestPublicProfileLimitsListingAndExecution(t *testing.T) {
 	b := w.connectBox()
 	a := w.connect(b, "")
 	want := []string{"homes_list", "status", "chargers_list", "cars_list", "plan_get", "plan_explain",
-		"history_query", "measurement_diagnostics", "health_get", "logs_tail", "drivers_status", "config_get", "ev_charge_now", "goal_request", "requests_list"}
+		"history_query", "measurement_diagnostics", "health_get", "logs_tail", "drivers_status", "config_get", "ev_charge_now", "goal_request", "car_goal_request", "requests_list",
+		"setup_begin", "setup_schema", "setup_status", "setup_edit", "setup_reset", "setup_validate", "setup_commit", "setup_restart", "setup_discover", "setup_test", "setup_connect"}
 	slices.Sort(want)
 	for _, modern := range []bool{false, true} {
 		method := "initialize"
@@ -62,7 +63,7 @@ func TestPublicProfileLimitsListingAndExecution(t *testing.T) {
 		}
 		intro := profileRPC(t, a, "?profile=public", method, nil, modern)
 		instructions := intro.Body["result"].(map[string]any)["instructions"].(string)
-		if instructions != publicInstructions || strings.Contains(instructions, "api_catalog") || strings.Contains(instructions, "setup_commit") {
+		if instructions != publicInstructions || strings.Contains(instructions, "api_catalog") || !strings.Contains(instructions, "Start assistant setup") {
 			t.Fatal("public instructions expose unavailable tools", intro)
 		}
 		listed := profileRPC(t, a, "?profile=public", "tools/list", nil, modern)
@@ -81,7 +82,7 @@ func TestPublicProfileLimitsListingAndExecution(t *testing.T) {
 		if !slices.Equal(names, want) {
 			t.Fatalf("public tools: %v", names)
 		}
-		for _, blocked := range []string{"api_catalog", "api_read", "setup_schema", "setup_commit"} {
+		for _, blocked := range []string{"api_catalog", "api_read"} {
 			reply := profileRPC(t, a, "?profile=public", "tools/call", map[string]any{"name": blocked, "arguments": map[string]any{}}, modern)
 			if reply.Body["error"] == nil || reply.Body["result"] != nil {
 				t.Fatal("unlisted tool executed", blocked, reply)
