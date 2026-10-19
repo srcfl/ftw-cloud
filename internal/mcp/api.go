@@ -18,7 +18,7 @@ func apiTools() []*tool {
 	return []*tool{
 		{
 			name: "api_catalog", title: "Start technical troubleshooting",
-			description: "For technical troubleshooting, start here. Ask the connected box for every diagnostic read it supports, its running version, source-code links and a workflow for collecting bug-report evidence. Includes energy logs, original measurements, planner snapshots, configuration, driver source, logs, support reports and exports. Ordinary status, history and control use the existing tools. The owner-approved diagnostic grant covers these reads; there are no extra endpoint permissions." + dataNote,
+			description: "For technical troubleshooting, start here. Ask the connected box for every diagnostic read it supports, its running version, source-code links and a workflow for collecting bug-report evidence. Newer boxes include charger_connections with exact saved driver names and configured, missing or unverified_ocpp status; configured means a name matches, not verified equipment. Includes energy logs, original measurements, planner snapshots, configuration, driver source, logs, support reports and exports. The basic config_get and drivers_status tools redact names and cannot verify charger bindings. Ordinary status, history and control use the existing tools. The owner-approved diagnostic grant covers these reads; there are no extra endpoint permissions." + dataNote,
 			scope:       readScope(protocol.MsgAPIRead), input: object(nil), readOnly: true,
 			run: func(ctx context.Context, cc *callCtx, args json.RawMessage) (any, error) {
 				if err := decodeArgs(args, &struct{}{}); err != nil {
@@ -119,7 +119,11 @@ func diagnosticAPIRead(ctx context.Context, cc *callCtx, read protocol.APIRead) 
 	}
 	// Preserve the box's technical evidence, including exact json.Number
 	// values. Existing typed reads retain their own display sanitization.
-	return map[string]any{"path": read.Path, "status": head.Status, "response": data}, nil
+	result := map[string]any{"path": read.Path, "status": head.Status, "response": data}
+	if head.Status >= 400 {
+		return failedToolData{result}, nil
+	}
+	return result, nil
 }
 
 // apiRead collects the bounded api.* stream. A missing head, a skipped

@@ -403,7 +403,7 @@ func readTools() []*tool {
 		},
 		{
 			name: "config_get", title: "Settings",
-			description: "The box's configuration, redacted on the box: secrets, addresses and names removed. Without a section, the list of sections; with one, that section." + dataNote,
+			description: "A basic redacted settings overview. Secrets, addresses and names are removed or changed, so this result cannot verify a charger's exact driver binding. Full technical diagnostic reads, when this connection provides them, are needed for that comparison. Otherwise state what you cannot verify rather than attributing a fault to a driver. Without a section, the list of sections; with one, that section." + dataNote,
 			scope:       readScope(protocol.MsgConfigGet), readOnly: true,
 			input: object(map[string]any{
 				"section": map[string]any{"type": "string", "pattern": sectionName.String(), "maxLength": 64, "description": "One section, from the list. Leave out for the list."},

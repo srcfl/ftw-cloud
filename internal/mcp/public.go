@@ -16,6 +16,7 @@ const publicInstructions = "FTW reaches one home's box with its owner's approval
 	"from fresh measurements, power in W from energy in Wh, and plans from measured outcomes. " +
 	"Control needs a separate grant and the user's request; lasting changes wait for the owner. " +
 	"This connection cannot run arbitrary API reads, export backups or configure an installation. " +
+	"Redacted settings cannot verify exact charger-to-driver bindings; state that limit rather than guessing a driver fault. " +
 	"For a new installation, guide the user through FTW's maintained install documentation."
 
 // publicTool is an explicit list: a new tool needs review before this profile
