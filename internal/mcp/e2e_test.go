@@ -551,6 +551,21 @@ func (b *stubBox) handle(s *boxSession, env appwire.Envelope) {
 		if q.Path == "/api/status" {
 			data, _ = json.Marshal(map[string]any{"text": strings.Repeat("x", 8000)})
 		}
+		status := http.StatusOK
+		switch q.Path {
+		case "/api/config":
+			data, _ = json.Marshal(map[string]any{"encoding": "json", "complete": true, "body": map[string]any{
+				"drivers":    []any{map[string]any{"name": "charger-current"}},
+				"loadpoints": []any{map[string]any{"id": "garage", "driver_name": "charger-old"}},
+			}})
+		case "/api/drivers":
+			data, _ = json.Marshal(map[string]any{"encoding": "json", "complete": true, "body": map[string]any{
+				"drivers": []any{map[string]any{"name": "charger-current", "status": "ok"}},
+			}})
+		case "/api/test/refused":
+			status = http.StatusForbidden
+			data, _ = json.Marshal(map[string]any{"error": "diagnostic read refused"})
+		}
 		if q.Path == protocol.AgentAPICatalogPath {
 			data = []byte(`{"routes":[{"path":"/api/energy/history"},{"path":"/api/series"},{"path":"/api/mpc/diagnose/at"},{"path":"/api/drivers/{id}/source"},{"path":"/api/future/read"}],"troubleshooting":{"core":{"version":"0.151.0-beta.1","source":"https://github.com/srcfl/ftw/tree/v0.151.0-beta.1"},"workflow":["Collect reproduction steps and incident time with timezone"]}}`)
 		}
@@ -569,7 +584,7 @@ func (b *stubBox) handle(s *boxSession, env appwire.Envelope) {
 		if truncated {
 			data = data[:q.MaxBytes]
 		}
-		b.reply(s, protocol.MsgAPIHead, env.ID, protocol.APIHeadMsg{Status: 200, Headers: map[string]string{"Content-Type": "application/json"}})
+		b.reply(s, protocol.MsgAPIHead, env.ID, protocol.APIHeadMsg{Status: status, Headers: map[string]string{"Content-Type": "application/json"}})
 		cut := len(data) / 2
 		b.mu.Lock()
 		badSequence := b.apiBadSequence

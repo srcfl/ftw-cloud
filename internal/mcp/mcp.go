@@ -62,7 +62,12 @@ const Instructions = "FTW Cloud reaches one home's FTW box as an assistant its o
 	"Setup edits need a separate owner-approved setup grant. Saving does not prove measurement or control on hardware. " +
 	"For ordinary status, history and control, use the existing tools. For technical troubleshooting, " +
 	"start with api_catalog: the box lists its full read API, running version, source-code links and " +
-	"steps for gathering bug-report evidence. api_read keeps technical identifiers, addresses, logs and source code."
+	"steps for gathering bug-report evidence. api_read keeps technical identifiers, addresses, logs and source code. " +
+	"For charger faults, check charger_connections when present, then read /api/config, /api/drivers and /api/loadpoints. " +
+	"Compare loadpoints[].driver_name with drivers[].name; when OCPP is enabled also read /api/ocpp/chargers. " +
+	"A missing saved binding is a configuration problem, not evidence that a vendor driver failed. " +
+	"config_get and drivers_status redact names and cannot verify these bindings. " +
+	"If a read is refused or unavailable, report the exact path and error and what remains unverified; never guess the missing result."
 
 // JSON-RPC and MCP error codes.
 const (
