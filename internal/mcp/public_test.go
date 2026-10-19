@@ -53,7 +53,7 @@ func TestPublicProfileLimitsListingAndExecution(t *testing.T) {
 	b := w.connectBox()
 	a := w.connect(b, "")
 	want := []string{"homes_list", "status", "chargers_list", "cars_list", "plan_get", "plan_explain",
-		"history_query", "health_get", "logs_tail", "drivers_status", "config_get", "ev_charge_now", "goal_request", "requests_list"}
+		"history_query", "measurement_diagnostics", "health_get", "logs_tail", "drivers_status", "config_get", "ev_charge_now", "goal_request", "requests_list"}
 	slices.Sort(want)
 	for _, modern := range []bool{false, true} {
 		method := "initialize"
@@ -81,7 +81,7 @@ func TestPublicProfileLimitsListingAndExecution(t *testing.T) {
 		if !slices.Equal(names, want) {
 			t.Fatalf("public tools: %v", names)
 		}
-		for _, blocked := range []string{"api_catalog", "api_read", "setup_schema", "setup_commit", "events_list", "diag_run"} {
+		for _, blocked := range []string{"api_catalog", "api_read", "setup_schema", "setup_commit"} {
 			reply := profileRPC(t, a, "?profile=public", "tools/call", map[string]any{"name": blocked, "arguments": map[string]any{}}, modern)
 			if reply.Body["error"] == nil || reply.Body["result"] != nil {
 				t.Fatal("unlisted tool executed", blocked, reply)

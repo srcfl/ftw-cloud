@@ -38,7 +38,7 @@ func TestAnAssistantReadsItsHome(t *testing.T) {
 		names = append(names, x.(map[string]any)["name"].(string))
 	}
 	for _, want := range []string{"homes_list", "status", "chargers_list", "cars_list", "plan_get", "plan_explain", "history_query",
-		"health_get", "events_list", "logs_tail", "drivers_status", "config_get", "diag_run"} {
+		"health_get", "measurement_diagnostics", "logs_tail", "drivers_status", "config_get"} {
 		if !slices.Contains(names, want) {
 			t.Fatalf("tools/list lacks %s: %v", want, names)
 		}
@@ -87,10 +87,10 @@ func TestAnAssistantReadsItsHome(t *testing.T) {
 		name string
 		args map[string]any
 	}{
-		{"plan_explain", nil}, {"health_get", nil}, {"events_list", map[string]any{"limit": 5}}, {"drivers_status", nil},
-		{"events_list", map[string]any{"limit": 5, "before": "2026-10-15T18:00:00+02:00"}}, {"chargers_list", nil}, {"cars_list", nil},
+		{"plan_explain", nil}, {"health_get", nil}, {"drivers_status", nil},
+		{"chargers_list", nil}, {"cars_list", nil},
 		{"logs_tail", map[string]any{"lines": 20, "level": "INFO", "after": "2026-10-15T17:00:00Z"}}, {"config_get", nil}, {"config_get", map[string]any{"section": "planner"}},
-		{"diag_run", map[string]any{"check": "clock"}}, {"diag_run", map[string]any{"check": "driver", "src": "s1"}}, {"homes_list", nil},
+		{"homes_list", nil},
 	} {
 		if _, isErr, text := a.call(c.name, c.args); isErr {
 			t.Fatalf("%s: %s", c.name, text)
@@ -112,7 +112,7 @@ func TestAnAssistantReadsItsHome(t *testing.T) {
 	}
 	joined := strings.Join(asked, "\n")
 	for _, want := range []string{"live.get", "loadpoints.get", "cars.get", "plan.get", "price.get", "hist.query", "health.get",
-		"events.get", "logs.get", "config.get", "diag.run", "drivers.get"} {
+		"logs.get", "config.get", "drivers.get"} {
 		if !strings.Contains(joined, want+" ") {
 			t.Fatalf("the box was not asked %s: %v", want, asked)
 		}

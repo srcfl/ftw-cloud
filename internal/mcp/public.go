@@ -16,7 +16,7 @@ const publicInstructions = "FTW reaches one home's box with its owner's approval
 	"from fresh measurements, power in W from energy in Wh, and plans from measured outcomes. " +
 	"Control needs a separate grant and the user's request; lasting changes wait for the owner. " +
 	"This connection cannot run arbitrary API reads, export backups or configure an installation. " +
-	"Redacted settings cannot verify exact charger-to-driver bindings; state that limit rather than guessing a driver fault. " +
+	"Use measurement_diagnostics for redacted measurement reasons, charger bindings, energy provenance and stored series; it needs a separate owner-approved diagnostic grant. Redacted settings alone cannot prove these bindings. State any refused read rather than guessing a driver fault. " +
 	"For a new installation, guide the user through FTW's maintained install documentation."
 
 // publicTool is an explicit list: a new tool needs review before this profile
@@ -24,7 +24,7 @@ const publicInstructions = "FTW reaches one home's box with its owner's approval
 func publicTool(name string) bool {
 	switch name {
 	case "homes_list", "status", "chargers_list", "cars_list", "plan_get", "plan_explain",
-		"history_query", "health_get", "logs_tail", "drivers_status", "config_get",
+		"history_query", "measurement_diagnostics", "health_get", "logs_tail", "drivers_status", "config_get",
 		"ev_charge_now", "goal_request", "requests_list":
 		return true
 	}

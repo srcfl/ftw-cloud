@@ -21,6 +21,17 @@ jobs:
       # The local inspection route exists only under this tag; the suite
       # must pass with it too, and TestNoRouteReadsAHome must pass without.
       - run: go test -count=1 -tags ftwclouddev ./...
+      - name: Exact Core handlers for the measurement diagnostics integration
+        uses: actions/checkout@v5
+        with:
+          repository: srcfl/ftw
+          ref: bf80760fb4d11698ca09e76f22ce44cf347b78df
+          path: .core-integration
+          persist-credentials: false
+      - name: MCP measurement diagnostics through real Core handlers and SQLite
+        env:
+          FTW_CORE_CHECKOUT: ${{ github.workspace }}/.core-integration
+        run: go test -race -count=1 -run '^TestMeasurementDiagnosticsAgainstRealCoreHandlers$' ./internal/mcp
       - name: FTW Cloud imports only the wire format from srcfl/ftw
         run: bash scripts/check-imports.sh
       - name: What a box can send never panics the service
