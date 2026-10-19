@@ -97,7 +97,14 @@ func controlTools() []*tool {
 				if err := cc.withinGrant(protocol.OpLoadpointHold, body); err != nil {
 					return nil, err
 				}
-				return cc.command(ctx, protocol.OpLoadpointHold, body)
+				report, err := cc.command(ctx, protocol.OpLoadpointHold, body)
+				if err != nil {
+					return nil, err
+				}
+				if !a.Stop {
+					report["requestedHoldSeconds"] = body["hold_s"]
+				}
+				return report, nil
 			},
 		},
 		{
@@ -304,7 +311,7 @@ func (cc *callCtx) request(ctx context.Context, r protocol.AgentRequest) (any, e
 // a conflict; a stale one is learnt from E_CONFLICT and tried once more. A
 // client's retry of the same call within a minute reuses its command id,
 // so the box acts once.
-func (cc *callCtx) command(ctx context.Context, op string, args map[string]any) (any, error) {
+func (cc *callCtx) command(ctx context.Context, op string, args map[string]any) (map[string]any, error) {
 	c, err := cc.conn(ctx)
 	if err != nil {
 		return nil, err
@@ -496,7 +503,10 @@ func commandReport(res *protocol.CmdResult, ack *protocol.CmdAck, uptime int64) 
 		out["note"] = "The box did not answer in time; it may or may not act."
 	}
 	if ack != nil && ack.ExpiresAtMs > 0 {
-		out["endsInSeconds"] = max((ack.ExpiresAtMs-uptime)/1000, 0)
+		// CmdAck names the command lease, not the wall-clock hold. Core
+		// gives a ten-minute hold the same lease as a five-minute hold.
+		out["leaseExpiresInSeconds"] = max((ack.ExpiresAtMs-uptime)/1000, 0)
+		out["leaseNote"] = "The command lease expiry is not the charging hold duration or proof of measured charging."
 	}
 	return out
 }

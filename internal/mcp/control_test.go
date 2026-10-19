@@ -61,8 +61,11 @@ func TestChargeNowIsOneTemporaryCommand(t *testing.T) {
 	out := structured(t, a, "ev_charge_now", map[string]any{"loadpoint": "lpA1", "power_w": 7400, "minutes": 10, "phase_mode": "3p"})
 	// The first command expects the revision the chargers' answer named:
 	// one command, no conflict spent on the grant's rate.
-	if out["state"] != protocol.CmdApplied || out["endsInSeconds"] == nil {
+	if out["state"] != protocol.CmdApplied || out["leaseExpiresInSeconds"] == nil || out["requestedHoldSeconds"] != float64(600) {
 		t.Fatalf("report %v", out)
+	}
+	if _, misleading := out["endsInSeconds"]; misleading {
+		t.Fatalf("the command lease was reported as a charging deadline: %v", out)
 	}
 	b.mu.Lock()
 	cmds := slices.Clone(b.cmds)
@@ -82,6 +85,31 @@ func TestChargeNowIsOneTemporaryCommand(t *testing.T) {
 	// within a minute of that.
 	if c.NotValidAfterMs < 3_600_000 || c.NotValidAfterMs > 3_600_000+60_000 {
 		t.Fatalf("notValidAfterMs %d", c.NotValidAfterMs)
+	}
+}
+
+func TestCommandLeaseIsNotTheChargingHold(t *testing.T) {
+	_, b, a := withControl(t)
+	b.mu.Lock()
+	b.cmdReply = func(c protocol.Cmd) []any {
+		return []any{protocol.CmdAck{CmdID: c.CmdID, ExpiresAtMs: 3_600_000 + 900_000},
+			protocol.CmdResult{CmdID: c.CmdID, State: protocol.CmdApplied}}
+	}
+	b.mu.Unlock()
+	out := structured(t, a, "ev_charge_now", map[string]any{"loadpoint": "lpA1", "power_w": 2300, "minutes": 10})
+	if out["requestedHoldSeconds"] != float64(600) || out["leaseExpiresInSeconds"].(float64) < 899 ||
+		!strings.Contains(out["leaseNote"].(string), "not the charging hold duration") {
+		t.Fatalf("report confused a ten-minute hold with its fifteen-minute lease: %v", out)
+	}
+	stop := structured(t, a, "ev_charge_now", map[string]any{"loadpoint": "lpA1", "stop": true})
+	if _, hasHold := stop["requestedHoldSeconds"]; hasHold {
+		t.Fatalf("release reported a requested charging duration: %v", stop)
+	}
+	for _, res := range []*protocol.CmdResult{nil, {State: protocol.CmdApplied}} {
+		r := commandReport(res, &protocol.CmdAck{ExpiresAtMs: 900_000}, 0)
+		if num(r["leaseExpiresInSeconds"]) != 900 || r["endsInSeconds"] != nil {
+			t.Fatalf("acknowledgement claimed a hold expiry: %v", r)
+		}
 	}
 }
 
