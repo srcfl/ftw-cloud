@@ -257,11 +257,21 @@ to it yet.
   box, which audits it and enforces revoke. An agent row has no tunnel of
   its own. A call without its scope gets
   403 `insufficient_scope`, so the client can ask the owner for more. A
-  setup write asks for both `ftw.diag.run` and `ftw.setup.write`, so a fresh
+  `setup_begin` and every setup write ask for both `ftw.diag.run` and `ftw.setup.write`, so a fresh
   connection can read its schema and save receipt. Tool metadata and the
   runtime OAuth challenge name the same scopes, as required by
   [ChatGPT's authentication flow](https://developers.openai.com/plugins/build/auth#triggering-authentication-ui).
   Existing token scopes stay in the request; no scope is granted by inference.
+  Setup tools use the connected box's schema and resumable question guide.
+  Explicit discovery, private draft connection tests and MyUplink browser
+  sign-in stay bound to that draft. An empty box first needs its local
+  assistant setup, house password and owner-approved Cloud terms. After the
+  first measurement save, ordinary `goal_request` and `car_goal_request`
+  choose mode, planning style and car departure schedules. The owner can
+  approve in local Settings → Access as well as in the FTW app; each request
+  keeps its existing permission check and receipt. Configuration and hardware
+  evidence remain separate. These tools need the paired onboarding Core;
+  older boxes refuse unsupported draft actions without changing settings.
   Each call rides the agent's own Noise session: `ftwkeysd` seals each frame and
   the door carries it as `tun`, one forward to the box. The door admits an
   agent row only to these sessions, never on `/v1/app` or `/v1/app/once`,

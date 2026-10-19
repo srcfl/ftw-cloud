@@ -392,3 +392,42 @@ func TestALostAnswerIsUnknownNotFailed(t *testing.T) {
 		t.Fatalf("a call that ran out: %v %v %s", isErr, res, text)
 	}
 }
+
+func TestCarGoalWaitsForOwnerAndPreservesLocalSchedule(t *testing.T) {
+	_, b, a := withControl(t)
+	out := structured(t, a, "car_goal_request", map[string]any{"car": "carA1", "percent": 80, "ready_by_min": 420, "days": 31, "why": "Ready for work on weekdays at 07:00 in the confirmed box time zone."})
+	if out["waitsForOwner"] != true {
+		t.Fatal(out)
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if len(b.cmds) != 0 || len(b.requests) != 1 {
+		t.Fatal("car goal bypassed owner approval")
+	}
+	req := b.requests[0]
+	if req.Op != protocol.OpCarGoalSet || req.Args["id"] != "carA1" || req.Args["target"] != 0.8 || req.Args["ready_by_min"] != uint64(420) || req.Args["days"] != uint64(31) {
+		t.Fatalf("schedule changed: %#v", req.Args)
+	}
+}
+
+func TestCarGoalRejectsIncompleteAndAmbiguousTargets(t *testing.T) {
+	_, b, a := withControl(t)
+	for _, args := range []map[string]any{
+		{"car": "carA1", "charger_id": "lpA1", "percent": 80, "ready_by_min": 420, "why": "w"},
+		{"car": "carA1", "percent": 80, "why": "w"},
+		{"car": "carA1", "percent": 101, "ready_by_min": 420, "why": "w"},
+		{"car": "carA1", "percent": 80, "ready_by_min": 1440, "why": "w"},
+		{"car": "carA1", "percent": 80, "ready_by_min": 420, "days": 128, "why": "w"},
+		{"car": "carA1", "clear": true, "percent": 80, "ready_by_min": 420, "why": "w"},
+	} {
+		_, bad, _ := a.call("car_goal_request", args)
+		if !bad {
+			t.Fatal("accepted", args)
+		}
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if len(b.requests) != 0 {
+		t.Fatal("invalid car request reached box")
+	}
+}

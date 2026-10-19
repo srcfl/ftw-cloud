@@ -17,9 +17,12 @@ func TestSetupUsesAnExplicitGrantThroughOAuthAndNoise(t *testing.T) {
 	a := w.connect(b, strings.Join(scopes, " "), scopes...)
 	for name, args := range map[string]map[string]any{
 		"setup_schema": {}, "setup_status": {},
-		"setup_edit":    {"revision": 0, "operations": []any{map[string]any{"op": "replace", "path": "/drivers/0/name", "value": "Garage meter"}}},
-		"setup_commit":  {"revision": 1, "base_revision": 4, "sha256": strings.Repeat("a", 64), "confirmed": true},
-		"setup_restart": {"saved_revision": 5, "sha256": strings.Repeat("a", 64), "confirmed": true},
+		"setup_edit":     {"revision": 0, "operations": []any{map[string]any{"op": "replace", "path": "/drivers/0/name", "value": "Garage meter"}}},
+		"setup_commit":   {"revision": 1, "base_revision": 4, "sha256": strings.Repeat("a", 64), "confirmed": true},
+		"setup_restart":  {"saved_revision": 5, "sha256": strings.Repeat("a", 64), "confirmed": true},
+		"setup_discover": {"revision": 0, "confirmed": true},
+		"setup_test":     {"revision": 1, "driver": "meter", "confirmed": true},
+		"setup_connect":  {"revision": 1, "driver": "heater", "confirmed": true, "redirect_uri": "http://box.local:8080/api/oauth/myuplink/callback"},
 	} {
 		_, isErr, text := a.call(name, args)
 		if isErr || !strings.Contains(text, `"hardware_verified":false`) {
@@ -27,6 +30,9 @@ func TestSetupUsesAnExplicitGrantThroughOAuthAndNoise(t *testing.T) {
 		}
 		if name == "setup_edit" && !strings.Contains(text, "Garage meter") {
 			t.Fatal("patch did not survive the Noise session", text)
+		}
+		if action := map[string]string{"setup_discover": "discover", "setup_test": "test", "setup_connect": "connect"}[name]; action != "" && !strings.Contains(text, `"action":"`+action+`"`) {
+			t.Fatal("setup action did not survive OAuth and Noise", name, text)
 		}
 	}
 	_, isErr, text := a.call("setup_commit", map[string]any{"revision": 1, "base_revision": 4, "sha256": strings.Repeat("a", 64), "confirmed": false})
