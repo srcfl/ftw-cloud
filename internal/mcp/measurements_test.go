@@ -38,6 +38,11 @@ func measurementFixture(q protocol.APIRead) (int, []byte) {
 	default:
 		return 403, []byte(name)
 	}
+	if doc, ok := body.(map[string]any); ok {
+		for _, key := range []string{"address", "serial", "credentials", "password", "token", "identity"} {
+			doc[key] = name
+		}
+	}
 	return 200, measurementPage(body)
 }
 
@@ -57,7 +62,7 @@ func measurementResult(t *testing.T, a *assistant, view string, args map[string]
 	}
 	b, _ := json.Marshal(result)
 	text := string(b)
-	for _, value := range []string{strings.Repeat("private-name-", 3), "private-charger", "device_id", "password", "private"} {
+	for _, value := range []string{strings.Repeat("private-name-", 3), "private-charger", "device_id", "password", "private", "address", "serial", "credentials", "token", "identity"} {
 		if strings.Contains(text, value) {
 			t.Fatal("restricted measurement data escaped")
 		}
@@ -148,7 +153,7 @@ func TestMeasurementDiagnosticsRequireGrantAndFailClosed(t *testing.T) {
 		t.Fatal("a refused diagnostic request reached the box")
 	}
 	a = w.connect(b, oauth.ScopeDiagRun)
-	for _, mode := range []string{"refused", "partial", "malformed", "stream", "unsupported"} {
+	for _, mode := range []string{"refused", "server_error", "partial", "malformed", "stream", "unsupported"} {
 		b.mu.Lock()
 		b.apiBadSequence = mode == "stream"
 		b.apiUnsupported = mode == "unsupported"
@@ -156,6 +161,8 @@ func TestMeasurementDiagnosticsRequireGrantAndFailClosed(t *testing.T) {
 			switch mode {
 			case "refused":
 				return 403, []byte(strings.Repeat("restricted", 10))
+			case "server_error":
+				return 500, []byte(strings.Repeat("restricted", 10))
 			case "partial":
 				return 200, []byte(`{"encoding":"json","complete":false,"more":true,"body":{"load_w":999}}`)
 			case "malformed":
@@ -191,9 +198,13 @@ func TestUnsupportedDiagnosticsAreNotAdvertisedOrSentToCore(t *testing.T) {
 			}
 			r := profileRPC(t, a, query, "tools/call", map[string]any{"name": name, "arguments": map[string]any{}}, false)
 			result := r.Body["result"].(map[string]any)
-			data := result["structuredContent"].(map[string]any)["data"].(map[string]any)
+			structured := result["structuredContent"].(map[string]any)
+			data := structured["data"].(map[string]any)
 			if result["isError"] != true || data["code"] != "E_UNSUPPORTED" || data["available"] != false {
 				t.Fatal("a cached unsupported tool did not get an explicit capability error")
+			}
+			if structured["source"] != "service" {
+				t.Fatal("an unsupported operation claimed to be an observation from the box")
 			}
 		}
 	}
