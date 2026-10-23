@@ -22,7 +22,7 @@ to it yet.
   messages signed by that box's key.
 - Each home's newest message of each class lives in memory, as the exact bytes
   the box sent. Readings are dropped an hour after the box goes quiet and are
-  never written to disk.
+  never written to disk. History tiles stay 48 hours, also in memory only.
 - What the service holds follows the newest roster's grant, never `hello`:
   the readable copy can turn on or off while the uplink stays up.
 - The registry (SQLite) holds the home id, the box key, the signed roster,
@@ -132,6 +132,23 @@ to it yet.
   The widgets then read `/v1/now`. At most 4 an hour per home, since Apple
   budgets widget reloads. A device holds at most 4 tokens of each kind; a
   new one pushes out its oldest.
+- **History tiles (C6).** A box whose owner's grant has `ftw.history.read`
+  sends its last 48 hours of 5-minute history as `tiles`: 12-hour tiles, each
+  closed one the same bytes the box serves over Noise, and the tile still
+  filling whole or as an append when a bucket closes. The service checks
+  each against the protocol's three shapes and holds it in memory as the box
+  signed it: per home at most five closed tiles and 16 pieces of the filling
+  one, all homes together at most 256 MiB, each until 48 hours after it
+  ends. A tile the box did not sign closes the uplink, as any such message
+  does; one of no shape is dropped and counted. `hello_ok.have` names the
+  closed tiles held, so a box that comes back sends only what is missing. A
+  phone with `ftw.history.read` asks with `tiles.get {have}`, gets the tiles
+  it lacks and then `tiles.end {n}`, and gets each new tile as it comes. The
+  snapshot, `/v1/app/once` and `/v1/now` carry none. Tiles are dated history,
+  so they outlive the hour after which readings go, but a phone still needs
+  a roster in force to get in. A revoke, a grant without history, a purge
+  and the 90-day expiry delete them. Assistants read history from the box,
+  never from these tiles.
 - **Widget token.** A device asks for its extension token over its app
   session with `token.get`. A widget reads `GET /v1/now` with it: the newest
   `live`, `prices` and `hb` as the box signed them, and nothing else. The
@@ -309,7 +326,6 @@ Not built yet:
 
 | Step | What | Where |
 |---|---|---|
-| C6 | Tiles | `internal/server` |
 | C7–C8 | Statistics | implemented with collection off; review pending |
 
 ## How it holds a home

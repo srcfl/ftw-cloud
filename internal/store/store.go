@@ -16,6 +16,7 @@ import (
 	"slices"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/srcfl/ftw/go/protocol"
@@ -76,6 +77,9 @@ type Store struct {
 	// suspended reports an owner's suspension of a roster device. Nil
 	// suspends nobody.
 	suspended func(home, deviceID string, epoch uint64) bool
+	// tileBytes is what every home's tiles hold, at most tileBytesMax.
+	tileBytes    atomic.Int64
+	tileBytesMax int64
 }
 
 // New starts an empty store. now is for tests; nil uses the clock.
@@ -83,7 +87,7 @@ func New(now func() time.Time) *Store {
 	if now == nil {
 		now = time.Now
 	}
-	return &Store{homes: map[string]*home{}, now: now}
+	return &Store{homes: map[string]*home{}, now: now, tileBytesMax: TileBytesMax}
 }
 
 // Homes is how many homes the store holds.
@@ -118,6 +122,9 @@ type home struct {
 	pending       map[string]time.Time
 	spent         map[string]time.Time
 	invitePending map[string]time.Time
+	// tiles are the last 48 hours of history, kept apart from latest: they
+	// outlive the hour after which readings go, and a snapshot carries none.
+	tiles tileSet
 }
 
 // Held is one envelope as received.
@@ -368,6 +375,7 @@ func (x *Handle) DropCopy() {
 	x.h.mu.Lock()
 	defer x.h.mu.Unlock()
 	x.h.latest, x.h.full = map[string]Held{}, nil
+	x.s.dropTiles(x.h)
 }
 
 // Put keeps env as the newest of its class.
@@ -435,6 +443,9 @@ func (x *Handle) SetRoster(r *cloudwire.Roster) bool {
 	if !slices.Contains(r.Grant.Purposes, protocol.CloudPurposeServe) {
 		// The copy is off or withdrawn: no reading stays in memory.
 		x.h.latest, x.h.full = map[string]Held{}, nil
+	}
+	if !x.h.holdsTilesLocked() {
+		x.s.dropTiles(x.h)
 	}
 	x.h.setPendingLocked(r, x.h.rosterAt)
 	x.recheckLocked()
@@ -523,6 +534,7 @@ func (x *Handle) Delete() {
 	x.s.mu.Unlock()
 	x.h.mu.Lock()
 	x.h.latest, x.h.full, x.h.roster = map[string]Held{}, nil, nil
+	x.s.dropTiles(x.h)
 	for sess := range x.h.sessions {
 		sess.endLocked(cloudwire.CloseDenied)
 	}
@@ -609,7 +621,8 @@ func (x *Handle) mayRead(class string) bool {
 // --------------------------------------------------------------------------
 
 // Sweep drops the readings of every home whose box has been gone longer than
-// ReadingsKeptFor. What the box was last seen at stays.
+// ReadingsKeptFor, and every tile past its 48 hours. What the box was last
+// seen at stays.
 func (s *Store) Sweep() {
 	now := s.now()
 	s.mu.Lock()
@@ -623,6 +636,7 @@ func (s *Store) Sweep() {
 		if !h.online && now.Sub(h.lastSeen) > ReadingsKeptFor {
 			h.latest, h.full = map[string]Held{}, nil
 		}
+		s.sweepTiles(h, now)
 		// A roster that ran out closes the home's sessions: the box has not
 		// confirmed who may read for a day.
 		if r := h.roster; r != nil && now.After(h.rosterAt.Add(time.Duration(r.TTLS)*time.Second)) {
@@ -672,6 +686,7 @@ func (s *Store) Forget(id string) {
 	s.mu.Unlock()
 	if h != nil {
 		h.mu.Lock()
+		s.dropTiles(h)
 		for sess := range h.sessions {
 			sess.endLocked(cloudwire.CloseDenied)
 		}

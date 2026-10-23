@@ -757,6 +757,12 @@ func (c *phoneConn) apply(frame []byte) (int, error) {
 		if c.s.Push != nil {
 			return 0, pushed(c.s.Push.Unregister(c.home, c.dev.Device(), r))
 		}
+	case cloudwire.MsgTilesGet:
+		var g cloudwire.TilesGet
+		if err := cloudwire.Unmarshal(env.B, &g); err != nil {
+			return cloudwire.CloseProtocol, err
+		}
+		return 0, c.tiles(g.Have)
 	case cloudwire.MsgTokenGet:
 		if c.s.Tokens == nil {
 			return 0, nil
@@ -770,12 +776,33 @@ func (c *phoneConn) apply(frame []byte) (int, error) {
 	return 0, nil
 }
 
+// tiles answers tiles.get: the box's tiles envelopes the phone lacks, as
+// the box signed them, then tiles.end with how many went. A device that may
+// not read tiles gets tiles.end {n: 0}.
+func (c *phoneConn) tiles(have map[string]string) error {
+	envs, err := c.dev.Tiles(have)
+	if err != nil {
+		return err
+	}
+	for _, env := range envs {
+		if err := c.reply(env); err != nil {
+			return err
+		}
+	}
+	return c.say(cloudwire.MsgTilesEnd, cloudwire.TilesEnd{N: len(envs)})
+}
+
 // say hands an answer to the session's goroutine to send.
 func (c *phoneConn) say(t string, body any) error {
 	env, err := cloudwire.Unsigned(t, body)
 	if err != nil {
 		return err
 	}
+	return c.reply(env)
+}
+
+// reply hands one envelope to the session's goroutine to send.
+func (c *phoneConn) reply(env []byte) error {
 	select {
 	case c.replies <- env:
 		return nil

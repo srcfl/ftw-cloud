@@ -91,6 +91,7 @@ var (
 	dropTunUp     = metrics.Drop("tun_rate_up")
 	dropTunDown   = metrics.Drop("tun_rate_down")
 	dropUnknown   = metrics.Drop("box_unknown_type")
+	dropBadTile   = metrics.Drop("box_tile_of_no_shape")
 	dropConnect   = metrics.Drop("box_connect_rate")
 	boxesFollow   = metrics.Default.Gauge("ftwcloud_boxes_following_shards", "Connected boxes that list shard in hello.caps.")
 )
@@ -575,7 +576,11 @@ func (c *boxConn) run() error {
 	if c.u.Statistics {
 		statsPolicy = cloudwire.StatsPolicy
 	}
-	if err := c.send(helloOK{StatsPolicy: statsPolicy, BoxNonce: hello.BoxNonce, EKM: c.ekm, Have: map[string]string{}, RosterSeq: c.rosterSeq()}); err != nil {
+	have := map[string]string{}
+	if c.handle != nil {
+		have = c.handle.TilesHave()
+	}
+	if err := c.send(helloOK{StatsPolicy: statsPolicy, BoxNonce: hello.BoxNonce, EKM: c.ekm, Have: have, RosterSeq: c.rosterSeq()}); err != nil {
 		return err
 	}
 	boxHandshake.Since(c.started)
@@ -814,6 +819,9 @@ func (c *boxConn) apply(env cloudwire.Envelope) (stop bool, err error) {
 		// The readable copy is off: the service holds no readings.
 		return false, nil
 	}
+	if env.T == cloudwire.MsgTiles {
+		return false, c.tile(env)
+	}
 	rev, table := uint64(0), false
 	if env.T == cloudwire.MsgLive {
 		rev, table = tableOf(env.B)
@@ -847,6 +855,23 @@ func (c *boxConn) apply(env cloudwire.Envelope) (stop bool, err error) {
 		c.u.OnHeld(c.home, env.T, raw)
 	}
 	return false, nil
+}
+
+// tile holds one tile the box signed, if it has one of the three shapes
+// (cloudwire.Tiles.Check); anything else is dropped and counted, and the
+// connection goes on.
+func (c *boxConn) tile(env cloudwire.Envelope) error {
+	var t cloudwire.Tiles
+	if cloudwire.Unmarshal(env.B, &t) != nil || t.Check() != nil {
+		dropBadTile.Inc()
+		return nil
+	}
+	raw, err := env.Encode()
+	if err != nil {
+		return err
+	}
+	c.handle.PutTile(raw, t)
+	return nil
 }
 
 // newer reports whether a message of a newest-wins class is newer than any
