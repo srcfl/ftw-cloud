@@ -91,6 +91,8 @@ var (
 	dropTunUp     = metrics.Drop("tun_rate_up")
 	dropTunDown   = metrics.Drop("tun_rate_down")
 	dropUnknown   = metrics.Drop("box_unknown_type")
+	dropBadTile   = metrics.Drop("box_tile_of_no_shape")
+	dropBigTile   = metrics.Drop("box_tile_too_large")
 	dropConnect   = metrics.Drop("box_connect_rate")
 	boxesFollow   = metrics.Default.Gauge("ftwcloud_boxes_following_shards", "Connected boxes that list shard in hello.caps.")
 )
@@ -458,7 +460,19 @@ type boxConn struct {
 	newest       map[string]uint64
 	tableRev     uint64
 	statsAllowed bool // current connection accepted the full statistics roster
+
+	// rosters counts the rosters taken on this connection. tilesLost says
+	// tiles were dropped for lack of memory, or history came back to the
+	// grant, so the box is asked for its tiles again; tilesAskedAt is when
+	// it last was.
+	rosters      int
+	tilesLost    bool
+	tilesAskedAt time.Time
 }
+
+// tilesResyncEvery is how often the service asks a box for its tiles again,
+// as often as the box honours a resync.
+const tilesResyncEvery = 5 * time.Minute
 
 // bucket is a token bucket.
 type bucket struct {
@@ -575,7 +589,11 @@ func (c *boxConn) run() error {
 	if c.u.Statistics {
 		statsPolicy = cloudwire.StatsPolicy
 	}
-	if err := c.send(helloOK{StatsPolicy: statsPolicy, BoxNonce: hello.BoxNonce, EKM: c.ekm, Have: map[string]string{}, RosterSeq: c.rosterSeq()}); err != nil {
+	have := map[string]string{}
+	if c.handle != nil {
+		have = c.handle.TilesHave()
+	}
+	if err := c.send(helloOK{StatsPolicy: statsPolicy, BoxNonce: hello.BoxNonce, EKM: c.ekm, Have: have, RosterSeq: c.rosterSeq()}); err != nil {
 		return err
 	}
 	boxHandshake.Since(c.started)
@@ -651,6 +669,9 @@ func (c *boxConn) run() error {
 		}
 		stop, err := c.apply(env)
 		if err != nil || stop {
+			return err
+		}
+		if err := c.askTiles(); err != nil {
 			return err
 		}
 	}
@@ -814,6 +835,9 @@ func (c *boxConn) apply(env cloudwire.Envelope) (stop bool, err error) {
 		// The readable copy is off: the service holds no readings.
 		return false, nil
 	}
+	if env.T == cloudwire.MsgTiles {
+		return false, c.tile(env)
+	}
 	rev, table := uint64(0), false
 	if env.T == cloudwire.MsgLive {
 		rev, table = tableOf(env.B)
@@ -847,6 +871,42 @@ func (c *boxConn) apply(env cloudwire.Envelope) (stop bool, err error) {
 		c.u.OnHeld(c.home, env.T, raw)
 	}
 	return false, nil
+}
+
+// tile holds one tile the box signed, if it has one of the three shapes
+// (cloudwire.Tiles.Check) and fits cloudwire.TileEnvelopeMax; anything else
+// is dropped and counted, and the connection goes on. A tile dropped for
+// lack of memory is asked for again once there is room.
+func (c *boxConn) tile(env cloudwire.Envelope) error {
+	raw, err := env.Encode()
+	if err != nil {
+		return err
+	}
+	if len(raw) > cloudwire.TileEnvelopeMax {
+		dropBigTile.Inc()
+		return nil
+	}
+	var t cloudwire.Tiles
+	if cloudwire.Unmarshal(env.B, &t) != nil || t.Check() != nil {
+		dropBadTile.Inc()
+		return nil
+	}
+	if _, full := c.handle.PutTile(raw, t); full {
+		c.tilesLost = true
+	}
+	return nil
+}
+
+// askTiles sends the box resync {what: [tiles]} when tiles are owed and
+// there is room for them, at most once per tilesResyncEvery. The box sends
+// what the service lacks.
+func (c *boxConn) askTiles() error {
+	if !c.tilesLost || c.purged || c.handle == nil || !c.handle.HoldsTiles() || !c.handle.TileRoom() ||
+		c.u.now().Sub(c.tilesAskedAt) < tilesResyncEvery {
+		return nil
+	}
+	c.tilesLost, c.tilesAskedAt = false, c.u.now()
+	return c.send(resync{What: []string{cloudwire.ResyncTiles}})
 }
 
 // newer reports whether a message of a newest-wins class is newer than any
@@ -959,8 +1019,16 @@ func (c *boxConn) roster(env cloudwire.Envelope) error {
 		c.u.store.Forget(c.home)
 		return fmt.Errorf("%w: updated Cloud terms including statistics are required", errProtocol)
 	}
+	hadTiles := c.handle.HoldsTiles()
 	if !c.handle.SetRoster(&r) {
 		return nil
+	}
+	// History back in the grant while the box stays connected: the service
+	// dropped its tiles when it went, and the box sends them again only when
+	// asked. The first roster of a connection needs no asking.
+	c.rosters++
+	if c.rosters > 1 && !hadTiles && c.handle.HoldsTiles() {
+		c.tilesLost = true
 	}
 	if c.u.Statistics || c.u.StatisticsStore {
 		grant := g
