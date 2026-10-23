@@ -472,7 +472,7 @@ partial; missing data is unknown. One instance supplies its local shard only;
 public multi-shard totals need an explicit safe collector.
 
 The separate anonymous daily-report feed is `GET /v1/fleet/public`. It exposes
-only daily counts and dimension labels with at least 10 reports, for at most
+only daily counts and dimension labels with at least 5 reports, for at most
 90 days. It contains imported relay history and new reports received by Cloud;
 consumers replace the old archive rather than adding both. It needs no hourly
 energy activation. Updated Core sends it only after the current project
