@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/srcfl/ftw-cloud/internal/store"
+	"github.com/srcfl/ftw/go/protocol"
 	"github.com/srcfl/ftw/go/protocol/appwire"
 	"github.com/srcfl/ftw/go/protocol/cloudwire"
 )
@@ -201,9 +202,14 @@ func (s *Server) answerOnce(ctx context.Context, home string, msg1 []byte) ([]by
 	if err != nil {
 		return nil, http.StatusForbidden
 	}
-	// x needs the roster's tun, as a phone's tunnel does, so commands work
-	// with the copy off. The rest needs the copy: an effective scope.
-	if (env.T == cloudwire.MsgX && !dev.Device().Tun) || (env.T != cloudwire.MsgX && len(dev.Scopes()) == 0) {
+	// x is a watch's, and needs the roster's tun, as a phone's tunnel does,
+	// so commands work with the copy off. The rest needs the copy: an
+	// effective scope.
+	if env.T == cloudwire.MsgX {
+		if d := dev.Device(); !d.Tun || d.Role != protocol.RoleWatch {
+			return nil, http.StatusForbidden
+		}
+	} else if len(dev.Scopes()) == 0 {
 		return nil, http.StatusForbidden
 	}
 	release, ok := s.once.enter(home, hs.RemoteStatic(), s.now())

@@ -50,7 +50,8 @@ maintains it.
   say whether it is looking, an owner can suspend a roster device, and a
   device the roster lists with `tun` can send its box session as `tun`. On
   `/v1/app/once` a watch can read, ask for its token, register for push and,
-  if the roster lists it with `tun`, send its exchange with the box as `x`,
+  if the roster lists it as a watch with `tun`, send its exchange with the
+  box as `x`,
   and nothing else. The service admits a phone or a watch by the key its
   Noise handshake proved, and only if the box's roster lists it, or once for
   a pairing code the roster lists by its hash.

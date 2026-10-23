@@ -60,15 +60,18 @@ func TestOnceAdmitsAnExchangeByTun(t *testing.T) {
 	for _, c := range []struct {
 		name              string
 		key               appwire.KeyPair
+		role              string
 		tun, copyOn, susp bool
 		wantX, wantRead   int
 	}{
-		{"tun, the copy off", watch, true, false, false, http.StatusOK, http.StatusForbidden},
-		{"tun, the copy on", watch, true, true, false, http.StatusOK, http.StatusOK},
-		{"no tun, the copy on", watch, false, true, false, http.StatusForbidden, http.StatusOK},
-		{"no tun, the copy off", watch, false, false, false, http.StatusForbidden, http.StatusForbidden},
-		{"suspended", watch, true, true, true, http.StatusForbidden, http.StatusForbidden},
-		{"a key the roster lacks", stranger, true, true, false, http.StatusForbidden, http.StatusForbidden},
+		{"tun, the copy off", watch, "watch", true, false, false, http.StatusOK, http.StatusForbidden},
+		{"tun, the copy on", watch, "watch", true, true, false, http.StatusOK, http.StatusOK},
+		{"no tun, the copy on", watch, "watch", false, true, false, http.StatusForbidden, http.StatusOK},
+		{"no tun, the copy off", watch, "watch", false, false, false, http.StatusForbidden, http.StatusForbidden},
+		{"suspended", watch, "watch", true, true, true, http.StatusForbidden, http.StatusForbidden},
+		{"a key the roster lacks", stranger, "watch", true, true, false, http.StatusForbidden, http.StatusForbidden},
+		// x is a watch's: a phone with tun has its own tunnel.
+		{"a phone with tun", watch, "owner", true, true, false, http.StatusForbidden, http.StatusOK},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			h := newHarness(t)
@@ -80,7 +83,7 @@ func TestOnceAdmitsAnExchangeByTun(t *testing.T) {
 			}
 			h.rosterN++
 			h.box.SetRoster(&cloudwire.Roster{RosterSeq: h.rosterN, TTLS: 86_400, Grant: grant,
-				Devices: append(h.devices(1, 1), cloudwire.Device{ID: "watch", Key: watch.Public(), Role: "watch",
+				Devices: append(h.devices(1, 1), cloudwire.Device{ID: "watch", Key: watch.Public(), Role: c.role,
 					Tun: c.tun, Scopes: []string{protocol.ScopeLiveRead}, Epoch: 1})})
 			if c.susp {
 				_ = h.reg.Suspend(h.home, "watch", 1, time.Now())

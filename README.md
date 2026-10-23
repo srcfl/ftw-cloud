@@ -82,9 +82,10 @@ to it yet.
   and it carries one of `read {have, hz}`, `token.get`, `push.register`,
   `push.unregister` or `x {d}`. The service admits the watch exactly as
   `/v1/app` admits a phone: its key in the box's roster, a roster that has
-  not run out, no suspension. `x` needs the entry's `tun`; the rest need a
-  scope the readable copy grants. The box lists a watch with role `watch`
-  and the scopes it derives; the service checks no role. A refusal is
+  not run out, no suspension. `x` needs the entry's `tun` and role `watch`;
+  the rest need a scope the readable copy grants. The box lists a watch
+  with role `watch` and the scopes it derives; the service checks no other
+  role. A refusal is
   403 with an empty body. The answer is message 2 with the snapshot, less
   the envelopes `have` says the watch holds, and the envelopes that did not
   fit after it, each after its length. The box's bytes go unchanged, so the
