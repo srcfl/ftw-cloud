@@ -21,7 +21,9 @@ func (s *Service) Public(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusServiceUnavailable)
 		return
 	}
-	const minimum = 10
+	// Five since 23 October 2026 (Fredrik): the fleet is small and the
+	// reports carry no home id. A day and each label below it stay hidden.
+	const minimum = 5
 	days := make([]map[string]any, 0, len(view.Days))
 	for _, d := range view.Days {
 		row := map[string]any{"date": d.Date, "reports": nil}
