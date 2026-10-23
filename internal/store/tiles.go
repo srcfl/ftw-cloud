@@ -18,11 +18,15 @@ import (
 // like the readings they live only in memory, only while the roster's grant
 // serves a copy with ftw.history.read.
 
-// TileBytesMax bounds what every home's tiles hold together. A home holds at
-// most five closed tiles and 16 pieces, about 20 KB, so this is some 13,000
-// homes; a shard takes on no more than 4,000. Past it, new tiles are dropped
-// and counted.
-const TileBytesMax = 256 << 20
+// TileBytesMax bounds what every home's tiles hold together, and
+// TileBytesPerHome what one home's do. A home of five closed tiles and 16
+// pieces holds about 20 KB, so the first is some 13,000 homes and at least
+// 4,000 at the second; a shard takes on no more than 4,000. Past either, new
+// tiles are dropped and counted.
+const (
+	TileBytesMax     = 256 << 20
+	TileBytesPerHome = 64 << 10
+)
 
 var (
 	tileBytesHeld  = metrics.Default.Gauge("ftwcloud_tile_bytes", "Bytes of history tiles held in memory, all homes.")
@@ -30,6 +34,8 @@ var (
 	dropTileFull   = metrics.Drop("tile_memory_full")
 	dropTileClosed = metrics.Drop("tile_piece_after_close")
 	dropTilePieces = metrics.Drop("tile_too_many_pieces")
+	dropTileHome   = metrics.Drop("tile_home_full")
+	dropTileOlder  = metrics.Drop("tile_older_than_held")
 )
 
 // heldTile is one tiles envelope as the box sent it.
@@ -37,8 +43,16 @@ type heldTile struct {
 	id    string
 	etag  string
 	start int64 // the tile's start, wall clock
-	seq   uint64
-	env   []byte
+	// wallMs and seq are when the box sent it, in the order it sent them:
+	// wall time first, since seq starts again when the box does.
+	wallMs int64
+	seq    uint64
+	env    []byte
+}
+
+// before says a was sent before b.
+func (a heldTile) before(b heldTile) bool {
+	return a.wallMs < b.wallMs || (a.wallMs == b.wallMs && a.seq < b.seq)
 }
 
 func (t heldTile) end() int64 {
@@ -56,26 +70,30 @@ type tileSet struct {
 
 // PutTile keeps one tiles envelope the box signed, which the caller has
 // verified and checked (cloudwire.Tiles.Check), and forwards it to the
-// phones reading the home that may read tiles. False says it was not held:
-// the grant holds no tiles, it is older than 48 hours or from the future, a
-// piece of a tile already closed, an append past the pieces a tile may
-// have, or memory for tiles is full.
-func (x *Handle) PutTile(env []byte, t cloudwire.Tiles) bool {
+// phones reading the home that may read tiles. kept is false when it was
+// not kept: the grant holds no tiles, it is older than 48 hours or from the
+// future, sent before what is held of its tile, a piece of a tile already
+// closed, an append past the pieces a tile may have, or memory for tiles is
+// full, which full says.
+func (x *Handle) PutTile(env []byte, t cloudwire.Tiles) (kept, full bool) {
 	if x.kind != Box {
-		return false
+		return false, false
 	}
 	x.h.mu.Lock()
 	defer x.h.mu.Unlock()
 	x.h.lastSeen = x.s.now()
 	if !x.h.holdsTilesLocked() {
-		return false
+		return false, false
 	}
 	now := x.s.now().UnixMilli()
 	x.pruneTilesLocked(now)
 	held := heldTile{id: t.TileID, etag: t.Etag, start: t.TileStart(), seq: t.Seq, env: env}
+	if t.WallMs != nil {
+		held.wallMs = *t.WallMs
+	}
 	if held.end() <= now-cloudwire.TileKeepMs || held.start > now+protocol.ResolutionTileSpanMs[cloudwire.TileRes] {
 		dropTileOld.Inc()
-		return false
+		return false, false
 	}
 	ts := &x.h.tiles
 	// What the tile replaces, first, so the memory check counts the net
@@ -84,19 +102,29 @@ func (x *Handle) PutTile(env []byte, t cloudwire.Tiles) bool {
 	dropOpen := false
 	if !t.Partial {
 		if old, ok := ts.closed[held.id]; ok {
+			if held.before(old) {
+				// An older version of a tile the box sent again since.
+				dropTileOlder.Inc()
+				return false, false
+			}
 			replaced += int64(len(old.env))
 		}
 		dropOpen = len(ts.open) > 0 && ts.open[0].id == held.id
 	} else {
 		if _, ok := ts.closed[held.id]; ok {
 			dropTileClosed.Inc()
-			return false
+			return false, false
+		}
+		if n := len(ts.open); n > 0 && ts.open[0].id == held.id && held.before(ts.open[n-1]) {
+			// A piece that came after one the box sent later.
+			dropTileOlder.Inc()
+			return false, false
 		}
 		if len(ts.open) > 0 && ts.open[0].id != held.id {
 			if held.start < ts.open[0].start {
 				// A piece of an older tile than the one filling.
 				dropTileClosed.Inc()
-				return false
+				return false, false
 			}
 			dropOpen = true
 		}
@@ -106,7 +134,7 @@ func (x *Handle) PutTile(env []byte, t cloudwire.Tiles) bool {
 			// pieces held still lay back into the tile; this one waits
 			// for the box's next whole piece, which carries it too.
 			dropTilePieces.Inc()
-			return false
+			return false, false
 		}
 	}
 	if dropOpen {
@@ -114,9 +142,15 @@ func (x *Handle) PutTile(env []byte, t cloudwire.Tiles) bool {
 			replaced += int64(len(p.env))
 		}
 	}
-	if grow := int64(len(env)) - replaced; grow > 0 && x.s.tileBytes.Load()+grow > x.s.tileBytesMax {
-		dropTileFull.Inc()
-		return false
+	if grow := int64(len(env)) - replaced; grow > 0 {
+		if ts.bytes+grow > TileBytesPerHome {
+			dropTileHome.Inc()
+			return false, true
+		}
+		if x.s.tileBytes.Load()+grow > x.s.tileBytesMax {
+			dropTileFull.Inc()
+			return false, true
+		}
 	}
 	if dropOpen {
 		x.dropOpenLocked()
@@ -151,7 +185,22 @@ func (x *Handle) PutTile(env []byte, t cloudwire.Tiles) bool {
 			sess.deliver(env, at)
 		}
 	}
-	return true
+	return true, false
+}
+
+// TileRoom says whether a tile dropped for lack of memory would be kept now:
+// the store and the home are both well under their bounds.
+func (x *Handle) TileRoom() bool {
+	x.h.mu.Lock()
+	defer x.h.mu.Unlock()
+	return x.s.tileBytes.Load() < x.s.tileBytesMax/10*9 && x.h.tiles.bytes < TileBytesPerHome/4*3
+}
+
+// HoldsTiles says whether the roster in force lets the service hold tiles.
+func (x *Handle) HoldsTiles() bool {
+	x.h.mu.Lock()
+	defer x.h.mu.Unlock()
+	return x.h.holdsTilesLocked()
 }
 
 // TilesHave is each closed tile the home holds, by id, for hello_ok.
@@ -255,6 +304,14 @@ func (s *Store) addTileBytes(h *home, n int64) {
 // TileBytes is how many bytes of tiles the store holds, all homes.
 func (s *Store) TileBytes() int64 { return s.tileBytes.Load() }
 
-// sweepTiles drops a home's tiles past 48 hours. Sweep calls it for every
-// home, the box online or not.
-func (s *Store) sweepTiles(h *home, now time.Time) { s.pruneTiles(h, now.UnixMilli()) }
+// sweepTiles drops a home's tiles past 48 hours, and all of them once the
+// roster has run out: no phone may read them then, and a revoke made while
+// the box was away cannot reach the service. Sweep calls it for every home,
+// the box online or not. The caller holds h.mu.
+func (s *Store) sweepTiles(h *home, now time.Time) {
+	if r := h.roster; r == nil || now.After(h.rosterAt.Add(time.Duration(r.TTLS)*time.Second)) {
+		s.dropTiles(h)
+		return
+	}
+	s.pruneTiles(h, now.UnixMilli())
+}

@@ -246,3 +246,70 @@ func TestTilesNeedTheHistoryScopeInTheGrant(t *testing.T) {
 		t.Fatalf("held %v under a grant without history", have)
 	}
 }
+
+// A tiles envelope over cloudwire.TileEnvelopeMax is dropped, signed or not,
+// and the uplink goes on.
+func TestAnOversizedTileIsDroppedAndTheUplinkStays(t *testing.T) {
+	v := readTileVectors(t)
+	s := newServiceAt(t, func() time.Time { return vectorClock })
+	b := vectorBox(t, v)
+	if _, err := b.connect(s, nil); err != nil {
+		t.Fatal(err)
+	}
+	b.send(cloudwire.MsgRoster, b.roster(protocol.ScopeLiveRead, protocol.ScopeHistoryRead))
+	env, _ := cloudwire.DecodeEnvelope(unhex(t, v.Tiles[0].Envelope))
+	var body cloudwire.Tiles
+	_ = cloudwire.Unmarshal(env.B, &body)
+	// The closed tile with a key the service ignores, to pad it.
+	padded := struct {
+		cloudwire.Tiles
+		Pad []byte `cbor:"pad"`
+	}{body, bytes.Repeat([]byte{1}, cloudwire.TileEnvelopeMax)}
+	padded.Header = b.header()
+	b.send(cloudwire.MsgTiles, padded)
+	live := b.send(cloudwire.MsgLive, cloudwire.Live{Header: b.header(), Fields: map[string]int64{"2": 1}, SrcRev: 1})
+	wait(t, "the live after it", func() bool {
+		snap := snapshot(t, s, b.home)
+		return len(snap) == 1 && bytes.Equal(snap[0], live)
+	})
+	if got := ownerTiles(t, s, b.home); len(got) != 0 {
+		t.Fatal("an oversized tile was held")
+	}
+}
+
+// History taken out of the grant and put back while the box stays
+// connected: the service dropped the tiles, so it asks the box for them
+// again, once.
+func TestHistoryBackInTheGrantAsksTheBoxForItsTiles(t *testing.T) {
+	v := readTileVectors(t)
+	s := newServiceAt(t, func() time.Time { return vectorClock })
+	b := vectorBox(t, v)
+	if _, err := b.connect(s, nil); err != nil {
+		t.Fatal(err)
+	}
+	roster := func(seq uint64, scopes ...string) {
+		r := b.roster(scopes...)
+		r.RosterSeq = seq
+		b.send(cloudwire.MsgRoster, r)
+	}
+	roster(1, protocol.ScopeLiveRead, protocol.ScopeHistoryRead)
+	b.frame(unhex(t, v.Tiles[0].Frame))
+	wait(t, "the tile", func() bool { return len(ownerTiles(t, s, b.home)) == 1 })
+
+	roster(2, protocol.ScopeLiveRead)
+	roster(3, protocol.ScopeLiveRead, protocol.ScopeHistoryRead)
+	b.send(cloudwire.MsgHB, cloudwire.HB{Header: b.header(), Clock: cloudwire.ClockNTP})
+	env := b.read()
+	var r cloudwire.Resync
+	if env.T != cloudwire.MsgResync || cloudwire.Unmarshal(env.B, &r) != nil || len(r.What) != 1 || r.What[0] != cloudwire.ResyncTiles {
+		t.Fatalf("the service sent %q, want resync for tiles", env.T)
+	}
+	// Not again within five minutes.
+	roster(4, protocol.ScopeLiveRead)
+	roster(5, protocol.ScopeLiveRead, protocol.ScopeHistoryRead)
+	b.send(cloudwire.MsgHB, cloudwire.HB{Header: b.header(), Clock: cloudwire.ClockNTP})
+	_ = b.conn.SetReadDeadline(time.Now().Add(300 * time.Millisecond))
+	if _, _, err := b.conn.ReadMessage(); err == nil {
+		t.Fatal("a second resync within five minutes")
+	}
+}

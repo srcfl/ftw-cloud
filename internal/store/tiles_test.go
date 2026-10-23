@@ -69,12 +69,18 @@ func put(t *testing.T, box *Handle, b cloudwire.Tiles, seq uint64) []byte {
 	if err := b.Check(); err != nil {
 		t.Fatal(err)
 	}
-	b.Seq = seq
 	e := env(b, seq)
-	if !box.PutTile(e, b) {
+	if !kept(box, e, b, seq) {
 		t.Fatalf("%s at %d not held", b.TileID, b.StartMs)
 	}
 	return e
+}
+
+// kept puts a tile sent as seq, and says whether the store kept it.
+func kept(box *Handle, e []byte, b cloudwire.Tiles, seq uint64) bool {
+	b.Seq = seq
+	k, _ := box.PutTile(e, b)
+	return k
 }
 
 func owner(t *testing.T, s *Store) *Handle {
@@ -127,10 +133,10 @@ func TestAWholePieceStartsTheTileOverAndTheClosedTileEndsIt(t *testing.T) {
 	// The tile closes: its pieces go, and a late piece of it is refused.
 	closed := closedTile(tStart)
 	ce := env(closed, 4)
-	if !box.PutTile(ce, closed) {
+	if !kept(box, ce, closed, 4) {
 		t.Fatal("closed tile not held")
 	}
-	if late := piece(tStart, 63, 64); box.PutTile(env(late, 5), late) {
+	if late := piece(tStart, 63, 64); kept(box, env(late, 5), late, 5) {
 		t.Fatal("a piece of a closed tile was held")
 	}
 	got, _ = owner(t, s).Tiles(nil)
@@ -140,7 +146,7 @@ func TestAWholePieceStartsTheTileOverAndTheClosedTileEndsIt(t *testing.T) {
 	// The next tile's first piece starts a new trailing tile.
 	next := closedTile(tStart + tSpan)
 	next.Partial = true
-	if !box.PutTile(env(next, 6), next) {
+	if !kept(box, env(next, 6), next, 6) {
 		t.Fatal("the next tile's piece was refused")
 	}
 	if got, _ = owner(t, s).Tiles(nil); len(got) != 2 {
@@ -151,7 +157,7 @@ func TestAWholePieceStartsTheTileOverAndTheClosedTileEndsIt(t *testing.T) {
 func TestTilesAreBoundedPerHomeAndInAll(t *testing.T) {
 	s, box, _ := tileHome(t)
 	// The tile that ended 12:00 two days before ended more than 48 hours ago.
-	if old := closedTile(tStart - 5*tSpan); box.PutTile(env(old, 1), old) {
+	if old := closedTile(tStart - 5*tSpan); kept(box, env(old, 1), old, 1) {
 		t.Fatal("a tile that ended more than 48 hours ago was held")
 	}
 	for i := int64(4); i >= 1; i-- {
@@ -164,7 +170,7 @@ func TestTilesAreBoundedPerHomeAndInAll(t *testing.T) {
 		put(t, box, piece(tStart, 50+i, 51+i), uint64(20+i))
 	}
 	for i := 0; i < 4; i++ {
-		if late := piece(tStart, 70+i, 71+i); box.PutTile(env(late, 40), late) {
+		if late := piece(tStart, 70+i, 71+i); kept(box, env(late, uint64(40+i)), late, uint64(40+i)) {
 			t.Fatal("an append past the pieces a tile may have was held")
 		}
 	}
@@ -187,12 +193,12 @@ func TestTilesAreBoundedPerHomeAndInAll(t *testing.T) {
 	extra := closedTile(tStart - tSpan)
 	extra.Data[0] ^= 1
 	extra.Etag = protocol.EtagOf(extra.Data)
-	if box.PutTile(bytes.Repeat([]byte{1}, 64), extra) {
+	if kept(box, bytes.Repeat([]byte{1}, 64), extra, 60) {
 		t.Fatal("a tile past the store's cap was held")
 	}
 	before := s.TileBytes()
 	whole := piece(tStart, 0, 144)
-	if !box.PutTile(bytes.Repeat([]byte{2}, 40), whole) || s.TileBytes() >= before {
+	if !kept(box, bytes.Repeat([]byte{2}, 40), whole, 61) || s.TileBytes() >= before {
 		t.Fatal("a whole piece that frees bytes was refused at the cap")
 	}
 }
@@ -224,7 +230,7 @@ func TestTilesOutliveTheHourOfSilenceAndGoAfter48Hours(t *testing.T) {
 	// A tile from the future is refused.
 	future := piece(tStart, 0, 1)
 	c.t = time.UnixMilli(tStart - 2*tSpan)
-	if box.PutTile(env(future, 9), future) {
+	if kept(box, env(future, 9), future, 9) {
 		t.Fatal("a tile more than a tile ahead of the clock was held")
 	}
 }
@@ -259,7 +265,7 @@ func TestRevokePurgeOrAGrantWithoutHistoryDropsTheTiles(t *testing.T) {
 				}
 			}
 			// And none is taken while it lasts.
-			if b := closedTile(tStart - tSpan); name == "history taken out" && box.PutTile(env(b, 3), b) {
+			if b := closedTile(tStart - tSpan); name == "history taken out" && kept(box, env(b, 3), b, 3) {
 				t.Fatal("a tile was held under a grant without ftw.history.read")
 			}
 		})
@@ -286,7 +292,7 @@ func TestOnlyADeviceWithTheHistoryScopeReadsTiles(t *testing.T) {
 	}
 	// Nor does a widget's token.
 	_ = box.Put(cloudwire.MsgLive, []byte("live"), 2, true)
-	if !box.PutTile(env(piece(tStart, 0, 144), 3), piece(tStart, 0, 144)) {
+	if !kept(box, env(piece(tStart, 0, 144), 3), piece(tStart, 0, 144), 3) {
 		t.Fatal("piece not held")
 	}
 	tok, err := s.For(Principal{Kind: Token, Home: "h1", DeviceID: "owner"})
@@ -347,4 +353,104 @@ func equalEnvs(a, b [][]byte) bool {
 		}
 	}
 	return true
+}
+
+// An agent reads history from the box, never from these tiles: its handle
+// is refused, and its session gets none as they come.
+func TestAnAgentGetsNoTiles(t *testing.T) {
+	s, box, c := tileHome(t)
+	r := rosterWithAgent(2, c.t.Add(time.Hour))
+	r.Grant.Scopes = []string{protocol.ScopeLiveRead, protocol.ScopeHistoryRead}
+	r.Devices[2].Agent.Scopes = []string{protocol.ScopeHistoryRead}
+	box.SetRoster(r)
+	put(t, box, closedTile(tStart-tSpan), 1)
+	agent, err := s.For(Principal{Kind: Agent, Home: "h1", DeviceKey: agentKey})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := agent.Tiles(nil); !errors.Is(err, ErrDenied) {
+		t.Fatalf("an agent read tiles: %v", err)
+	}
+	_, sess, err := agent.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sess.Close()
+	put(t, box, piece(tStart, 0, 144), 2)
+	select {
+	case out := <-sess.C():
+		t.Fatalf("an agent session got %q", out.Env)
+	case <-time.After(50 * time.Millisecond):
+	}
+}
+
+// The box sends a closed tile again when its ledger changed: the later one
+// replaces the first, and an older one that comes late replaces nothing.
+// A piece that comes after one the box sent later is dropped too.
+func TestAClosedTileIsReplacedOnlyByOneSentLater(t *testing.T) {
+	s, box, _ := tileHome(t)
+	first := closedTile(tStart - tSpan)
+	fixed := first
+	fixed.Data = bytes.Clone(first.Data)
+	fixed.Data[0] ^= 1
+	fixed.Etag = protocol.EtagOf(fixed.Data)
+	put(t, box, first, 10)
+	put(t, box, fixed, 20)
+	if box.TilesHave()[first.TileID] != fixed.Etag {
+		t.Fatal("a later closed tile did not replace the first")
+	}
+	if kept(box, env(first, 15), first, 15) || box.TilesHave()[first.TileID] != fixed.Etag {
+		t.Fatal("an older closed tile replaced a later one")
+	}
+	put(t, box, piece(tStart, 0, 144), 30)
+	put(t, box, piece(tStart, 62, 63), 32)
+	if late := piece(tStart, 61, 62); kept(box, env(late, 31), late, 31) {
+		t.Fatal("a piece sent before the one held was laid after it")
+	}
+	if got, _ := owner(t, s).Tiles(map[string]string{first.TileID: fixed.Etag}); len(got) != 2 {
+		t.Fatalf("%d pieces", len(got))
+	}
+}
+
+// One home holds at most TileBytesPerHome, whatever room the store has.
+func TestAHomeHoldsAtMostItsShareOfTileBytes(t *testing.T) {
+	_, box, _ := tileHome(t)
+	big := func(n int) []byte { return bytes.Repeat([]byte{byte(n)}, 4000) }
+	for i := int64(1); i <= 4; i++ {
+		if !kept(box, big(int(i)), closedTile(tStart-i*tSpan), uint64(i)) {
+			t.Fatalf("closed tile %d not held", i)
+		}
+	}
+	held := 0
+	for i := 0; i < cloudwire.TilePiecesMax; i++ {
+		p := piece(tStart, 0, 144)
+		if i > 0 {
+			p = piece(tStart, 50+i, 51+i)
+		}
+		p.Seq = uint64(10 + i)
+		k, full := box.PutTile(big(10+i), p)
+		if k {
+			held++
+			continue
+		}
+		if !full {
+			t.Fatal("a tile past the home's share was refused for another reason")
+		}
+		break
+	}
+	if total := 4*4000 + held*4000; total > TileBytesPerHome || held == cloudwire.TilePiecesMax {
+		t.Fatalf("held %d pieces, %d bytes", held, total)
+	}
+}
+
+// Once the roster runs out no phone may read the tiles, so they go.
+func TestTilesGoWhenTheRosterRunsOut(t *testing.T) {
+	s, box, c := tileHome(t)
+	put(t, box, closedTile(tStart-tSpan), 1)
+	box.Disconnected(1)
+	c.t = c.t.Add(25 * time.Hour)
+	s.Sweep()
+	if s.TileBytes() != 0 || len(box.TilesHave()) != 0 {
+		t.Fatalf("%d bytes of tiles after the roster ran out", s.TileBytes())
+	}
 }

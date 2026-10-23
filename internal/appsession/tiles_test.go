@@ -73,7 +73,7 @@ func (h *harness) putTile(t *testing.T, raw []byte) {
 	if err := cloudwire.Unmarshal(env.B, &b); err != nil || b.Check() != nil {
 		t.Fatalf("a vector is not a tile: %v", err)
 	}
-	if !h.box.PutTile(raw, b) {
+	if kept, _ := h.box.PutTile(raw, b); !kept {
 		t.Fatal("a vector tile was not held")
 	}
 }
