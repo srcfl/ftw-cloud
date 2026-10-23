@@ -4,14 +4,15 @@
 //
 // The service learns a home only from its box: the home id is a hash of the
 // key that signed hello on this TLS session, never a field anyone sends, and
-// every message after it but tun must carry that key's signature. tun is a
-// phone's own Noise session with the box, which the service routes by device
-// and never reads. What the service may say back is the closed set in
-// downlink.go.
+// every message after it but tun and x must carry that key's signature. tun is
+// a phone's own Noise session with the box, and x a watch's exchange with it,
+// which the service routes by device and never reads. What the service may
+// say back is the closed set in downlink.go.
 package uplink
 
 import (
 	"bytes"
+	"context"
 	"crypto/ecdsa"
 	"crypto/rand"
 	"crypto/tls"
@@ -51,7 +52,7 @@ const (
 	writeTimeout = 10 * time.Second
 	// A box sends a few messages a second at most. Past the burst at this
 	// rate the connection closes; one home cannot occupy the service. tun
-	// is counted apart.
+	// is counted apart, and so is an x that answers an exchange.
 	rateBurst  = 60
 	ratePerSec = 10
 	// tun per home and direction, the limits the relay puts on a box's
@@ -92,6 +93,8 @@ var (
 	dropTunDown   = metrics.Drop("tun_rate_down")
 	dropUnknown   = metrics.Drop("box_unknown_type")
 	dropConnect   = metrics.Drop("box_connect_rate")
+	dropXBusy     = metrics.Drop("x_in_flight")
+	dropXUnknown  = metrics.Drop("x_unknown")
 	boxesFollow   = metrics.Default.Gauge("ftwcloud_boxes_following_shards", "Connected boxes that list shard in hello.caps.")
 )
 
@@ -109,6 +112,9 @@ type Uplink struct {
 	key             *ecdsa.PrivateKey
 	log             *slog.Logger
 	now             func() time.Time
+	// xWithin is how long Exchange waits for the box's answer:
+	// cloudwire.XAnswerWithin. Tests shorten it.
+	xWithin time.Duration
 
 	mu    sync.Mutex
 	conns map[string]*boxConn
@@ -155,8 +161,8 @@ func New(st *store.Store, reg *registry.Registry, key *ecdsa.PrivateKey, log *sl
 	if log == nil {
 		log = slog.Default()
 	}
-	return &Uplink{store: st, registry: reg, key: key, log: log, now: time.Now, conns: map[string]*boxConn{},
-		limits: map[string]*limits{}}
+	return &Uplink{store: st, registry: reg, key: key, log: log, now: time.Now, xWithin: cloudwire.XAnswerWithin,
+		conns: map[string]*boxConn{}, limits: map[string]*limits{}}
 }
 
 // limits are one home's rate limits. They outlive the connection, so a box
@@ -354,6 +360,38 @@ func (u *Uplink) Tun(home string, t cloudwire.Tun) bool {
 	return true
 }
 
+// Exchange sends a watch's exchange message d to its home's box as x and
+// waits for the box's answer. dev is the device the one-shot request's own
+// handshake matched, never one the watch named. Nil is no answer: no box is
+// connected, it does not take x, it has cloudwire.XInFlight open, or it did
+// not answer within cloudwire.XAnswerWithin.
+func (u *Uplink) Exchange(ctx context.Context, home, dev string, d []byte) []byte {
+	u.mu.Lock()
+	c := u.conns[home]
+	u.mu.Unlock()
+	if c == nil || !c.x {
+		return nil
+	}
+	id, answer, ok := c.wait(dev)
+	if !ok {
+		dropXBusy.Inc()
+		return nil
+	}
+	defer c.unwait(id)
+	if c.send(exchange{Dev: dev, ID: id, D: d}) != nil {
+		return nil
+	}
+	t := time.NewTimer(u.xWithin)
+	defer t.Stop()
+	select {
+	case a := <-answer:
+		return a
+	case <-t.C:
+	case <-ctx.Done():
+	}
+	return nil
+}
+
 // Restore holds each home's last signed roster again after a restart, read
 // back from the registry, so its phones are admitted before its box has
 // reconnected. A roster that does not verify with the home's key is left
@@ -437,9 +475,16 @@ type boxConn struct {
 	pub    *ecdsa.PublicKey
 	handle *store.Handle
 	purged bool
-	// tun is whether the box listed tun in hello.caps. An older box closes
-	// the uplink on a type it does not know, so it is sent none.
-	tun bool
+	// tun and x are whether the box listed each in hello.caps. An older box
+	// closes the uplink on a type it does not know, so it is sent none.
+	tun, x bool
+	// xs are the exchanges waiting for the box's answer, by the number
+	// xNext gave each: at most cloudwire.XInFlight. xEnded is set when the
+	// connection has ended and each was answered with nothing.
+	xMu    sync.Mutex
+	xs     map[uint32]waiter
+	xNext  uint32
+	xEnded bool
 	// bye is the reason the box gave for leaving, if it gave one.
 	bye string
 	// sock closes the socket with a code; started is when it was
@@ -458,6 +503,50 @@ type boxConn struct {
 	newest       map[string]uint64
 	tableRev     uint64
 	statsAllowed bool // current connection accepted the full statistics roster
+}
+
+// waiter is one exchange waiting for the box: the device it is for, and
+// where the box's answer goes.
+type waiter struct {
+	dev    string
+	answer chan []byte
+}
+
+// wait opens one exchange for dev and returns its number and where its
+// answer comes. False when cloudwire.XInFlight are open or the connection
+// has ended.
+func (c *boxConn) wait(dev string) (uint32, <-chan []byte, bool) {
+	c.xMu.Lock()
+	defer c.xMu.Unlock()
+	if c.xEnded || len(c.xs) >= cloudwire.XInFlight {
+		return 0, nil, false
+	}
+	if c.xs == nil {
+		c.xs = map[uint32]waiter{}
+	}
+	c.xNext++
+	w := waiter{dev: dev, answer: make(chan []byte, 1)}
+	c.xs[c.xNext] = w
+	return c.xNext, w.answer, true
+}
+
+// unwait closes one exchange, answered or not.
+func (c *boxConn) unwait(id uint32) {
+	c.xMu.Lock()
+	defer c.xMu.Unlock()
+	delete(c.xs, id)
+}
+
+// endX answers each exchange still waiting with nothing, at once: the box
+// that would answer is gone.
+func (c *boxConn) endX() {
+	c.xMu.Lock()
+	defer c.xMu.Unlock()
+	c.xEnded = true
+	for id, w := range c.xs {
+		close(w.answer)
+		delete(c.xs, id)
+	}
 }
 
 // bucket is a token bucket.
@@ -589,6 +678,7 @@ func (c *boxConn) run() error {
 	if !c.purged {
 		gen := c.handle.Connected()
 		defer c.handle.Disconnected(gen)
+		defer c.endX()
 		c.u.mu.Lock()
 		if old := c.u.conns[c.home]; old != nil {
 			// One uplink per home: the newer one wins.
@@ -646,6 +736,12 @@ func (c *boxConn) run() error {
 			}
 			continue
 		}
+		if env.T == cloudwire.MsgX && !c.purged {
+			if err := c.answer(env); err != nil {
+				return err
+			}
+			continue
+		}
 		if !c.allow() {
 			return fmt.Errorf("%w: faster than %d messages a second", errProtocol, ratePerSec)
 		}
@@ -674,6 +770,7 @@ func (c *boxConn) hello(env cloudwire.Envelope, nonce []byte) (cloudwire.Hello, 
 		return h, fmt.Errorf("%w: hello is not bound to this challenge and TLS session", errProtocol)
 	}
 	c.home, c.pub, c.tun = home, pub, slices.Contains(h.Caps, cloudwire.CapTun)
+	c.x = slices.Contains(h.Caps, cloudwire.CapX)
 	return h, nil
 }
 
@@ -704,6 +801,31 @@ func (c *boxConn) fromBox(env cloudwire.Envelope, bulk bool) error {
 	tunBytesUp.Add(int64(len(t.D)))
 	if !c.handle.TunBy(t, bulk) && !t.Ended() && c.tun {
 		return c.send(tun{Dev: t.Dev, Sid: t.Sid})
+	}
+	return nil
+}
+
+// answer hands the box's x to the exchange waiting under its number. Like
+// tun it is unsigned and never read. One nobody waits for, late or under
+// another device, is dropped and counted; past the box's message rate, the
+// uplink closes, since the box answers only what it was asked.
+func (c *boxConn) answer(env cloudwire.Envelope) error {
+	var a cloudwire.X
+	if len(env.Sig) != 0 || cloudwire.Unmarshal(env.B, &a) != nil || len(a.D) > cloudwire.XDataMax || a.Dev == "" {
+		return fmt.Errorf("%w: an x the service cannot route", errProtocol)
+	}
+	c.xMu.Lock()
+	w, ok := c.xs[a.ID]
+	if ok = ok && w.dev == a.Dev; ok {
+		delete(c.xs, a.ID)
+		w.answer <- a.D
+	}
+	c.xMu.Unlock()
+	if !ok {
+		dropXUnknown.Inc()
+		if !c.allow() {
+			return fmt.Errorf("%w: faster than %d messages a second", errProtocol, ratePerSec)
+		}
 	}
 	return nil
 }

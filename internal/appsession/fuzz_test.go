@@ -2,6 +2,7 @@ package appsession
 
 import (
 	"bytes"
+	"context"
 	"testing"
 
 	"github.com/srcfl/ftw/go/protocol/appwire"
@@ -119,6 +120,7 @@ func FuzzOnceMessage(f *testing.F) {
 		{cloudwire.MsgPushRegister, cloudwire.PushRegister{APNsToken: []byte{1}, Environment: "sandbox", Kind: "alert", App: "watch"}},
 		{cloudwire.MsgPushUnregister, cloudwire.PushUnregister{APNsToken: []byte{1}}},
 		{cloudwire.MsgSuspend, cloudwire.Suspend{DeviceID: "owner"}},
+		{cloudwire.MsgX, cloudwire.AppX{D: []byte{1}}},
 	} {
 		payload, _ := cloudwire.Unsigned(seed.t, seed.body)
 		f.Add(payload)
@@ -137,7 +139,7 @@ func FuzzOnceMessage(f *testing.F) {
 		if err != nil {
 			return // larger than one Noise message: never reaches the service
 		}
-		body, status := h.app.answerOnce(h.home, msg1)
+		body, status := h.app.answerOnce(context.Background(), h.home, msg1)
 		if !allowed[status] {
 			t.Fatalf("status %d", status)
 		}

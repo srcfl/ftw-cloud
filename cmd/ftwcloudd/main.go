@@ -230,6 +230,7 @@ func serve(args []string) error {
 		srv.App.Push = pushSvc
 		srv.App.Tokens = tokens
 		srv.App.Tunnel = up
+		srv.App.Exchange = up
 		srv.App.Shards = shards
 	}
 	app := srv.App

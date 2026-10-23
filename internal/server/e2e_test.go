@@ -90,7 +90,7 @@ func newStack(t *testing.T) *stack {
 	pushSvc.WatchApp = "energy.ftw.app.watchkitapp"
 	tokens := token.New(st, reg, log)
 	app := appsession.New(st, reg, up, noise, log)
-	app.Push, app.Tokens, app.Tunnel = pushSvc, tokens, up
+	app.Push, app.Tokens, app.Tunnel, app.Exchange = pushSvc, tokens, up, up
 	up.OnHeld = pushSvc.Held
 	up.OnRoster = func(home string, r *cloudwire.Roster) {
 		pushSvc.Roster(home, r)
@@ -123,12 +123,14 @@ type testBox struct {
 	// liveSeq is the seq of the newest live sent, which hb names.
 	liveSeq uint64
 	conn    wire.Conn
-	// heard is what the service told the box after hello_ok.
+	// heard is what the service told the box after hello_ok. An x it
+	// answers at once, with "answer to " before the watch's d.
 	heard chan string
 	start time.Time
+	mu    sync.Mutex
 }
 
-func (s *stack) connectBox() *testBox {
+func (s *stack) connectBox(caps ...string) *testBox {
 	s.t.Helper()
 	key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	pk, _ := cloudwire.PublicKeyBytesOf(&key.PublicKey)
@@ -152,7 +154,7 @@ func (s *stack) connectBox() *testBox {
 	}
 	boxNonce := bytes.Repeat([]byte{4}, cloudwire.NonceBytes)
 	b.send(cloudwire.MsgHello, cloudwire.Hello{Header: b.header(), V: cloudwire.Version, PK: pk, Nonce: ch.Nonce, EKM: ekm,
-		BoxNonce: boxNonce, Build: "e2e", Clock: cloudwire.ClockNTP, RosterSeq: 1, GrantID: bytes.Repeat([]byte{5}, 16)})
+		BoxNonce: boxNonce, Build: "e2e", Clock: cloudwire.ClockNTP, RosterSeq: 1, GrantID: bytes.Repeat([]byte{5}, 16), Caps: caps})
 	env = b.read()
 	if env.T != cloudwire.MsgHelloOK || cloudwire.Verify(&s.serviceKey.PublicKey, b.home, env) != nil {
 		s.t.Fatal("hello_ok did not check out")
@@ -166,6 +168,16 @@ func (s *stack) connectBox() *testBox {
 			}
 			payload, _ := cloudwire.DecodeFrame(msg)
 			e, _ := cloudwire.DecodeEnvelope(payload)
+			var x cloudwire.X
+			if e.T == cloudwire.MsgX && cloudwire.Unmarshal(e.B, &x) == nil {
+				x.D = append([]byte("answer to "), x.D...)
+				body, _ := cloudwire.Marshal(x)
+				raw, _ := cloudwire.Envelope{T: cloudwire.MsgX, B: body}.Encode()
+				frame, _ := cloudwire.EncodeFrame(raw)
+				b.mu.Lock()
+				_ = conn.WriteMessage(websocket.BinaryMessage, frame)
+				b.mu.Unlock()
+			}
 			b.heard <- e.T
 		}
 	}()
@@ -204,6 +216,8 @@ func (b *testBox) send(t string, body any) []byte {
 	}
 	raw, _ := env.Encode()
 	frame, _ := cloudwire.EncodeFrame(raw)
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	if err := b.conn.WriteMessage(websocket.BinaryMessage, frame); err != nil {
 		b.t.Fatal(err)
 	}
@@ -527,6 +541,41 @@ func (s *stack) now(tok string) (int, token.Now) {
 		}
 	}
 	return resp.StatusCode, n
+}
+
+// A watch whose roster entry has tun sends its exchange through the real
+// uplink to its box and back; with nothing the copy lets it read, it reads
+// nothing. When the box goes, the answer is empty and comes at once.
+func TestAWatchExchangesWithItsBoxEndToEnd(t *testing.T) {
+	s := newStack(t)
+	box := s.connectBox(cloudwire.CapX)
+	watchKey, _ := appwire.GenerateKeyPair()
+	box.roster(1, cloudwire.Device{ID: "watch", Key: watchKey.Public(), Role: "watch", Tun: true, Epoch: 1})
+	waitFor(t, "the roster", func() bool {
+		_, err := s.st.For(store.Principal{Kind: store.Device, Home: box.home, DeviceKey: watchKey.Public()})
+		return err == nil
+	})
+	watch := &watchClient{t: t, http: s.srv.Client(), base: s.srv.URL, key: watchKey, service: s.noise.Public(), home: box.home}
+	answer := func() (int, []byte) {
+		status, reply, _ := watch.call(cloudwire.MsgX, cloudwire.AppX{D: []byte("message 1")})
+		var x cloudwire.AppX
+		if env, err := cloudwire.DecodeEnvelope(reply); status == http.StatusOK && (err != nil || cloudwire.Unmarshal(env.B, &x) != nil) {
+			t.Fatalf("message 2: %v", err)
+		}
+		return status, x.D
+	}
+	if status, d := answer(); status != http.StatusOK || string(d) != "answer to message 1" {
+		t.Fatalf("%d %q", status, d)
+	}
+	if status, _, _ := watch.call(cloudwire.MsgRead, cloudwire.Read{}); status != http.StatusForbidden {
+		t.Fatalf("a read with no scope: %d", status)
+	}
+	_ = box.conn.Close()
+	waitFor(t, "the box to go", func() bool { return s.up.Boxes() == 0 })
+	start := time.Now()
+	if status, d := answer(); status != http.StatusOK || len(d) != 0 || time.Since(start) > time.Second {
+		t.Fatalf("%d %q after %v", status, d, time.Since(start))
+	}
 }
 
 // waitHeld waits until the service holds n envelopes a device may read.

@@ -17,6 +17,7 @@
 package appsession
 
 import (
+	"context"
 	"crypto/tls"
 	"errors"
 	"log/slog"
@@ -83,6 +84,13 @@ type Tunneler interface {
 	Tun(home string, t cloudwire.Tun) bool
 }
 
+// Exchanger sends a watch's exchange message to its home's box and returns
+// the box's answer. The uplink is one. dev comes from store.For, never from
+// the watch. Nil or empty is no answer.
+type Exchanger interface {
+	Exchange(ctx context.Context, home, dev string, d []byte) []byte
+}
+
 // What the app sessions count, summed over all homes.
 var (
 	appSockets     = metrics.Sockets("app")
@@ -124,6 +132,9 @@ type Server struct {
 	// Tunnel carries the phones' sessions to their boxes. Nil answers every
 	// tun with its end. Set before serving.
 	Tunnel Tunneler
+	// Exchange carries the watches' exchanges to their boxes. Nil answers
+	// every x with no answer. Set before serving.
+	Exchange Exchanger
 	// Shards says which homes this instance holds. Nil holds every home.
 	// Set before serving.
 	Shards *shard.Directory

@@ -13,12 +13,14 @@ maintains it.
 
 - **FTW Cloud forwards ciphertext it cannot read. It acts on a home only as
   an agent its owner approved, within limits the box enforces.** It sends a
-  box only `challenge`, `hello_ok`, `watch`, `resync`, `purged` and `tun`
-  (`internal/uplink/downlink.go`). Commands go from the app to the box inside
-  the phone's own Noise session, which rides here as `tun` under the device
-  id the service's own handshake proved, never one a phone names. An agent's
-  requests ride the agent's own Noise session the same way, and the box
-  admits it only while its signed roster lists the agent's key.
+  box only `challenge`, `hello_ok`, `watch`, `resync`, `purged`, `tun` and
+  `x` (`internal/uplink/downlink.go`). Commands go from the app to the box
+  inside the phone's own Noise session, which rides here as `tun` under the
+  device id the service's own handshake proved, never one a phone names. A
+  watch's commands go inside its exchange with the box, which rides as `x`
+  the same way. An agent's requests ride the agent's own Noise session the
+  same way, and the box admits it only while its signed roster lists the
+  agent's key.
 - **Agent keys live only in `ftwkeysd`** (`internal/keys`, `cmd/ftwkeysd`). It
   answers on a local unix socket, seals keys at rest under KMS, unseals a key
   only to open one session, and logs no key. `ftwcloudd` never holds an
@@ -29,9 +31,10 @@ maintains it.
   once at start: it puts back the rosters the registry holds, each checked
   against its home's key, and reads nothing out.
 - **The home id comes from the key that signed hello** on this connection,
-  never from a body field. Every later box message but `tun` must verify
-  with that key. `tun` is unsigned: its `d` is a phone's ciphertext, which
-  the service routes by `dev` and `sid` and never reads.
+  never from a body field. Every later box message but `tun` and `x` must
+  verify with that key. Both are unsigned: a `tun`'s `d` is a phone's
+  ciphertext, which the service routes by `dev` and `sid` and never reads,
+  and an `x`'s a watch's, routed by `dev` and `id`.
 - **Live readings stay in memory.** The versioned project statistics
   scope covers rounded closed-hour energy and configured capacities on
   disk for 48 hours. Only group cells pass `/v1/stats`; no staff route reads
@@ -46,7 +49,8 @@ maintains it.
 - **A phone can only narrow, or talk to its own box.** On `/v1/app` it can
   say whether it is looking, an owner can suspend a roster device, and a
   device the roster lists with `tun` can send its box session as `tun`. On
-  `/v1/app/once` a watch can read, ask for its token and register for push,
+  `/v1/app/once` a watch can read, ask for its token, register for push and,
+  if the roster lists it with `tun`, send its exchange with the box as `x`,
   and nothing else. The service admits a phone or a watch by the key its
   Noise handshake proved, and only if the box's roster lists it, or once for
   a pairing code the roster lists by its hash.
