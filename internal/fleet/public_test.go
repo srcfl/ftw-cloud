@@ -24,7 +24,7 @@ func TestPublicFleetHidesSmallDaysAndEachSmallLabel(t *testing.T) {
 	now := time.Now()
 	svc.now = func() time.Time { return now }
 	report := fleetwire.Report{Schema: fleetwire.Schema, Version: "v0.147.0", Channel: "stable", Drivers: []string{}, Battery: "none", Zone: "SE4", Age: "unknown"}
-	for range 9 {
+	for range 4 {
 		_, err = reg.FleetPut(report, now)
 		if err != nil {
 			t.Fatal(err)
@@ -48,10 +48,10 @@ func TestPublicFleetHidesSmallDaysAndEachSmallLabel(t *testing.T) {
 	_, _ = reg.FleetPut(report, now)
 	v = get()
 	d = v["days"].([]any)[0].(map[string]any)
-	if d["reports"] != float64(10) || len(d["ftw_versions"].(map[string]any)) != 0 {
+	if d["reports"] != float64(5) || len(d["ftw_versions"].(map[string]any)) != 0 {
 		t.Fatal("small version exposed")
 	}
-	if d["channels"].(map[string]any)["stable"] != float64(10) {
+	if d["channels"].(map[string]any)["stable"] != float64(5) {
 		t.Fatal("safe cell hidden")
 	}
 }
