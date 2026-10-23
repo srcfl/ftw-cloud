@@ -58,6 +58,8 @@ type box struct {
 	boot []byte
 	seq  uint64
 	conn *websocket.Conn
+	// caps are what hello lists.
+	caps []string
 }
 
 func newBox(t *testing.T) *box {
@@ -98,7 +100,7 @@ func (b *box) connect(s *service, ekmOverride []byte) (cloudwire.HelloOK, error)
 	boxNonce := bytes.Repeat([]byte{4}, 32)
 	b.send(cloudwire.MsgHello, cloudwire.Hello{Header: b.header(), V: 1, PK: b.pk, Nonce: ch.Nonce,
 		EKM: ekm, BoxNonce: boxNonce, Build: "test", Clock: cloudwire.ClockNTP, RosterSeq: 1,
-		GrantID: bytes.Repeat([]byte{5}, 16)})
+		GrantID: bytes.Repeat([]byte{5}, 16), Caps: b.caps})
 
 	_ = conn.SetReadDeadline(time.Now().Add(3 * time.Second))
 	_, msg, err := conn.ReadMessage()
@@ -334,12 +336,13 @@ func TestASecondUplinkReplacesTheFirst(t *testing.T) {
 	}
 }
 
-// The service can say five things to a box, and they are the protocol's five.
+// The service can say seven things to a box, and they are the protocol's
+// seven.
 func TestDownlinkIsTheProtocolsClosedSet(t *testing.T) {
 	s := newService(t)
 	all := []down{challenge{V: 1, Nonce: make([]byte, 32)}, helloOK{Have: map[string]string{}},
 		watch{Hz: 1}, resync{What: []string{cloudwire.ResyncFull}}, purged{What: cloudwire.PurgedHome},
-		tun{Dev: "q5Lw0Zb1", Sid: 1, D: []byte{1}}}
+		tun{Dev: "q5Lw0Zb1", Sid: 1, D: []byte{1}}, exchange{Dev: "q5Lw0Zb1", ID: 1, D: make([]byte, cloudwire.XDataMax)}}
 	var names []string
 	for _, m := range all {
 		frame, err := s.up.encodeDown("home", m)

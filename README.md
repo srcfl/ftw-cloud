@@ -79,11 +79,13 @@ to it yet.
 - **One-shot read (ADR 0009).** watchOS gives an app HTTPS and nothing
   lower, so a watch reads at `POST /v1/app/once?home=<id>`: the body is
   Noise IK message 1 with the prologue `ftw.cloud.once.v1:` and the home id,
-  and it carries one of `read {have, hz}`, `token.get`, `push.register` or
-  `push.unregister`. The service admits the watch exactly as `/v1/app`
-  admits a phone: its key in the box's roster, a roster that has not run
-  out, no suspension. The box lists a watch with role `watch` and the
-  scopes it derives; the service checks no role. A refusal is
+  and it carries one of `read {have, hz}`, `token.get`, `push.register`,
+  `push.unregister` or `x {d}`. The service admits the watch exactly as
+  `/v1/app` admits a phone: its key in the box's roster, a roster that has
+  not run out, no suspension. `x` needs the entry's `tun` and role `watch`;
+  the rest need a scope the readable copy grants. The box lists a watch
+  with role `watch` and the scopes it derives; the service checks no other
+  role. A refusal is
   403 with an empty body. The answer is message 2 with the snapshot, less
   the envelopes `have` says the watch holds, and the envelopes that did not
   fit after it, each after its length. The box's bytes go unchanged, so the
@@ -91,6 +93,15 @@ to it yet.
   Noise state after the answer. Limits: one read at a time per device and 30
   a minute, 16 at once per home, 64 at once in the process, message 1 at
   most 4 KiB, the answer within 10 s.
+- **A watch's commands ride `x`.** Its `d` is one message of the watch's
+  own short Noise session with the box (`ftw.exchange.v1`), which the
+  service cannot read. The service sends `x {dev, id, d}` down `/v1/box`,
+  with the device id its own handshake matched and a number of its own, and
+  answers with the `d` of the box's `x` under the same two, unchanged. It
+  answers an empty `d` at once when the box is not connected, did not list
+  `x` in `hello.caps` or has 8 exchanges open, and after 5 s without an
+  answer. `d` is at most 2,048 bytes, and the one-shot limits hold for the
+  whole wait. The service drops and counts an answer nobody waits for.
 - Limits per home: 16 sessions, one per device, 256 envelopes queued per
   phone, and a small message rate from each phone.
 - **QUIC.** UDP 443 carries what TCP 443 does, with the same certificate
@@ -355,12 +366,13 @@ box ──wss, TLS 1.3, signed frames──▶ /v1/box ──▶ store (memory) 
 - **A phone or a watch can narrow, and talk to its own box.** A phone can
   say whether it is looking, an owner can suspend a device in the roster, and
   a phone sends its box session as `tun`, which the service cannot read. A
-  watch can read, ask for its token and register for push.
-- **The service sends six things.** `challenge`, `hello_ok`, `watch`,
-  `resync`, `purged` and `tun` are the whole downlink. The first five ask
-  the box for nothing; `tun` carries a phone's ciphertext, which the box
-  judges as it judges the same session over the relay. The box closes the
-  uplink on anything else.
+  watch can read, ask for its token, register for push and send its
+  exchange with the box as `x`, which the service cannot read either.
+- **The service sends seven things.** `challenge`, `hello_ok`, `watch`,
+  `resync`, `purged`, `tun` and `x` are the whole downlink. The first five
+  ask the box for nothing; `tun` carries a phone's ciphertext and `x` a
+  watch's, which the box judges as it judges the same session over the
+  relay. The box closes the uplink on anything else.
 - **No TLS terminator in front.** Box and service bind the handshake to the
   TLS session, so `ftwcloudd` ends TLS itself. A TCP load balancer is fine,
   and so is a UDP one that forwards packets; nothing may end QUIC.

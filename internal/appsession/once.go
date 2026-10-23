@@ -1,6 +1,7 @@
 package appsession
 
 import (
+	"context"
 	"crypto/tls"
 	"errors"
 	"io"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/srcfl/ftw-cloud/internal/store"
+	"github.com/srcfl/ftw/go/protocol"
 	"github.com/srcfl/ftw/go/protocol/appwire"
 	"github.com/srcfl/ftw/go/protocol/cloudwire"
 )
@@ -22,12 +24,13 @@ import (
 //
 // The body is Noise IK message 1 to the service's Noise key, with
 // cloudwire.OncePrologue(home) as the prologue. It carries one unsigned
-// envelope: read, token.get, push.register or push.unregister. The service
-// admits the device as /v1/app admits a phone, through store.For with the
-// key the handshake proved, and answers with message 2 and, for a read, the
-// envelopes that did not fit, each after its length. It keeps no session and
-// no Noise state after the answer; only the counts that bound how often a
-// device, a home and the process may read.
+// envelope: read, token.get, push.register, push.unregister or x, a watch's
+// exchange message, which goes to the box and back unread ("Exchange"). The
+// service admits the device as /v1/app admits a phone, through store.For
+// with the key the handshake proved, and answers with message 2 and, for a
+// read, the envelopes that did not fit, each after its length. It keeps no
+// session and no Noise state after the answer; only the counts that bound
+// how often a device, a home and the process may read.
 
 const (
 	// MaxOnceInFlight bounds the reads the process answers at once, counted
@@ -166,7 +169,7 @@ func (s *Server) ServeOnce(w http.ResponseWriter, r *http.Request) {
 	}
 	defer s.once.leaveProcess()
 	start := time.Now()
-	body, status := s.answerOnce(home, msg1)
+	body, status := s.answerOnce(r.Context(), home, msg1)
 	onceHandshake.Since(start)
 	if status != http.StatusOK {
 		s.log.Debug("one-shot read refused", "status", status)
@@ -179,7 +182,7 @@ func (s *Server) ServeOnce(w http.ResponseWriter, r *http.Request) {
 
 // answerOnce runs the handshake and returns the answer body, or the status
 // that refuses it.
-func (s *Server) answerOnce(home string, msg1 []byte) ([]byte, int) {
+func (s *Server) answerOnce(ctx context.Context, home string, msg1 []byte) ([]byte, int) {
 	hs, err := appwire.NewResponder(appwire.HandshakeOptions{StaticKey: s.key, Prologue: cloudwire.OncePrologue(home),
 		Ephemeral: s.onceEphemeral})
 	if err != nil {
@@ -199,13 +202,23 @@ func (s *Server) answerOnce(home string, msg1 []byte) ([]byte, int) {
 	if err != nil {
 		return nil, http.StatusForbidden
 	}
+	// x is a watch's, and needs the roster's tun, as a phone's tunnel does,
+	// so commands work with the copy off. The rest needs the copy: an
+	// effective scope.
+	if env.T == cloudwire.MsgX {
+		if d := dev.Device(); !d.Tun || d.Role != protocol.RoleWatch {
+			return nil, http.StatusForbidden
+		}
+	} else if len(dev.Scopes()) == 0 {
+		return nil, http.StatusForbidden
+	}
 	release, ok := s.once.enter(home, hs.RemoteStatic(), s.now())
 	if !ok {
 		return nil, http.StatusTooManyRequests
 	}
 	defer release()
 
-	reply, rest, status := s.onceReply(home, dev, env)
+	reply, rest, status := s.onceReply(ctx, home, dev, env)
 	if status != http.StatusOK {
 		return nil, status
 	}
@@ -242,7 +255,7 @@ func (s *Server) answerOnce(home string, msg1 []byte) ([]byte, int) {
 // onceReply is message 2's payload and, for a read, the envelopes to follow
 // it. dev is the roster entry store.For matched, never anything the message
 // says.
-func (s *Server) onceReply(home string, dev *store.Handle, env cloudwire.Envelope) ([]byte, [][]byte, int) {
+func (s *Server) onceReply(ctx context.Context, home string, dev *store.Handle, env cloudwire.Envelope) ([]byte, [][]byte, int) {
 	switch env.T {
 	case cloudwire.MsgRead:
 		var rd cloudwire.Read
@@ -308,6 +321,21 @@ func (s *Server) onceReply(home string, dev *store.Handle, env cloudwire.Envelop
 			return nil, nil, http.StatusInternalServerError
 		}
 		return nil, nil, http.StatusOK
+	case cloudwire.MsgX:
+		var x cloudwire.AppX
+		if cloudwire.Unmarshal(env.B, &x) != nil || len(x.D) > cloudwire.XDataMax {
+			return nil, nil, http.StatusBadRequest
+		}
+		// No box, or no answer from it, is an empty d, never an error.
+		var d []byte
+		if s.Exchange != nil {
+			d = s.Exchange.Exchange(ctx, home, dev.Device().ID, x.D)
+		}
+		payload, err := cloudwire.Unsigned(cloudwire.MsgX, cloudwire.AppX{D: d})
+		if err != nil {
+			return nil, nil, http.StatusInternalServerError
+		}
+		return payload, nil, http.StatusOK
 	}
 	return nil, nil, http.StatusBadRequest
 }
