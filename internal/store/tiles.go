@@ -29,6 +29,7 @@ var (
 	dropTileOld    = metrics.Drop("tile_outside_48h")
 	dropTileFull   = metrics.Drop("tile_memory_full")
 	dropTileClosed = metrics.Drop("tile_piece_after_close")
+	dropTilePieces = metrics.Drop("tile_too_many_pieces")
 )
 
 // heldTile is one tiles envelope as the box sent it.
@@ -57,7 +58,8 @@ type tileSet struct {
 // verified and checked (cloudwire.Tiles.Check), and forwards it to the
 // phones reading the home that may read tiles. False says it was not held:
 // the grant holds no tiles, it is older than 48 hours or from the future, a
-// piece of a tile already closed, or memory for tiles is full.
+// piece of a tile already closed, an append past the pieces a tile may
+// have, or memory for tiles is full.
 func (x *Handle) PutTile(env []byte, t cloudwire.Tiles) bool {
 	if x.kind != Box {
 		return false
@@ -76,16 +78,52 @@ func (x *Handle) PutTile(env []byte, t cloudwire.Tiles) bool {
 		return false
 	}
 	ts := &x.h.tiles
-	if x.s.tileBytes.Load()+int64(len(env)) > x.s.tileBytesMax {
+	// What the tile replaces, first, so the memory check counts the net
+	// change: a whole piece or a closed tile often frees more than it takes.
+	var replaced int64
+	dropOpen := false
+	if !t.Partial {
+		if old, ok := ts.closed[held.id]; ok {
+			replaced += int64(len(old.env))
+		}
+		dropOpen = len(ts.open) > 0 && ts.open[0].id == held.id
+	} else {
+		if _, ok := ts.closed[held.id]; ok {
+			dropTileClosed.Inc()
+			return false
+		}
+		if len(ts.open) > 0 && ts.open[0].id != held.id {
+			if held.start < ts.open[0].start {
+				// A piece of an older tile than the one filling.
+				dropTileClosed.Inc()
+				return false
+			}
+			dropOpen = true
+		}
+		dropOpen = dropOpen || t.Whole()
+		if !dropOpen && len(ts.open) >= cloudwire.TilePiecesMax {
+			// More appends than a box sends between whole pieces. The
+			// pieces held still lay back into the tile; this one waits
+			// for the box's next whole piece, which carries it too.
+			dropTilePieces.Inc()
+			return false
+		}
+	}
+	if dropOpen {
+		for _, p := range ts.open {
+			replaced += int64(len(p.env))
+		}
+	}
+	if grow := int64(len(env)) - replaced; grow > 0 && x.s.tileBytes.Load()+grow > x.s.tileBytesMax {
 		dropTileFull.Inc()
 		return false
+	}
+	if dropOpen {
+		x.dropOpenLocked()
 	}
 	if !t.Partial {
 		if old, ok := ts.closed[held.id]; ok {
 			x.tileBytesLocked(-int64(len(old.env)))
-		}
-		if len(ts.open) > 0 && ts.open[0].id == held.id {
-			x.dropOpenLocked()
 		}
 		if ts.closed == nil {
 			ts.closed = map[string]heldTile{}
@@ -104,27 +142,8 @@ func (x *Handle) PutTile(env []byte, t cloudwire.Tiles) bool {
 			delete(ts.closed, oldest)
 		}
 	} else {
-		if _, ok := ts.closed[held.id]; ok {
-			dropTileClosed.Inc()
-			return false
-		}
-		if len(ts.open) > 0 && ts.open[0].id != held.id {
-			if held.start < ts.open[0].start {
-				// A piece of an older tile than the one filling.
-				dropTileClosed.Inc()
-				return false
-			}
-			x.dropOpenLocked()
-		}
-		if t.Whole() {
-			x.dropOpenLocked()
-		}
 		ts.open = append(ts.open, held)
 		x.tileBytesLocked(int64(len(env)))
-		for len(ts.open) > cloudwire.TilePiecesMax {
-			x.tileBytesLocked(-int64(len(ts.open[0].env)))
-			ts.open = ts.open[1:]
-		}
 	}
 	at := stamp()
 	for sess := range x.h.sessions {

@@ -157,21 +157,43 @@ func TestTilesAreBoundedPerHomeAndInAll(t *testing.T) {
 	for i := int64(4); i >= 1; i-- {
 		put(t, box, closedTile(tStart-i*tSpan), uint64(10-i))
 	}
-	for i := 0; i < cloudwire.TilePiecesMax+4; i++ {
-		put(t, box, piece(tStart, i, i+1), uint64(20+i))
+	// A whole piece and 15 appends; past them appends are refused, and what
+	// is held still lays back into the tile, its first bucket included.
+	put(t, box, piece(tStart, 0, 144), 20)
+	for i := 1; i < cloudwire.TilePiecesMax; i++ {
+		put(t, box, piece(tStart, 50+i, 51+i), uint64(20+i))
+	}
+	for i := 0; i < 4; i++ {
+		if late := piece(tStart, 70+i, 71+i); box.PutTile(env(late, 40), late) {
+			t.Fatal("an append past the pieces a tile may have was held")
+		}
 	}
 	got, _ := owner(t, s).Tiles(nil)
-	if len(box.TilesHave()) != 4 || len(got)-4 != cloudwire.TilePiecesMax {
+	if len(box.TilesHave()) != 4 || len(got)-4 != cloudwire.TilePiecesMax || !bytes.Equal(got[4], env(piece(tStart, 0, 144), 20)) {
 		t.Fatalf("held %d closed and %d pieces", len(box.TilesHave()), len(got)-len(box.TilesHave()))
 	}
+	// The next whole piece starts the tile over.
+	put(t, box, piece(tStart, 0, 144), 50)
+	if got, _ = owner(t, s).Tiles(nil); len(got) != 5 {
+		t.Fatalf("after a new whole piece, %d tiles", len(got))
+	}
 
-	// All homes together: past the cap a new tile is dropped.
+	// All homes together: past the cap a tile that adds bytes is dropped,
+	// and one that frees more than it takes is held.
+	for i := 1; i <= 3; i++ {
+		put(t, box, piece(tStart, 50+i, 51+i), uint64(50+i))
+	}
 	s.tileBytesMax = s.TileBytes() + 10
 	extra := closedTile(tStart - tSpan)
 	extra.Data[0] ^= 1
 	extra.Etag = protocol.EtagOf(extra.Data)
 	if box.PutTile(bytes.Repeat([]byte{1}, 64), extra) {
 		t.Fatal("a tile past the store's cap was held")
+	}
+	before := s.TileBytes()
+	whole := piece(tStart, 0, 144)
+	if !box.PutTile(bytes.Repeat([]byte{2}, 40), whole) || s.TileBytes() >= before {
+		t.Fatal("a whole piece that frees bytes was refused at the cap")
 	}
 }
 
