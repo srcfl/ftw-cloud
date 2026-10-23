@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/srcfl/ftw-cloud/internal/store"
 	"github.com/srcfl/ftw/go/protocol"
 )
 
@@ -121,6 +122,46 @@ func TestStepLabel(t *testing.T) {
 	for ms, want := range map[int64]string{0: "", 30_000: "30s", 300_000: "5m", 3_600_000: "1h", 7_200_000: "2h", 86_400_000: "1d", 90_000: "90s"} {
 		if got := stepLabel(ms); got != want {
 			t.Errorf("stepLabel(%d) = %q, want %q", ms, got, want)
+		}
+	}
+}
+
+// A box that is away: history_query says so, and when FTW Cloud last heard
+// from it. It reads nothing from FTW Cloud's copy instead.
+func TestHistoryFromABoxThatIsAwaySaysWhenItWasLastSeen(t *testing.T) {
+	w := newWorld(t)
+	b := w.connectBox()
+	a := w.connect(b, "")
+	if _, isErr, text := a.call("history_query", map[string]any{"range": "1h"}); isErr {
+		t.Fatalf("history_query with the box up: %s", text)
+	}
+
+	_ = b.conn.Close()
+	box, err := w.st.For(store.Principal{Kind: store.Box, Home: b.home})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, func() bool { online, _ := box.Presence(); return !online })
+	_, seen := box.Presence()
+	_, isErr, text := a.call("history_query", map[string]any{"range": "1h"})
+	if !isErr || !strings.Contains(text, "The box is away") ||
+		!strings.Contains(text, seen.UTC().Format(time.RFC3339)) || !strings.Contains(text, "ago") {
+		t.Fatalf("history_query with the box away: %v %s", isErr, text)
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if n := strings.Count(strings.Join(b.asked, "\n"), protocol.MsgHistQuery+" "); n != 1 {
+		t.Fatalf("the box was asked hist.query %d times", n)
+	}
+}
+
+func TestAgoWords(t *testing.T) {
+	for d, want := range map[time.Duration]string{
+		10 * time.Second: "under a minute", time.Minute: "1 minute", 59 * time.Minute: "59 minutes",
+		3 * time.Hour: "3 hours", 47 * time.Hour: "47 hours", 72 * time.Hour: "3 days",
+	} {
+		if got := agoWords(d); got != want {
+			t.Errorf("%s: %q, want %q", d, got, want)
 		}
 	}
 }

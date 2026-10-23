@@ -296,13 +296,13 @@ func readTools() []*tool {
 					FromMs: fromMs, ToMs: toMs, MaxPoints: &ask}
 				c, err := cc.conn(ctx)
 				if err != nil {
-					return nil, err
+					return nil, cc.away(err)
 				}
 				ctx, cancel := context.WithTimeout(ctx, cc.s.pool.Call)
 				defer cancel()
 				chunks, end, err := c.hist(ctx, q)
 				if err != nil {
-					return nil, words(err)
+					return nil, cc.away(words(err))
 				}
 				return historyData(chunks, end, fromMs, toMs, int(points)), nil
 			},
@@ -492,6 +492,41 @@ func tilePoints(res protocol.Resolution, fromMs, toMs int64) int64 {
 	first := protocol.TileStartFor(res, fromMs)
 	last := protocol.TileStartFor(res, max(fromMs, toMs-1))
 	return min((last+span-first)/protocol.ResolutionStepMs[res], 2000)
+}
+
+// away puts a box that is away in words: when FTW Cloud last heard from it,
+// and that its history stays there. An agent never reads FTW Cloud's
+// readable copy, so every read it makes is one the box audits and a revoke
+// stops (srcfl/ftw docs/protocol-cloud.md, "Who may open an agent's
+// session"), and there is nothing to give instead. err goes back unchanged
+// while the box is up.
+func (cc *callCtx) away(err error) error {
+	seen, away := cc.s.pool.away(cc.grant.Subject)
+	if !away || seen.IsZero() {
+		return err
+	}
+	return userError(fmt.Sprintf("The box is away. FTW Cloud last heard from it at %s, %s ago. Its history is read from the box only, so ask again when it is back.",
+		seen.UTC().Format(time.RFC3339), agoWords(cc.s.pool.now().Sub(seen))))
+}
+
+// agoWords is a time since in the largest whole unit: "under a minute",
+// "1 minute", "3 hours", "2 days".
+func agoWords(d time.Duration) string {
+	unit := func(n int64, one string) string {
+		if n == 1 {
+			return "1 " + one
+		}
+		return fmt.Sprintf("%d %ss", n, one)
+	}
+	switch {
+	case d < time.Minute:
+		return "under a minute"
+	case d < time.Hour:
+		return unit(int64(d/time.Minute), "minute")
+	case d < 48*time.Hour:
+		return unit(int64(d/time.Hour), "hour")
+	}
+	return unit(int64(d/(24*time.Hour)), "day")
 }
 
 // historyData unpacks hist.chunk tiles into one list of points per series
