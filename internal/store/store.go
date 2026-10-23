@@ -554,6 +554,15 @@ type Snapshot struct {
 	Online     bool
 }
 
+// Presence is whether the box's uplink is up and when the service last heard
+// from it: the service's own word, never a reading. Any principal the home
+// admits may ask, an agent too.
+func (x *Handle) Presence() (online bool, lastSeen time.Time) {
+	x.h.mu.Lock()
+	defer x.h.mu.Unlock()
+	return x.h.online, x.h.lastSeen
+}
+
 // Snapshot returns the device's view.
 func (x *Handle) Snapshot() (Snapshot, error) {
 	if x.kind != Device {

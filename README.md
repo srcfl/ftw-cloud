@@ -148,7 +148,8 @@ to it yet.
   so they outlive the hour after which readings go, but a phone still needs
   a roster in force to get in. A revoke, a grant without history, a purge
   and the 90-day expiry delete them. Assistants read history from the box,
-  never from these tiles.
+  never from these tiles; while the box is away, `history_query` says so and
+  when FTW Cloud last heard from it.
 - **Widget token.** A device asks for its extension token over its app
   session with `token.get`. A widget reads `GET /v1/now` with it: the newest
   `live`, `prices` and `hb` as the box signed them, and nothing else. The

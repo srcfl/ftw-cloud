@@ -582,6 +582,17 @@ func (c *agentConn) send(ctx context.Context, t string, id *uint32, body any) er
 	return nil
 }
 
+// away says whether a home's box is away, and when the service last heard
+// from it, for an agent the home still admits.
+func (p *Pool) away(sub oauth.Subject) (time.Time, bool) {
+	h, err := p.store.For(store.Principal{Kind: store.Agent, Home: sub.Home, DeviceKey: sub.Key})
+	if err != nil {
+		return time.Time{}, false
+	}
+	online, seen := h.Presence()
+	return seen, !online
+}
+
 // take waits for the session's turn. At most maxWaiting calls wait.
 func (c *agentConn) take(ctx context.Context) (func(), error) {
 	c.mu.Lock()
