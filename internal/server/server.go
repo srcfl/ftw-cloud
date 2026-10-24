@@ -12,6 +12,8 @@
 //	/healthz  liveness, and nothing about any home
 //	/oauth/*, /.well-known/oauth-*  the authorization server for assistants (package oauth)
 //	/mcp      the MCP server, for assistants with a token (package mcp)
+//	/v1/ops   the service's own hours and the fleet's exact days, to the
+//	          project stats Worker's key only (package ops)
 //
 // The same handler serves HTTP/3 (package quicdoor), where the sockets do not
 // open: they are WebSockets over TCP.
@@ -42,7 +44,7 @@ const SourceArchive = "/usr/share/ftw-cloud/source.tar.gz"
 
 // Routes are every path the service answers.
 var Routes = append([]string{"/v1/box", "/v1/app", "/v1/app/once", "/v1/now", "/v1/fleet", "/v1/fleet/public",
-	"/v1/ohttp", "/.well-known/ohttp-gateway", "/v1/energy/public", "/v1/stats", "/source", "/healthz", "/mcp"}, oauth.Routes...)
+	"/v1/ohttp", "/.well-known/ohttp-gateway", "/v1/energy/public", "/v1/stats", "/v1/ops", "/source", "/healthz", "/mcp"}, oauth.Routes...)
 
 // devRoutes adds a local inspection route in binaries built with
 // -tags ftwclouddev. It is nil in every other build.
@@ -67,6 +69,8 @@ type Server struct {
 	Statistics http.Handler
 	MCP        http.Handler
 	Log        *slog.Logger
+	// Ops is Sourceful's internal feed, to one key; nil serves none.
+	Ops http.Handler
 	// AltSvc, when set, is the Alt-Svc header that points TCP clients at
 	// HTTP/3 (package quicdoor). It goes on plain responses only: a client
 	// that learns HTTP/3 from a WebSocket upgrade might try the socket over
@@ -117,6 +121,11 @@ func (s *Server) Handler() http.Handler {
 		mux.Handle("/v1/stats", s.Statistics)
 	} else {
 		mux.HandleFunc("/v1/stats", notYet)
+	}
+	if s.Ops != nil {
+		mux.Handle("/v1/ops", s.Ops)
+	} else {
+		mux.HandleFunc("/v1/ops", notYet)
 	}
 	mux.HandleFunc("/source", source)
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
@@ -218,6 +227,11 @@ func (s *Server) Upkeep(ctx context.Context, every time.Duration) {
 			if f, ok := s.Statistics.(interface{ Prune(time.Time) error }); ok {
 				if err := f.Prune(time.Now()); err != nil {
 					s.Log.Warn("statistics upkeep failed")
+				}
+			}
+			if f, ok := s.Ops.(interface{ Prune(time.Time) error }); ok {
+				if err := f.Prune(time.Now()); err != nil {
+					s.Log.Warn("ops upkeep failed")
 				}
 			}
 			if err := s.Registry.TokenExpire(time.Now()); err != nil {

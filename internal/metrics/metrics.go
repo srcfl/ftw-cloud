@@ -72,6 +72,9 @@ func (h *Histogram) Observe(d time.Duration) {
 // Since counts the time since t.
 func (h *Histogram) Since(t time.Time) { h.Observe(time.Since(t)) }
 
+// Count is how many durations it has counted.
+func (h *Histogram) Count() int64 { return h.n.Load() }
+
 // snapshot is the bucket counts now.
 func (h *Histogram) snapshot() []int64 {
 	out := make([]int64, len(h.counts))
@@ -83,7 +86,9 @@ func (h *Histogram) snapshot() []int64 {
 
 // quantile is the upper bound of the bucket that holds the q-th quantile of
 // counts, a delta between two snapshots, or 0 without any.
-func (h *Histogram) quantile(counts []int64, q float64) float64 {
+func (h *Histogram) quantile(counts []int64, q float64) float64 { return quantile(h.bounds, counts, q) }
+
+func quantile(bounds []float64, counts []int64, q float64) float64 {
 	var total int64
 	for _, c := range counts {
 		total += c
@@ -96,10 +101,10 @@ func (h *Histogram) quantile(counts []int64, q float64) float64 {
 	for i, c := range counts {
 		seen += c
 		if seen >= rank {
-			if i == len(h.bounds) {
+			if i == len(bounds) {
 				return math.Inf(1)
 			}
-			return h.bounds[i]
+			return bounds[i]
 		}
 	}
 	return math.Inf(1)
@@ -268,6 +273,18 @@ func Drop(reason string) *Counter {
 // Sockets is the open sockets of one kind.
 func Sockets(kind string) *Gauge {
 	return Default.Gauge("ftwcloud_sockets", "Open sockets, by kind.", "kind", kind)
+}
+
+// TransportSockets is the open sockets of one kind over one transport,
+// quic or websocket.
+func TransportSockets(kind, transport string) *Gauge {
+	return Default.Gauge("ftwcloud_transport_sockets", "Open sockets, by kind and transport.", "kind", kind, "transport", transport)
+}
+
+// BytesOut counts the bytes of the messages the service writes to one kind
+// of socket. TLS, WebSocket and QUIC framing come on top.
+func BytesOut(kind string) *Counter {
+	return Default.Counter("ftwcloud_bytes_out_total", "Bytes of messages written to sockets, by kind; TLS, WebSocket and QUIC framing not counted.", "kind", kind)
 }
 
 // Handshake times one kind of handshake, from the upgrade or the request to

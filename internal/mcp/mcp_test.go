@@ -712,3 +712,18 @@ func TestARestartDrainsAgentSessions(t *testing.T) {
 		t.Fatalf("a drained instance opened a session: %d handshakes", hs)
 	}
 }
+
+// Calls are counted by outcome and timed, summed over every home and agent.
+func TestCallsAreCountedByOutcome(t *testing.T) {
+	w := newWorld(t)
+	b := w.connectBox()
+	a := w.connect(b, "")
+	ok, unknown, took := mcpOutcomes["ok"].Load(), mcpOutcomes["unknown_tool"].Load(), mcpCall.Count()
+	if _, isErr, text := a.call("status", nil); isErr {
+		t.Fatal(text)
+	}
+	_ = a.rpc("tools/call", map[string]any{"name": "no_such_tool"}, false)
+	if mcpOutcomes["ok"].Load() != ok+1 || mcpOutcomes["unknown_tool"].Load() != unknown+1 || mcpCall.Count() != took+1 {
+		t.Fatalf("ok %d, unknown %d, timed %d", mcpOutcomes["ok"].Load()-ok, mcpOutcomes["unknown_tool"].Load()-unknown, mcpCall.Count()-took)
+	}
+}

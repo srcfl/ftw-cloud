@@ -16,6 +16,7 @@ import (
 	"github.com/srcfl/ftw-cloud/internal/appsession"
 	"github.com/srcfl/ftw-cloud/internal/fleet"
 	"github.com/srcfl/ftw-cloud/internal/gateway"
+	"github.com/srcfl/ftw-cloud/internal/ops"
 	"github.com/srcfl/ftw-cloud/internal/registry"
 	"github.com/srcfl/ftw-cloud/internal/statistics"
 	"github.com/srcfl/ftw-cloud/internal/store"
@@ -49,6 +50,10 @@ func newServer(t *testing.T) (*Server, string) {
 		t.Fatal(err)
 	}
 	if s.Gateway, err = gateway.New(reg, testGateway(t)); err != nil {
+		t.Fatal(err)
+	}
+	// The internal feed with a key set: a request without it reads nothing.
+	if s.Ops, err = ops.New(reg, "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08", "s1"); err != nil {
 		t.Fatal(err)
 	}
 	up.Statistics = true

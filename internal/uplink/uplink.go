@@ -82,6 +82,7 @@ const (
 // What the uplink counts, summed over all homes.
 var (
 	boxSockets    = metrics.Sockets("box")
+	boxOver       = map[string]*metrics.Gauge{cloudwire.TransportQUIC: metrics.TransportSockets("box", cloudwire.TransportQUIC), cloudwire.TransportWebSocket: metrics.TransportSockets("box", cloudwire.TransportWebSocket)}
 	boxHandshake  = metrics.Handshake("box")
 	tunDown       = metrics.Forward("tun_down")
 	wrongShard    = metrics.WrongShard("box")
@@ -97,6 +98,7 @@ var (
 	dropConnect   = metrics.Drop("box_connect_rate")
 	dropXBusy     = metrics.Drop("x_in_flight")
 	dropXUnknown  = metrics.Drop("x_unknown")
+	boxBytesOut   = metrics.BytesOut("box")
 	boxesFollow   = metrics.Default.Gauge("ftwcloud_boxes_following_shards", "Connected boxes that list shard in hello.caps.")
 )
 
@@ -308,6 +310,10 @@ func (u *Uplink) ServeConn(conn wire.Conn, ekm []byte) {
 	conn.SetReadLimit(maxBoxFrame)
 	boxSockets.Add(1)
 	defer boxSockets.Add(-1)
+	if over := boxOver[wire.Transport(conn)]; over != nil {
+		over.Add(1)
+		defer over.Add(-1)
+	}
 	sock := u.sockets.Add(conn)
 	defer u.sockets.Remove(sock)
 	c := &boxConn{u: u, conn: conn, sock: sock, ekm: ekm, started: time.Now()}
@@ -607,8 +613,10 @@ func (c *boxConn) writeFrame(frame []byte) error {
 	}
 	if err != nil {
 		_ = c.conn.Close()
+		return err
 	}
-	return err
+	boxBytesOut.Add(int64(len(frame)))
+	return nil
 }
 
 // closeAndWait ends the uplink with a close code and reason, and waits for

@@ -94,6 +94,8 @@ type Exchanger interface {
 // What the app sessions count, summed over all homes.
 var (
 	appSockets     = metrics.Sockets("app")
+	appBytesOut    = metrics.BytesOut("app")
+	appOver        = map[string]*metrics.Gauge{cloudwire.TransportQUIC: metrics.TransportSockets("app", cloudwire.TransportQUIC), cloudwire.TransportWebSocket: metrics.TransportSockets("app", cloudwire.TransportWebSocket)}
 	appHandshake   = metrics.Handshake("app")
 	onceHandshake  = metrics.Handshake("once")
 	envelopeOut    = metrics.Forward("envelope")
@@ -221,6 +223,10 @@ func (s *Server) ServeConn(conn wire.Conn, home string) {
 	defer conn.Close()
 	appSockets.Add(1)
 	defer appSockets.Add(-1)
+	if over := appOver[wire.Transport(conn)]; over != nil {
+		over.Add(1)
+		defer over.Add(-1)
+	}
 	if !cloudwire.ValidHome(home) {
 		_ = conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(cloudwire.CloseProtocol, ""), time.Now().Add(time.Second))
 		return
@@ -538,7 +544,11 @@ func (c *phoneConn) writeAs(kind int, msg []byte) error {
 	if err := c.conn.SetWriteDeadline(time.Now().Add(writeTimeout)); err != nil {
 		return err
 	}
-	return c.conn.WriteMessage(wire.Kind(c.conn, kind), msg)
+	if err := c.conn.WriteMessage(wire.Kind(c.conn, kind), msg); err != nil {
+		return err
+	}
+	appBytesOut.Add(int64(len(msg)))
+	return nil
 }
 
 // forward sends one box envelope as the box sent it. An envelope too large
