@@ -22,10 +22,17 @@ func (r *Registry) FleetPut(report fleetwire.Report, now time.Time) (bool, error
 		return false, err
 	}
 	defer tx.Rollback()
+	if ok, err := fleetPutTx(tx, report, now); err != nil || !ok {
+		return false, err
+	}
+	return true, tx.Commit()
+}
+
+func fleetPutTx(tx *sql.Tx, report fleetwire.Report, now time.Time) (bool, error) {
 	date := now.UTC().Format(time.DateOnly)
 	day := fleetwire.NewDay(date)
 	var old []byte
-	err = tx.QueryRow(`SELECT totals FROM fleet_days WHERE date = ?`, date).Scan(&old)
+	err := tx.QueryRow(`SELECT totals FROM fleet_days WHERE date = ?`, date).Scan(&old)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return false, err
 	}
@@ -47,7 +54,7 @@ func (r *Registry) FleetPut(report fleetwire.Report, now time.Time) (bool, error
 	if _, err := tx.Exec(`DELETE FROM fleet_days WHERE date < ? OR date NOT IN (SELECT date FROM fleet_days ORDER BY date DESC LIMIT ?)`, now.UTC().AddDate(0, 0, 1-fleetwire.MaxDays).Format(time.DateOnly), fleetwire.MaxDays); err != nil {
 		return false, err
 	}
-	return true, tx.Commit()
+	return true, nil
 }
 
 func (r *Registry) FleetView(now time.Time) (fleetwire.View, error) {

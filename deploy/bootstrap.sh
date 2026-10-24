@@ -131,7 +131,7 @@ if ! [[ $user =~ ^[0-9]+:[0-9]+$ ]]; then
   exit 1
 fi
 vol=$(docker volume inspect -f '{{.Mountpoint}}' ftw-cloud_ftw-cloud-state 2>/dev/null || true)
-for p in "$vol" /run/ftw-cloud/service.key /run/ftw-cloud/apns /run/ftw-cloud/noise; do
+for p in "$vol" /run/ftw-cloud/service.key /run/ftw-cloud/apns /run/ftw-cloud/noise /run/ftw-cloud/ohttp; do
   if [ -n "$p" ] && [ -e "$p" ]; then
     chown -R "$user" "$p"
   fi

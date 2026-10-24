@@ -381,8 +381,9 @@ Cloud data; the images on `ghcr.io` hold only code.
 
 ## Not here yet
 
-The APNs key ([apns.md](apns.md)) and the Noise key phones dial
-([noise.md](noise.md)) come from Parameter Store. HTTP/3 needs UDP 443 in the
+The APNs key ([apns.md](apns.md)), the Noise key phones dial
+([noise.md](noise.md)) and the anonymous reports' gateway key
+([ohttp.md](ohttp.md)) come from Parameter Store. HTTP/3 needs UDP 443 in the
 security group ([http3.md](http3.md)). Widget tokens need no
 secret: the registry holds their hashes. Statistics (C8) have their own
 [review](../privacy/project-statistics-dpia.md) and

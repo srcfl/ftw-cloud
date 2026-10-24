@@ -39,6 +39,12 @@ func TestPublicFleetHidesSmallDaysAndEachSmallLabel(t *testing.T) {
 		}
 		return v
 	}
+	// Today is still open, so its running counts are not listed: whoever
+	// forwarded a report could see which count it moved.
+	if days := get()["days"].([]any); len(days) != 0 {
+		t.Fatalf("today listed: %v", days)
+	}
+	svc.now = func() time.Time { return now.Add(24 * time.Hour) }
 	v := get()
 	d := v["days"].([]any)[0].(map[string]any)
 	if d["reports"] != nil || len(d["ftw_versions"].(map[string]any)) != 0 {

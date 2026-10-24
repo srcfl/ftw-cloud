@@ -3,6 +3,7 @@
 // reads and never controls. See README.md.
 //
 //	ftwcloudd keygen -out service.key          make the service key; prints its public half
+//	ftwcloudd keygen -ohttp -out ohttp.key     make a gateway key; prints the configuration Core pins
 //	ftwcloudd keygen -noise -out noise.key     make the Noise key phones dial; prints its public half
 //	ftwcloudd metrics                          print the running service's counts, from inside its container
 //	ftwcloudd health https://host/healthz      check /healthz over TCP and HTTP/3
@@ -38,6 +39,7 @@ import (
 	"github.com/srcfl/ftw-cloud/internal/apns"
 	"github.com/srcfl/ftw-cloud/internal/appsession"
 	"github.com/srcfl/ftw-cloud/internal/fleet"
+	"github.com/srcfl/ftw-cloud/internal/gateway"
 	"github.com/srcfl/ftw-cloud/internal/keys"
 	"github.com/srcfl/ftw-cloud/internal/mcp"
 	"github.com/srcfl/ftw-cloud/internal/metrics"
@@ -89,6 +91,7 @@ func serve(args []string) error {
 	stateDir := fs.String("state", "/state", "directory for the registry and certificates")
 	keyPath := fs.String("service-key", "/run/secrets/ftw-cloud-service.key", "service key, PEM")
 	noisePath := fs.String("noise-key", "/run/secrets/ftw-cloud-noise.key", "Noise key phones dial, PEM; without it /v1/app is off")
+	ohttpPath := fs.String("ohttp-key", "/run/secrets/ftw-cloud-ohttp.key", "Oblivious HTTP gateway keys, PEM; without them /v1/ohttp is off")
 	certFile := fs.String("tls-cert", "", "certificate file, instead of ACME (local tests)")
 	keyFile := fs.String("tls-key", "", "certificate key file, with -tls-cert")
 	email := fs.String("acme-email", "", "contact for the certificate authority")
@@ -119,6 +122,14 @@ func serve(args []string) error {
 	noiseOn := err == nil
 	if errors.Is(err, os.ErrNotExist) {
 		log.Warn("no Noise key: phones cannot read from FTW Cloud until one is installed", "path", *noisePath)
+	} else if err != nil {
+		return err
+	}
+	// The anonymous reports' gateway takes its keys the same way. Without them
+	// no report reaches here, and the public totals still answer.
+	ohttpKeys, err := loadOHTTPKeys(*ohttpPath)
+	if errors.Is(err, os.ErrNotExist) {
+		log.Warn("no OHTTP key: the gateway for the anonymous reports is off until one is installed", "path", *ohttpPath)
 	} else if err != nil {
 		return err
 	}
@@ -164,9 +175,13 @@ func serve(args []string) error {
 	if err != nil {
 		return err
 	}
+	gatewaySvc, err := gateway.New(reg, ohttpKeys)
+	if err != nil {
+		return err
+	}
 	tokens := token.New(st, reg, log)
 	tokens.Shards = shards
-	srv := &server.Server{Store: st, Registry: reg, Uplink: up, Tokens: tokens, Fleet: fleetSvc, Statistics: usageSvc, Log: log}
+	srv := &server.Server{Store: st, Registry: reg, Uplink: up, Tokens: tokens, Fleet: fleetSvc, Gateway: gatewaySvc, Statistics: usageSvc, Log: log}
 
 	// Assistants: the authorization server, with agent keys in ftwkeysd.
 	agentKeys := keys.Dial(*keysSocket)
@@ -386,7 +401,8 @@ func serve(args []string) error {
 	pub, _ := cloudwire.PublicKeyBytesOf(&key.PublicKey)
 	log.Info("ftwcloudd listening", "addr", *listen, "h3", srv.AltSvc != "", "quic_sessions", door != nil && door.Box != nil,
 		"shard", shards.Self(), "shards", shards.Shards(),
-		"service_key", base64.RawURLEncoding.EncodeToString(pub), "noise_key", base64.RawURLEncoding.EncodeToString(noise.Public()))
+		"service_key", base64.RawURLEncoding.EncodeToString(pub), "noise_key", base64.RawURLEncoding.EncodeToString(noise.Public()),
+		"ohttp_keys", ohttpPins(ohttpKeys))
 	err = httpSrv.ListenAndServeTLS("", "")
 	if err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return err
@@ -549,9 +565,13 @@ func keygen(args []string) error {
 	fs := flag.NewFlagSet("keygen", flag.ExitOnError)
 	out := fs.String("out", "", "file to write the key to")
 	noise := fs.Bool("noise", false, "make the X25519 key phones dial instead of the P-256 service key")
+	gatewayKey := fs.Bool("ohttp", false, "make an Oblivious HTTP gateway key; prints the key configuration Core pins")
 	_ = fs.Parse(args)
 	if *out == "" {
 		return errors.New("keygen: -out is required")
+	}
+	if *gatewayKey {
+		return keygenOHTTP(*out)
 	}
 	if *noise {
 		x, err := ecdh.X25519().GenerateKey(rand.Reader)
