@@ -1,4 +1,4 @@
-package energy
+package gateway
 
 import (
 	"bytes"
@@ -13,7 +13,9 @@ import (
 
 	"github.com/srcfl/ftw-cloud/internal/registry"
 	"github.com/srcfl/ftw/go/protocol/energywire"
+	"github.com/srcfl/ftw/go/protocol/fleetwire"
 	"github.com/srcfl/ftw/go/protocol/ohttp"
+	"github.com/srcfl/ftw/go/protocol/reportwire"
 )
 
 var now = time.Date(2026, 10, 24, 9, 0, 0, 0, time.UTC)
@@ -44,8 +46,10 @@ func newService(t *testing.T) (*Service, *registry.Registry, ohttp.KeyConfig) {
 }
 
 func inner(content string) ohttp.Request {
-	return ohttp.Request{Method: energywire.Method, Scheme: energywire.Scheme, Authority: energywire.Authority, Path: energywire.Path, Content: []byte(content)}
+	return ohttp.Request{Method: reportwire.Method, Scheme: reportwire.Scheme, Authority: reportwire.Authority, Path: reportwire.Path, Content: []byte(content)}
 }
+
+const fleet = `{"schema":"ftw.fleet/1","ftw_version":"v0.146.0-beta.1","channel":"beta","drivers":["pixii","pixii_pv"],"battery_kwh":"5-15","price_zone":"SE4","install_age":"1-6m"}`
 
 func post(s *Service, body []byte, contentType string) *httptest.ResponseRecorder {
 	w := httptest.NewRecorder()
@@ -72,7 +76,7 @@ func send(t *testing.T, s *Service, cfg ohttp.KeyConfig, msg []byte) int {
 		t.Fatal(err)
 	}
 	resp, err := ohttp.ParseResponse(plain)
-	if err != nil || len(plain) != energywire.ResponseSize {
+	if err != nil || len(plain) != reportwire.ResponseSize {
 		t.Fatalf("inner %x %v", plain, err)
 	}
 	return resp.Status
@@ -81,7 +85,7 @@ func send(t *testing.T, s *Service, cfg ohttp.KeyConfig, msg []byte) int {
 func TestAReportAddsToItsDate(t *testing.T) {
 	s, reg, cfg := newService(t)
 	for range 2 {
-		if got := send(t, s, cfg, inner(good).Marshal(energywire.RequestSize)); got != http.StatusNoContent {
+		if got := send(t, s, cfg, inner(good).Marshal(reportwire.RequestSize)); got != http.StatusNoContent {
 			t.Fatalf("status %d", got)
 		}
 	}
@@ -91,32 +95,56 @@ func TestAReportAddsToItsDate(t *testing.T) {
 	}
 }
 
+// A fleet report through the gateway lands in the fleet's day totals, the
+// ones /v1/fleet/public reads, and nothing of it in the energy totals.
+func TestAFleetReportAddsToTheFleetTotals(t *testing.T) {
+	s, reg, cfg := newService(t)
+	if got := send(t, s, cfg, inner(fleet).Marshal(reportwire.RequestSize)); got != http.StatusNoContent {
+		t.Fatalf("status %d", got)
+	}
+	view, err := reg.FleetView(now)
+	if err != nil || len(view.Days) != 1 || view.Days[0].Reports != 1 || view.Days[0].Zones["SE4"] != 1 {
+		t.Fatalf("fleet %+v %v", view, err)
+	}
+	if totals, _ := reg.EnergyTotals("2026-01-01", "2026-12-31"); len(totals) != 0 {
+		t.Fatalf("a fleet report reached the energy totals: %v", totals)
+	}
+	var r fleetwire.Report
+	_ = json.Unmarshal([]byte(fleet), &r)
+	if r.Schema != fleetwire.Schema {
+		t.Fatal("fixture")
+	}
+}
+
 // Anything but the one padded request with one valid report gets a sealed
 // 400 and adds nothing.
 func TestJunkIsRefusedAndAddsNothing(t *testing.T) {
 	s, reg, cfg := newService(t)
-	pad := energywire.RequestSize
+	pad := reportwire.RequestSize
 	other := func(f func(*ohttp.Request)) []byte {
 		r := inner(good)
 		f(&r)
 		return r.Marshal(pad)
 	}
 	for name, msg := range map[string][]byte{
-		"another path":   other(func(r *ohttp.Request) { r.Path = "/v1/fleet" }),
-		"another method": other(func(r *ohttp.Request) { r.Method = "PUT" }),
-		"another host":   other(func(r *ohttp.Request) { r.Authority = "example.com" }),
-		"plain http":     other(func(r *ohttp.Request) { r.Scheme = "http" }),
-		"a header":       other(func(r *ohttp.Request) { r.Fields = []ohttp.Field{{Name: "x-home", Value: "1"}} }),
-		"not padded":     inner(good).Marshal(0),
-		"padded more":    inner(good).Marshal(pad + 1),
-		"extra field":    inner(strings.TrimSuffix(good, "}") + `,"home":"a"}`).Marshal(pad),
-		"too much solar": inner(strings.Replace(good, `"pv_generation_kwh":12`, `"pv_generation_kwh":1001`, 1)).Marshal(pad),
-		"negative":       inner(strings.Replace(good, `:12,`, `:-12,`, 1)).Marshal(pad),
-		"today":          inner(strings.Replace(good, "2026-10-23", "2026-10-24", 1)).Marshal(pad),
-		"four days back": inner(strings.Replace(good, "2026-10-23", "2026-10-20", 1)).Marshal(pad),
-		"other schema":   inner(strings.Replace(good, "ftw.energy/1", "ftw.energy/2", 1)).Marshal(pad),
-		"a response":     ohttp.Response{Status: 200, Content: []byte(good)}.Marshal(pad),
-		"empty":          nil,
+		"another path":            other(func(r *ohttp.Request) { r.Path = "/v1/fleet" }),
+		"another method":          other(func(r *ohttp.Request) { r.Method = "PUT" }),
+		"another host":            other(func(r *ohttp.Request) { r.Authority = "example.com" }),
+		"plain http":              other(func(r *ohttp.Request) { r.Scheme = "http" }),
+		"a header":                other(func(r *ohttp.Request) { r.Fields = []ohttp.Field{{Name: "x-home", Value: "1"}} }),
+		"not padded":              inner(good).Marshal(0),
+		"padded more":             inner(good).Marshal(pad + 1),
+		"extra field":             inner(strings.TrimSuffix(good, "}") + `,"home":"a"}`).Marshal(pad),
+		"too much solar":          inner(strings.Replace(good, `"pv_generation_kwh":12`, `"pv_generation_kwh":1001`, 1)).Marshal(pad),
+		"negative":                inner(strings.Replace(good, `:12,`, `:-12,`, 1)).Marshal(pad),
+		"today":                   inner(strings.Replace(good, "2026-10-23", "2026-10-24", 1)).Marshal(pad),
+		"four days back":          inner(strings.Replace(good, "2026-10-23", "2026-10-20", 1)).Marshal(pad),
+		"other schema":            inner(strings.Replace(good, "ftw.energy/1", "ftw.energy/2", 1)).Marshal(pad),
+		"no schema":               inner(`{"date":"2026-10-23"}`).Marshal(pad),
+		"energy and fleet in one": inner(strings.TrimSuffix(fleet, "}") + `,"pv_generation_kwh":12}`).Marshal(pad),
+		"bad fleet":               inner(strings.Replace(fleet, `"SE4"`, `"myhouse"`, 1)).Marshal(pad),
+		"a response":              ohttp.Response{Status: 200, Content: []byte(good)}.Marshal(pad),
+		"empty":                   nil,
 	} {
 		if got := send(t, s, cfg, msg); got != http.StatusBadRequest {
 			t.Fatalf("%s: %d", name, got)
@@ -148,12 +176,15 @@ func TestJunkIsRefusedAndAddsNothing(t *testing.T) {
 	if totals, _ := reg.EnergyTotals("2026-01-01", "2026-12-31"); len(totals) != 0 {
 		t.Fatalf("junk reached the totals: %v", totals)
 	}
+	if view, _ := reg.FleetView(now); len(view.Days) != 0 {
+		t.Fatalf("junk reached the fleet totals: %+v", view)
+	}
 }
 
 // One budget for all requests, since they all come from the relay.
 func TestRequestsShareOneBudget(t *testing.T) {
 	s, _, cfg := newService(t)
-	sealed, _, _ := ohttp.Encapsulate(cfg, inner(good).Marshal(energywire.RequestSize))
+	sealed, _, _ := ohttp.Encapsulate(cfg, inner(good).Marshal(reportwire.RequestSize))
 	for i := range int(burst) {
 		if w := post(s, sealed, ohttp.RequestType); w.Code == http.StatusTooManyRequests {
 			t.Fatalf("limited after %d", i)

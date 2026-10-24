@@ -5,7 +5,7 @@
 //	/v1/app   a phone's Noise session to the service (package appsession)
 //	/v1/app/once  a watch's one-shot read, Noise inside one POST (package appsession)
 //	/v1/now   a widget's token read (package token)
-//	/v1/ohttp  the Oblivious HTTP gateway for anonymous daily energy reports (package energy)
+//	/v1/ohttp  the Oblivious HTTP gateway for the anonymous daily reports (package gateway)
 //	/.well-known/ohttp-gateway  that gateway's key configuration
 //	/v1/fleet, /v1/fleet/public, /v1/energy/public  anonymous daily totals
 //	/source   the source of the running service, as AGPL-3.0 asks
@@ -29,7 +29,7 @@ import (
 	"time"
 
 	"github.com/srcfl/ftw-cloud/internal/appsession"
-	"github.com/srcfl/ftw-cloud/internal/energy"
+	"github.com/srcfl/ftw-cloud/internal/gateway"
 	"github.com/srcfl/ftw-cloud/internal/oauth"
 	"github.com/srcfl/ftw-cloud/internal/registry"
 	"github.com/srcfl/ftw-cloud/internal/store"
@@ -63,7 +63,7 @@ type Server struct {
 	// they call. Nil serves none.
 	OAuth      *oauth.Server
 	Fleet      http.Handler
-	Energy     *energy.Service
+	Gateway    *gateway.Service
 	Statistics http.Handler
 	MCP        http.Handler
 	Log        *slog.Logger
@@ -106,10 +106,10 @@ func (s *Server) Handler() http.Handler {
 	} else {
 		mux.HandleFunc("/v1/fleet", notYet)
 	}
-	if s.Energy != nil {
-		mux.Handle("/v1/ohttp", s.Energy)
-		mux.HandleFunc("/.well-known/ohttp-gateway", s.Energy.Keys)
-		mux.HandleFunc("/v1/energy/public", s.Energy.Public)
+	if s.Gateway != nil {
+		mux.Handle("/v1/ohttp", s.Gateway)
+		mux.HandleFunc("/.well-known/ohttp-gateway", s.Gateway.Keys)
+		mux.HandleFunc("/v1/energy/public", s.Gateway.Public)
 	} else {
 		mux.HandleFunc("/v1/ohttp", notYet)
 	}
@@ -210,8 +210,8 @@ func (s *Server) Upkeep(ctx context.Context, every time.Duration) {
 					s.Log.Warn("fleet upkeep failed")
 				}
 			}
-			if s.Energy != nil {
-				if err := s.Energy.Prune(time.Now()); err != nil {
+			if s.Gateway != nil {
+				if err := s.Gateway.Prune(time.Now()); err != nil {
 					s.Log.Warn("energy upkeep failed")
 				}
 			}

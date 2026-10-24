@@ -11,7 +11,9 @@ import (
 	"time"
 
 	"github.com/srcfl/ftw/go/protocol/energywire"
+	"github.com/srcfl/ftw/go/protocol/fleetwire"
 	"github.com/srcfl/ftw/go/protocol/ohttp"
+	"github.com/srcfl/ftw/go/protocol/reportwire"
 )
 
 func testGateway(t *testing.T) *ohttp.Gateway {
@@ -27,11 +29,12 @@ func testGateway(t *testing.T) *ohttp.Gateway {
 	return g
 }
 
-// Box to relay to gateway to totals. The box half is what Core sends: the
-// key configuration from /.well-known/ohttp-gateway, the one inner request,
-// padded. The relay forwards only the body and its type, and never sees the
-// report. ftwcloudd adds it to the date's totals and answers a sealed 204.
-func TestAnEnergyReportReachesTheTotalsThroughARelay(t *testing.T) {
+// Box to relay to gateway to totals, for both reports. The box half is what
+// Core sends: the key configuration from /.well-known/ohttp-gateway, each
+// report alone in the one padded inner request. The relay forwards only the
+// body and its type, never sees a report, and sees one length. ftwcloudd adds
+// each to its own day totals and answers a sealed 204.
+func TestBothReportsReachTheirTotalsThroughARelay(t *testing.T) {
 	s, _ := newServer(t)
 	cloud := httptest.NewServer(s.Handler())
 	defer cloud.Close()
@@ -65,9 +68,14 @@ func TestAnEnergyReportReachesTheTotalsThroughARelay(t *testing.T) {
 
 	yesterday := time.Now().UTC().AddDate(0, 0, -1).Format(time.DateOnly)
 	report := energywire.Report{Schema: energywire.Schema, Date: yesterday, PVGeneration: 12, GridImport: 30, GridExport: 4, BatteryCharge: 9, BatteryDischarge: 8}
-	for i := range 3 {
-		body, _ := json.Marshal(report)
-		inner := ohttp.Request{Method: energywire.Method, Scheme: energywire.Scheme, Authority: energywire.Authority, Path: energywire.Path, Content: body}.Marshal(energywire.RequestSize)
+	energyBody, _ := json.Marshal(report)
+	fleetBody, _ := json.Marshal(fleetwire.Report{Schema: fleetwire.Schema, Version: "v0.146.0", Channel: "stable", Drivers: []string{"sungrow"}, Battery: "5-15", Zone: "SE4", Age: "1-6m"})
+	// Three energy reports and two fleet reports, each alone.
+	for i, body := range [][]byte{energyBody, fleetBody, energyBody, fleetBody, energyBody} {
+		inner, ok := reportwire.Request(body)
+		if !ok {
+			t.Fatal("report does not fit")
+		}
 		sealed, reader, err := ohttp.Encapsulate(configs[0], inner)
 		if err != nil {
 			t.Fatal(err)
@@ -85,10 +93,10 @@ func TestAnEnergyReportReachesTheTotalsThroughARelay(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got, err := ohttp.ParseResponse(msg); err != nil || got.Status != http.StatusNoContent || len(msg) != energywire.ResponseSize {
+		if got, err := ohttp.ParseResponse(msg); err != nil || got.Status != http.StatusNoContent || len(msg) != reportwire.ResponseSize {
 			t.Fatalf("report %d: %+v %v", i, got, err)
 		}
-		if bytes.Contains(seen[i], []byte("kwh")) || bytes.Contains(seen[i], []byte(yesterday)) {
+		if bytes.Contains(seen[i], []byte("kwh")) || bytes.Contains(seen[i], []byte(yesterday)) || bytes.Contains(seen[i], []byte("sungrow")) {
 			t.Fatal("the relay saw the report")
 		}
 	}
@@ -97,7 +105,14 @@ func TestAnEnergyReportReachesTheTotalsThroughARelay(t *testing.T) {
 	if err != nil || day.Reports != 3 || day.Sums != [6]int64{36, 90, 12, 27, 24, 0} {
 		t.Fatalf("totals %+v %v", day, err)
 	}
-	if len(seen[0]) != len(seen[1]) {
-		t.Fatal("two reports differ in length on the relay")
+	for _, b := range seen {
+		if len(b) != len(seen[0]) {
+			t.Fatal("reports differ in length on the relay")
+		}
+	}
+	// The fleet reports land where /v1/fleet/public reads them.
+	view, err := s.Registry.FleetView(time.Now())
+	if err != nil || len(view.Days) != 1 || view.Days[0].Reports != 2 || view.Days[0].Drivers["sungrow"] != 2 {
+		t.Fatalf("fleet %+v %v", view, err)
 	}
 }

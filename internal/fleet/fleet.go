@@ -31,6 +31,11 @@ func New(reg *registry.Registry) (*Service, error) {
 }
 
 // ServeHTTP accepts reports only. Public requests never read totals.
+//
+// This is the direct path, which sees the box's address: for boxes on a Core
+// release that names no relay. A release that pins one sends the fleet report
+// through /v1/ohttp (package gateway) into the same totals. Remove this route
+// one stable Core release after the first that pins the relay.
 func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	if r.Method != http.MethodPost {

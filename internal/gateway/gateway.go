@@ -1,14 +1,16 @@
-// Package energy is the Oblivious HTTP gateway (RFC 9458) for the anonymous
-// daily energy report, and the public view of its totals.
+// Package gateway is the Oblivious HTTP gateway (RFC 9458) for the box's two
+// anonymous daily reports, and the public view of the energy totals.
 //
-// A box seals one report a day to the gateway key and posts it to an
+// A box seals each report alone to the gateway key and posts it to an
 // independent relay, which forwards it here. The gateway sees the report and
-// the relay's address, never the box's. It adds the six sums to that date's
-// totals and keeps nothing else: no row, logged body or address per report.
+// the relay's address, never the box's. It reads the report's schema, adds a
+// fleet report to the fleet's day totals and an energy report to the
+// energy's, and keeps nothing else: no row, logged body or address per
+// report.
 //
 // A report cannot prove that a real box sent it. Bounds per field and a cap
 // per date keep junk to noise. Privacy Pass-style tokens would be the fix.
-package energy
+package gateway
 
 import (
 	"encoding/json"
@@ -20,13 +22,15 @@ import (
 
 	"github.com/srcfl/ftw-cloud/internal/registry"
 	"github.com/srcfl/ftw/go/protocol/energywire"
+	"github.com/srcfl/ftw/go/protocol/fleetwire"
 	"github.com/srcfl/ftw/go/protocol/ohttp"
+	"github.com/srcfl/ftw/go/protocol/reportwire"
 )
 
 const (
-	// maxRequest is a sealed request: header, key, padded message and tag,
-	// with room to spare.
-	maxRequest = 1 << 10
+	// maxRequest is a sealed request, 1,591 bytes (header, key, padded
+	// message and tag), with room to spare.
+	maxRequest = 2 << 10
 	// Minimum is the group size for a public date, as /v1/fleet/public's.
 	Minimum = 5
 	// rate and burst are one shared budget for every request. All of them
@@ -49,6 +53,9 @@ type Service struct {
 }
 
 func New(reg *registry.Registry, gw *ohttp.Gateway) (*Service, error) {
+	if err := reg.FleetInit(); err != nil {
+		return nil, err
+	}
 	if err := reg.EnergyInit(); err != nil {
 		return nil, err
 	}
@@ -64,7 +71,7 @@ func New(reg *registry.Registry, gw *ohttp.Gateway) (*Service, error) {
 
 // ServeHTTP is the gateway, POST /v1/ohttp. A request it cannot open gets a
 // plain 400. One it opens gets a sealed answer: 204 when the report is
-// added, 400 when it is not a valid report, 429 when its date is full.
+// added, 400 when it is not one valid report, 429 when its day is full.
 func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	if s.gw == nil {
@@ -94,7 +101,7 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
-	answer, err := sealer.Seal(ohttp.Response{Status: s.add(msg)}.Marshal(energywire.ResponseSize))
+	answer, err := sealer.Seal(reportwire.Response(s.add(msg)))
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		return
@@ -103,21 +110,35 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(answer)
 }
 
-// add reads the one request the gateway answers and adds its report.
+// add reads the one request the gateway answers and adds its report to the
+// day totals of its kind.
 func (s *Service) add(msg []byte) int {
-	req, err := ohttp.ParseRequest(msg)
-	if err != nil || len(msg) != energywire.RequestSize || req.Method != energywire.Method || req.Scheme != energywire.Scheme ||
-		req.Authority != energywire.Authority || req.Path != energywire.Path || len(req.Fields) != 0 {
+	body, ok := reportwire.Body(msg)
+	if !ok {
 		return http.StatusBadRequest
 	}
-	report, err := energywire.Decode(req.Content, s.now())
-	if err != nil {
+	var added bool
+	var err error
+	switch reportwire.Schema(body) {
+	case fleetwire.Schema:
+		report, decodeErr := fleetwire.Decode(body)
+		if decodeErr != nil {
+			return http.StatusBadRequest
+		}
+		added, err = s.reg.FleetPut(report, s.now())
+	case energywire.Schema:
+		report, decodeErr := energywire.Decode(body, s.now())
+		if decodeErr != nil {
+			return http.StatusBadRequest
+		}
+		added, err = s.reg.EnergyAdd(report)
+	default:
 		return http.StatusBadRequest
 	}
-	switch ok, err := s.reg.EnergyAdd(report); {
+	switch {
 	case err != nil:
 		return http.StatusServiceUnavailable
-	case !ok:
+	case !added:
 		return http.StatusTooManyRequests
 	}
 	return http.StatusNoContent

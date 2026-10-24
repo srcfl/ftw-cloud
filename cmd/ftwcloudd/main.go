@@ -38,8 +38,8 @@ import (
 
 	"github.com/srcfl/ftw-cloud/internal/apns"
 	"github.com/srcfl/ftw-cloud/internal/appsession"
-	"github.com/srcfl/ftw-cloud/internal/energy"
 	"github.com/srcfl/ftw-cloud/internal/fleet"
+	"github.com/srcfl/ftw-cloud/internal/gateway"
 	"github.com/srcfl/ftw-cloud/internal/keys"
 	"github.com/srcfl/ftw-cloud/internal/mcp"
 	"github.com/srcfl/ftw-cloud/internal/metrics"
@@ -125,11 +125,11 @@ func serve(args []string) error {
 	} else if err != nil {
 		return err
 	}
-	// The energy reports' gateway takes its keys the same way. Without them
-	// boxes send nothing that reaches here, and the public totals still answer.
-	gateway, err := loadOHTTPKeys(*ohttpPath)
+	// The anonymous reports' gateway takes its keys the same way. Without them
+	// no report reaches here, and the public totals still answer.
+	ohttpKeys, err := loadOHTTPKeys(*ohttpPath)
 	if errors.Is(err, os.ErrNotExist) {
-		log.Warn("no OHTTP key: the energy report gateway is off until one is installed", "path", *ohttpPath)
+		log.Warn("no OHTTP key: the gateway for the anonymous reports is off until one is installed", "path", *ohttpPath)
 	} else if err != nil {
 		return err
 	}
@@ -175,13 +175,13 @@ func serve(args []string) error {
 	if err != nil {
 		return err
 	}
-	energySvc, err := energy.New(reg, gateway)
+	gatewaySvc, err := gateway.New(reg, ohttpKeys)
 	if err != nil {
 		return err
 	}
 	tokens := token.New(st, reg, log)
 	tokens.Shards = shards
-	srv := &server.Server{Store: st, Registry: reg, Uplink: up, Tokens: tokens, Fleet: fleetSvc, Energy: energySvc, Statistics: usageSvc, Log: log}
+	srv := &server.Server{Store: st, Registry: reg, Uplink: up, Tokens: tokens, Fleet: fleetSvc, Gateway: gatewaySvc, Statistics: usageSvc, Log: log}
 
 	// Assistants: the authorization server, with agent keys in ftwkeysd.
 	agentKeys := keys.Dial(*keysSocket)
@@ -402,7 +402,7 @@ func serve(args []string) error {
 	log.Info("ftwcloudd listening", "addr", *listen, "h3", srv.AltSvc != "", "quic_sessions", door != nil && door.Box != nil,
 		"shard", shards.Self(), "shards", shards.Shards(),
 		"service_key", base64.RawURLEncoding.EncodeToString(pub), "noise_key", base64.RawURLEncoding.EncodeToString(noise.Public()),
-		"ohttp_keys", ohttpPins(gateway))
+		"ohttp_keys", ohttpPins(ohttpKeys))
 	err = httpSrv.ListenAndServeTLS("", "")
 	if err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return err

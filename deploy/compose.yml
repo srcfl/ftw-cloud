@@ -51,7 +51,7 @@ services:
       # boot by deploy/noise.sh. Empty means /v1/app is off, and the
       # service runs.
       - /run/ftw-cloud/noise:/run/secrets/noise:ro
-      # The energy reports' Oblivious HTTP gateway key, read from Parameter
+      # The anonymous reports' Oblivious HTTP gateway key, read from Parameter
       # Store into tmpfs at boot by deploy/ohttp.sh. Empty means /v1/ohttp
       # is off, and the service runs.
       - /run/ftw-cloud/ohttp:/run/secrets/ohttp:ro

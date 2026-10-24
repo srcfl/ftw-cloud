@@ -1,8 +1,9 @@
-# The energy reports' gateway key and relay
+# The anonymous reports' gateway key and relay
 
-A box sends one anonymous energy report a day, sealed with Oblivious HTTP
-(RFC 9458) to this service's gateway key and posted to a relay that someone
-other than Sourceful runs. The relay forwards it to `POST /v1/ohttp`. The
+A box sends two anonymous reports a day, a fleet report and an energy report,
+each alone and sealed with Oblivious HTTP (RFC 9458) to this service's
+gateway key, and posts each to a relay that someone other than Sourceful
+runs. The relay forwards it to `POST /v1/ohttp`. The
 relay sees the box's address but not the report; this service sees the
 report but not the address. Without the key, `/v1/ohttp` answers 501 and the
 public totals still answer.
@@ -74,9 +75,9 @@ Send them:
 - **Key configuration:** `https://cloud.ftw.energy/.well-known/ohttp-gateway`
   (`application/ohttp-keys`), or the string from step 1. The suite is
   DHKEM(X25519, HKDF-SHA256), HKDF-SHA256, AES-128-GCM.
-- **Traffic:** `POST` with `message/ohttp-req`, always 375 bytes; answers
-  are `message/ohttp-res`, always 48 bytes. One request per box per day,
-  spread over the 12 hours after 00:00 UTC.
+- **Traffic:** `POST` with `message/ohttp-req`, always 1,591 bytes; answers
+  are `message/ohttp-res`, always 48 bytes. Two requests per box per day, at
+  separate random times.
 
 Ask them to confirm, in writing:
 
@@ -92,9 +93,11 @@ They hand back the **relay URL** the boxes post to. Cloudflare's form is
 
 ## 5. Pin both in Core
 
-In srcfl/ftw, `go/internal/energyreport/energyreport.go`: `RelayURL` takes the
+In srcfl/ftw, `go/internal/statsrelay/statsrelay.go`: `RelayURL` takes the
 relay URL from step 4 and `GatewayKey` the string from step 1. Boxes on the
-release that carries both start sending; older releases send nothing.
+release that carries both send both reports through the relay; older
+releases send no energy report and post the fleet report straight to
+`/v1/fleet`.
 
 ## Rotating
 

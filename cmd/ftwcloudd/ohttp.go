@@ -75,7 +75,7 @@ func ohttpPins(gw *ohttp.Gateway) string {
 }
 
 // keygenOHTTP writes a new gateway key, never over an existing file, and
-// prints its configuration: the string energyreport.GatewayKey in srcfl/ftw
+// prints its configuration: the string statsrelay.GatewayKey in srcfl/ftw
 // pins. For a rotation, put the new block after the old one in the same
 // parameter; ftwcloudd refuses two keys under one id, and then a new key is
 // needed.

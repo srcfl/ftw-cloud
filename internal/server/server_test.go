@@ -14,8 +14,8 @@ import (
 	"testing"
 
 	"github.com/srcfl/ftw-cloud/internal/appsession"
-	"github.com/srcfl/ftw-cloud/internal/energy"
 	"github.com/srcfl/ftw-cloud/internal/fleet"
+	"github.com/srcfl/ftw-cloud/internal/gateway"
 	"github.com/srcfl/ftw-cloud/internal/registry"
 	"github.com/srcfl/ftw-cloud/internal/statistics"
 	"github.com/srcfl/ftw-cloud/internal/store"
@@ -48,7 +48,7 @@ func newServer(t *testing.T) (*Server, string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if s.Energy, err = energy.New(reg, testGateway(t)); err != nil {
+	if s.Gateway, err = gateway.New(reg, testGateway(t)); err != nil {
 		t.Fatal(err)
 	}
 	up.Statistics = true
