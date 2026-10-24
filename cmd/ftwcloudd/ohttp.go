@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"crypto/ecdh"
 	"crypto/sha256"
 	"crypto/x509"
@@ -50,6 +51,11 @@ func loadOHTTPKeys(path string) (*ohttp.Gateway, error) {
 			return nil, fmt.Errorf("ohttp key: %s holds a key that is not X25519", path)
 		}
 		keys = append(keys, ohttp.Key{ID: ohttpKeyID(x.PublicKey().Bytes()), Private: x})
+	}
+	// A block cut short, as a rotation pasted in part would leave it, must
+	// not leave the new key quietly unloaded.
+	if len(bytes.TrimSpace(raw)) > 0 {
+		return nil, fmt.Errorf("ohttp key: %s has data after its last whole key", path)
 	}
 	if len(keys) == 0 {
 		return nil, fmt.Errorf("ohttp key: %s holds no key", path)

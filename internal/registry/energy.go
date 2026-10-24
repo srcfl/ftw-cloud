@@ -1,6 +1,7 @@
 package registry
 
 import (
+	"database/sql"
 	"time"
 
 	"github.com/srcfl/ftw/go/protocol/energywire"
@@ -34,6 +35,15 @@ func (r *Registry) EnergyInit() error {
 // EnergyAdd adds one report to its date's totals in one statement. False
 // means the date already holds energywire.MaxReports.
 func (r *Registry) EnergyAdd(rep energywire.Report) (bool, error) {
+	return energyAdd(r.db, rep)
+}
+
+// execer is a database or a transaction.
+type execer interface {
+	Exec(query string, args ...any) (sql.Result, error)
+}
+
+func energyAdd(db execer, rep energywire.Report) (bool, error) {
 	s := rep.Sums()
 	var had [6]int
 	for i, v := range s {
@@ -41,7 +51,7 @@ func (r *Registry) EnergyAdd(rep energywire.Report) (bool, error) {
 			had[i] = 1
 		}
 	}
-	res, err := r.db.Exec(`INSERT INTO energy_days VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	res, err := db.Exec(`INSERT INTO energy_days VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(date) DO UPDATE SET reports = reports + 1,
 			pv_generation_kwh = pv_generation_kwh + excluded.pv_generation_kwh,
 			grid_import_kwh = grid_import_kwh + excluded.grid_import_kwh,

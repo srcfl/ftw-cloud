@@ -14,6 +14,7 @@ package gateway
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"mime"
 	"net/http"
@@ -33,11 +34,17 @@ const (
 	maxRequest = 2 << 10
 	// Minimum is the group size for a public date, as /v1/fleet/public's.
 	Minimum = 5
-	// rate and burst are one shared budget for every request. All of them
-	// arrive from the relay, so there is no address worth keeping apart.
+	// rate and burst are each report kind's budget, spent only by a report
+	// that opened and decoded, so junk cannot use up the real reports'.
+	// Every request arrives from the relay, so there is no address worth
+	// keeping apart.
 	rate  = 5.0
 	burst = 120.0
 )
+
+// bodyDeadline bounds reading a request body, so a slow sender cannot hold a
+// connection open.
+var bodyDeadline = 10 * time.Second
 
 type Service struct {
 	reg *registry.Registry
@@ -47,6 +54,11 @@ type Service struct {
 	keys []byte
 	now  func() time.Time
 
+	fleet, energy budget
+}
+
+// budget is a token bucket.
+type budget struct {
 	mu     sync.Mutex
 	at     time.Time
 	tokens float64
@@ -59,10 +71,14 @@ func New(reg *registry.Registry, gw *ohttp.Gateway) (*Service, error) {
 	if err := reg.EnergyInit(); err != nil {
 		return nil, err
 	}
-	if err := reg.EnergyPrune(time.Now()); err != nil {
+	if err := reg.ReportsInit(); err != nil {
 		return nil, err
 	}
-	s := &Service{reg: reg, gw: gw, now: time.Now, tokens: burst}
+	s := &Service{reg: reg, gw: gw, now: time.Now}
+	s.fleet.tokens, s.energy.tokens = burst, burst
+	if err := s.Prune(time.Now()); err != nil {
+		return nil, err
+	}
 	if gw != nil {
 		s.keys = ohttp.MarshalKeys(gw.Configs()...)
 	}
@@ -71,7 +87,8 @@ func New(reg *registry.Registry, gw *ohttp.Gateway) (*Service, error) {
 
 // ServeHTTP is the gateway, POST /v1/ohttp. A request it cannot open gets a
 // plain 400. One it opens gets a sealed answer: 204 when the report is
-// added, 400 when it is not one valid report, 429 when its day is full.
+// added or was counted already, 400 when it is not one valid report, 429
+// when its kind's budget or its day is full.
 func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	if s.gw == nil {
@@ -87,15 +104,21 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnsupportedMediaType)
 		return
 	}
-	if !s.allow() {
-		w.WriteHeader(http.StatusTooManyRequests)
-		return
-	}
+	rc := http.NewResponseController(w)
+	_ = rc.SetReadDeadline(time.Now().Add(bodyDeadline))
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxRequest))
 	if err != nil {
-		w.WriteHeader(http.StatusRequestEntityTooLarge)
+		// The rest of the body is never read: close rather than wait for it.
+		w.Header().Set("Connection", "close")
+		var large *http.MaxBytesError
+		if errors.As(err, &large) {
+			w.WriteHeader(http.StatusRequestEntityTooLarge)
+		} else {
+			w.WriteHeader(http.StatusRequestTimeout)
+		}
 		return
 	}
+	_ = rc.SetReadDeadline(time.Time{})
 	msg, sealer, err := s.gw.Decapsulate(body)
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
@@ -111,33 +134,43 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // add reads the one request the gateway answers and adds its report to the
-// day totals of its kind.
+// day totals of its kind, once: a report whose id was counted already is
+// answered 204 and adds nothing, so a replay or a retry is harmless.
 func (s *Service) add(msg []byte) int {
-	body, ok := reportwire.Body(msg)
-	if !ok {
+	now := s.now()
+	report, ok := reportwire.Read(msg)
+	if !ok || !reportwire.Fresh(report.Day, now) {
 		return http.StatusBadRequest
 	}
-	var added bool
+	var added, repeat bool
 	var err error
-	switch reportwire.Schema(body) {
+	switch reportwire.Schema(report.Body) {
 	case fleetwire.Schema:
-		report, decodeErr := fleetwire.Decode(body)
+		fleet, decodeErr := fleetwire.Decode(report.Body)
 		if decodeErr != nil {
 			return http.StatusBadRequest
 		}
-		added, err = s.reg.FleetPut(report, s.now())
+		if !s.fleet.allow(now) {
+			return http.StatusTooManyRequests
+		}
+		added, repeat, err = s.reg.FleetPutOnce(report.Day, report.ID, fleet, now)
 	case energywire.Schema:
-		report, decodeErr := energywire.Decode(body, s.now())
+		energy, decodeErr := energywire.Decode(report.Body, now)
 		if decodeErr != nil {
 			return http.StatusBadRequest
 		}
-		added, err = s.reg.EnergyAdd(report)
+		if !s.energy.allow(now) {
+			return http.StatusTooManyRequests
+		}
+		added, repeat, err = s.reg.EnergyAddOnce(report.Day, report.ID, energy)
 	default:
 		return http.StatusBadRequest
 	}
 	switch {
 	case err != nil:
 		return http.StatusServiceUnavailable
+	case repeat:
+		return http.StatusNoContent
 	case !added:
 		return http.StatusTooManyRequests
 	}
@@ -203,19 +236,24 @@ func (s *Service) Public(w http.ResponseWriter, r *http.Request) {
 		"observed_at": now.Format(time.RFC3339), "minimum": Minimum, "days": days})
 }
 
-func (s *Service) Prune(now time.Time) error { return s.reg.EnergyPrune(now) }
-
-func (s *Service) allow() bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	now := s.now()
-	if !s.at.IsZero() {
-		s.tokens = min(burst, s.tokens+max(0, now.Sub(s.at).Seconds())*rate)
+// Prune drops energy totals and report ids past their days.
+func (s *Service) Prune(now time.Time) error {
+	if err := s.reg.EnergyPrune(now); err != nil {
+		return err
 	}
-	s.at = now
-	if s.tokens < 1 {
+	return s.reg.ReportsPrune(now)
+}
+
+func (b *budget) allow(now time.Time) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if !b.at.IsZero() {
+		b.tokens = min(burst, b.tokens+max(0, now.Sub(b.at).Seconds())*rate)
+	}
+	b.at = now
+	if b.tokens < 1 {
 		return false
 	}
-	s.tokens--
+	b.tokens--
 	return true
 }

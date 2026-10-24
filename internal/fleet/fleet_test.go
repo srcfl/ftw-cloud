@@ -1,10 +1,13 @@
 package fleet
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"github.com/srcfl/ftw-cloud/internal/registry"
 	"github.com/srcfl/ftw/go/protocol/fleetwire"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -89,4 +92,33 @@ func TestReportsBecomeOnlyBoundedDailyTotalsAcrossARestart(t *testing.T) {
 		t.Fatal(w.Code, w.Body.String())
 	}
 	// The only extra table holds date and aggregate JSON, not source addresses.
+}
+
+// A sender that stops halfway through its body is cut off.
+func TestASlowFleetBodyIsCutOff(t *testing.T) {
+	reg, err := registry.Open(filepath.Join(t.TempDir(), "registry.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reg.Close()
+	svc, err := New(reg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := bodyDeadline
+	bodyDeadline = 200 * time.Millisecond
+	t.Cleanup(func() { bodyDeadline = old })
+	srv := httptest.NewServer(svc)
+	defer srv.Close()
+	conn, err := net.Dial("tcp", srv.Listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	_, _ = fmt.Fprintf(conn, "POST /v1/fleet HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nContent-Length: 1000\r\n\r\n{")
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	resp, err := http.ReadResponse(bufio.NewReader(conn), nil)
+	if err != nil || resp.StatusCode != http.StatusRequestTimeout {
+		t.Fatalf("slow body: %v %v", resp, err)
+	}
 }

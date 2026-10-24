@@ -56,6 +56,16 @@ func TestAGatewayKeyLoadsAsThePinSays(t *testing.T) {
 	if pins := ohttpPins(nil); pins != "" {
 		t.Fatal(pins)
 	}
+
+	// A second block cut short, as a rotation pasted in part leaves it, is
+	// refused rather than quietly left unloaded.
+	cut := filepath.Join(dir, "cut.key")
+	if err := os.WriteFile(cut, append(a, b[:len(b)/2]...), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadOHTTPKeys(cut); err == nil || !strings.Contains(err.Error(), "after its last whole key") {
+		t.Fatalf("a cut second key: %v", err)
+	}
 }
 
 func TestOnlyX25519GatewayKeysLoad(t *testing.T) {

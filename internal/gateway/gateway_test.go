@@ -1,9 +1,14 @@
 package gateway
 
 import (
+	"bufio"
 	"bytes"
 	"crypto/ecdh"
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
+	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -45,8 +50,21 @@ func newService(t *testing.T) (*Service, *registry.Registry, ohttp.KeyConfig) {
 	return s, reg, gw.Configs()[0]
 }
 
+// inner is one report as a box sends it: a fresh id, sent today.
 func inner(content string) ohttp.Request {
-	return ohttp.Request{Method: reportwire.Method, Scheme: reportwire.Scheme, Authority: reportwire.Authority, Path: reportwire.Path, Content: []byte(content)}
+	return innerWith(content, newID(), "2026-10-24")
+}
+
+func innerWith(content string, id []byte, day string) ohttp.Request {
+	return ohttp.Request{Method: reportwire.Method, Scheme: reportwire.Scheme, Authority: reportwire.Authority, Path: reportwire.Path,
+		Fields:  []ohttp.Field{{Name: "report-id", Value: base64.RawURLEncoding.EncodeToString(id)}, {Name: "report-day", Value: day}},
+		Content: []byte(content)}
+}
+
+func newID() []byte {
+	id := make([]byte, reportwire.IDBytes)
+	_, _ = rand.Read(id)
+	return id
 }
 
 const fleet = `{"schema":"ftw.fleet/1","ftw_version":"v0.146.0-beta.1","channel":"beta","drivers":["pixii","pixii_pv"],"battery_kwh":"5-15","price_zone":"SE4","install_age":"1-6m"}`
@@ -181,22 +199,85 @@ func TestJunkIsRefusedAndAddsNothing(t *testing.T) {
 	}
 }
 
-// One budget for all requests, since they all come from the relay.
-func TestRequestsShareOneBudget(t *testing.T) {
-	s, _, cfg := newService(t)
+// A replayed request, or a retry of one report, counts once and is still
+// answered 204, so neither the relay nor a lost answer moves a total.
+func TestAReportCountsOnceHoweverOftenItArrives(t *testing.T) {
+	s, reg, cfg := newService(t)
 	sealed, _, _ := ohttp.Encapsulate(cfg, inner(good).Marshal(reportwire.RequestSize))
-	for i := range int(burst) {
-		if w := post(s, sealed, ohttp.RequestType); w.Code == http.StatusTooManyRequests {
-			t.Fatalf("limited after %d", i)
+	for i := range 7 {
+		w := post(s, sealed, ohttp.RequestType)
+		if w.Code != http.StatusOK {
+			t.Fatalf("replay %d: %d", i, w.Code)
 		}
 	}
-	if w := post(s, sealed, ohttp.RequestType); w.Code != http.StatusTooManyRequests {
-		t.Fatalf("over budget: %d", w.Code)
+	id := newID()
+	for range 3 {
+		if got := send(t, s, cfg, innerWith(fleet, id, "2026-10-24").Marshal(reportwire.RequestSize)); got != http.StatusNoContent {
+			t.Fatalf("retry: %d", got)
+		}
 	}
-	now = now.Add(time.Second)
-	defer func() { now = now.Add(-time.Second) }()
-	if w := post(s, sealed, ohttp.RequestType); w.Code != http.StatusOK {
-		t.Fatalf("after a second: %d", w.Code)
+	totals, _ := reg.EnergyTotals("2026-10-23", "2026-10-23")
+	view, _ := reg.FleetView(now)
+	if totals["2026-10-23"].Reports != 1 || len(view.Days) != 1 || view.Days[0].Reports != 1 {
+		t.Fatalf("energy %+v fleet %+v", totals, view)
+	}
+}
+
+// A request sent before yesterday is refused, so a captured one cannot be
+// posted again once its id is forgotten. Yesterday's still counts.
+func TestAnOldRequestIsRefused(t *testing.T) {
+	s, _, cfg := newService(t)
+	if got := send(t, s, cfg, innerWith(fleet, newID(), "2026-10-22").Marshal(reportwire.RequestSize)); got != http.StatusBadRequest {
+		t.Fatalf("two days old: %d", got)
+	}
+	if got := send(t, s, cfg, innerWith(fleet, newID(), "2026-10-23").Marshal(reportwire.RequestSize)); got != http.StatusNoContent {
+		t.Fatalf("yesterday: %d", got)
+	}
+}
+
+// Junk does not spend a budget, and one kind's reports do not spend the
+// other's.
+func TestJunkSpendsNoBudget(t *testing.T) {
+	s, _, cfg := newService(t)
+	for range 3 * int(burst) {
+		if w := post(s, bytes.Repeat([]byte{9}, 400), ohttp.RequestType); w.Code != http.StatusBadRequest {
+			t.Fatalf("junk: %d", w.Code)
+		}
+	}
+	if got := send(t, s, cfg, inner(good).Marshal(reportwire.RequestSize)); got != http.StatusNoContent {
+		t.Fatalf("a real report after junk: %d", got)
+	}
+	for i := range int(burst) {
+		if got := send(t, s, cfg, inner(good).Marshal(reportwire.RequestSize)); got != http.StatusNoContent && i < int(burst)-1 {
+			t.Fatalf("energy %d: %d", i, got)
+		}
+	}
+	if got := send(t, s, cfg, inner(good).Marshal(reportwire.RequestSize)); got != http.StatusTooManyRequests {
+		t.Fatalf("energy over budget: %d", got)
+	}
+	if got := send(t, s, cfg, inner(fleet).Marshal(reportwire.RequestSize)); got != http.StatusNoContent {
+		t.Fatalf("fleet beside a spent energy budget: %d", got)
+	}
+}
+
+// A sender that stops halfway through its body is cut off.
+func TestASlowBodyIsCutOff(t *testing.T) {
+	s, _, _ := newService(t)
+	old := bodyDeadline
+	bodyDeadline = 200 * time.Millisecond
+	t.Cleanup(func() { bodyDeadline = old })
+	srv := httptest.NewServer(s)
+	defer srv.Close()
+	conn, err := net.Dial("tcp", srv.Listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	_, _ = fmt.Fprintf(conn, "POST /v1/ohttp HTTP/1.1\r\nHost: x\r\nContent-Type: message/ohttp-req\r\nContent-Length: 1000\r\n\r\nabc")
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	resp, err := http.ReadResponse(bufio.NewReader(conn), nil)
+	if err != nil || resp.StatusCode != http.StatusRequestTimeout {
+		t.Fatalf("slow body: %v %v", resp, err)
 	}
 }
 

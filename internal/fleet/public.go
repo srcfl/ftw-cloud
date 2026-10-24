@@ -9,7 +9,9 @@ import (
 )
 
 // Public exports only cells already large enough for the project dashboard.
-// A day below the minimum has a null count and no dimension labels.
+// A day below the minimum has a null count and no dimension labels. Only
+// closed UTC days are listed: today's running counts would let whoever just
+// forwarded a report, such as the relay, see which count it moved.
 func (s *Service) Public(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "public, max-age=60")
 	if r.Method != http.MethodGet {
@@ -24,8 +26,12 @@ func (s *Service) Public(w http.ResponseWriter, r *http.Request) {
 	// Five since 23 October 2026 (Fredrik): the fleet is small and the
 	// reports carry no home id. A day and each label below it stay hidden.
 	const minimum = 5
+	today := s.now().UTC().Format(time.DateOnly)
 	days := make([]map[string]any, 0, len(view.Days))
 	for _, d := range view.Days {
+		if d.Date >= today {
+			continue
+		}
 		row := map[string]any{"date": d.Date, "reports": nil}
 		for key, values := range map[string]map[string]int{"ftw_versions": d.Versions, "channels": d.Channels, "drivers": d.Drivers, "battery_kwh": d.Battery, "price_zones": d.Zones, "install_age": d.Age} {
 			safe := map[string]int{}

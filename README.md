@@ -542,9 +542,15 @@ the box's address and a ciphertext of fixed length (1,591 bytes).
 address. It reads the one padded inner request, chooses the decoder by
 schema, adds the report to its own day totals and answers a sealed 204, or
 400 for anything else: exact fields, and for energy at most 1,000 kWh each
-and a date in the last three closed days. It keeps nothing per report: no
-row, logged body or address. All requests share one rate budget, and a day
-takes at most 100,000 reports of each kind.
+and a date in the last three closed days. Each request carries a random
+report id and the UTC date it was sent. The gateway refuses one sent before
+yesterday, and keeps a hash of each id under its date for three days, in a
+table with no time or arrival order, so a replay or a retry counts once and
+is still answered 204 (RFC 9458, section 6.5). Beyond that it keeps nothing
+per report: no row, logged body or address. Each kind has its own rate
+budget, spent only by a report that opened and decoded, so junk cannot
+silence real reports. A day takes at most 100,000 reports of each kind, and
+a body has 10 seconds to arrive.
 `GET /.well-known/ohttp-gateway` serves the key configuration for the relay
 operator and for anyone checking the pin.
 
@@ -557,9 +563,16 @@ car's charge. A sum nobody had any of shows 0. Rows, which hold for each sum
 how many reports had any of it, go after 30 days. These are reports, not
 homes.
 
-Limits, plainly. A report cannot prove that a real box sent it, and the
-relay could replay one it forwarded; the bounds and the caps keep both to
-noise. Privacy Pass-style tokens are the later fix and are not built. The
+`/v1/fleet/public` also lists closed days only, so whoever forwarded a
+report, the relay above all, cannot poll the view and see which count it
+moved.
+
+Limits, plainly. A report cannot prove that a real box sent it. Anyone with
+the public key configuration can post reports, and the relay can drop some.
+One real report and four all-zero fakes would publish that home's six sums
+under "5 reports". The floor of five counts reports, not boxes. This is an
+open design question for Fredrik; bounds and caps do not solve it.
+Privacy Pass-style tokens would; they are not built. The
 relay and Sourceful together could join reports to addresses by time. This
 service also holds readings from homes with the readable copy on, including
 48 hours of history tiles, from which the same daily sums could be computed;

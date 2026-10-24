@@ -3,6 +3,7 @@ package server
 import (
 	"bytes"
 	"crypto/ecdh"
+	"crypto/rand"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -72,7 +73,9 @@ func TestBothReportsReachTheirTotalsThroughARelay(t *testing.T) {
 	fleetBody, _ := json.Marshal(fleetwire.Report{Schema: fleetwire.Schema, Version: "v0.146.0", Channel: "stable", Drivers: []string{"sungrow"}, Battery: "5-15", Zone: "SE4", Age: "1-6m"})
 	// Three energy reports and two fleet reports, each alone.
 	for i, body := range [][]byte{energyBody, fleetBody, energyBody, fleetBody, energyBody} {
-		inner, ok := reportwire.Request(body)
+		id := make([]byte, reportwire.IDBytes)
+		_, _ = rand.Read(id)
+		inner, ok := reportwire.Request(reportwire.Report{ID: id, Day: time.Now().UTC().Format(time.DateOnly), Body: body})
 		if !ok {
 			t.Fatal("report does not fit")
 		}

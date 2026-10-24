@@ -3,6 +3,7 @@ package fleet
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"sync"
@@ -11,6 +12,9 @@ import (
 	"github.com/srcfl/ftw-cloud/internal/registry"
 	"github.com/srcfl/ftw/go/protocol/fleetwire"
 )
+
+// bodyDeadline bounds reading a report.
+var bodyDeadline = 10 * time.Second
 
 type Service struct {
 	reg    *registry.Registry
@@ -47,11 +51,22 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusTooManyRequests)
 		return
 	}
+	// A slow sender cannot hold the connection open.
+	rc := http.NewResponseController(w)
+	_ = rc.SetReadDeadline(time.Now().Add(bodyDeadline))
 	data, err := io.ReadAll(http.MaxBytesReader(w, r.Body, fleetwire.MaxBodyBytes))
 	if err != nil {
-		w.WriteHeader(http.StatusRequestEntityTooLarge)
+		// The rest of the body is never read: close rather than wait for it.
+		w.Header().Set("Connection", "close")
+		var large *http.MaxBytesError
+		if errors.As(err, &large) {
+			w.WriteHeader(http.StatusRequestEntityTooLarge)
+		} else {
+			w.WriteHeader(http.StatusRequestTimeout)
+		}
 		return
 	}
+	_ = rc.SetReadDeadline(time.Time{})
 	report, err := fleetwire.Decode(data)
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
