@@ -222,6 +222,13 @@ func TestAPublicDateIsClosedAndHoldsFiveReports(t *testing.T) {
 	}
 	add("2026-10-18", 5)
 	add("2026-10-19", 4)
+	// Five reports, one of them with a car: that sum is that car's.
+	add("2026-10-17", 4)
+	var car energywire.Report
+	_ = json.Unmarshal([]byte(strings.Replace(strings.Replace(good, "2026-10-23", "2026-10-17", 1), `"vehicle_charge_kwh":0`, `"vehicle_charge_kwh":20`, 1)), &car)
+	if ok, err := reg.EnergyAdd(car); err != nil || !ok {
+		t.Fatal(err)
+	}
 	add("2026-10-23", 9) // still open for reports
 	add("2026-09-23", 9) // past the window
 
@@ -246,6 +253,9 @@ func TestAPublicDateIsClosedAndHoldsFiveReports(t *testing.T) {
 	}
 	if d := byDate["2026-10-18"]; d["reports"] != 5.0 || d["pv_generation_kwh"] != 60.0 || d["vehicle_charge_kwh"] != 0.0 {
 		t.Fatalf("five reports: %v", d)
+	}
+	if d := byDate["2026-10-17"]; d["reports"] != 5.0 || d["pv_generation_kwh"] != 60.0 || d["vehicle_charge_kwh"] != nil {
+		t.Fatalf("one car among five: %v", d)
 	}
 	for _, date := range []string{"2026-10-19", "2026-10-20"} {
 		for k, v := range byDate[date] {

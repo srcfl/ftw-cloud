@@ -30,11 +30,11 @@ func TestEnergyKeepsOnlyDailyTotals(t *testing.T) {
 	if err := r.db.QueryRow(`SELECT COUNT(*) FROM energy_days`).Scan(&rows); err != nil || rows != 2 {
 		t.Fatalf("rows %d %v", rows, err)
 	}
-	if err := r.db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('energy_days')`).Scan(&columns); err != nil || columns != 2+len(energywire.Fields) {
+	if err := r.db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('energy_days')`).Scan(&columns); err != nil || columns != 2+2*len(energywire.Fields) {
 		t.Fatalf("columns %d %v", columns, err)
 	}
 	totals, err := r.EnergyTotals("2026-10-22", "2026-10-23")
-	if d := totals["2026-10-23"]; err != nil || d.Reports != 5 || d.Sums[0] != 35 || d.Sums[1] != 5 {
+	if d := totals["2026-10-23"]; err != nil || d.Reports != 5 || d.Sums[0] != 35 || d.Sums[1] != 5 || d.Had != [6]int64{5, 5, 0, 0, 0, 0} {
 		t.Fatalf("%+v %v", d, err)
 	}
 

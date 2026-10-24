@@ -551,8 +551,11 @@ operator and for anyone checking the pin.
 `GET /v1/energy/public` lists the closed dates of the last 30 days, newest
 first: the report count and the six sums. A date appears only once no report
 may name it any more, so two readings never differ by one report. A date with
-fewer than 5 reports shows null, as `/v1/fleet/public` does. Rows go after 30
-days. These are reports, not homes.
+fewer than 5 reports shows null, as `/v1/fleet/public` does. So does a sum that
+between one and four of them had any of: five reports with one car is that
+car's charge. A sum nobody had any of shows 0. Rows, which hold for each sum
+how many reports had any of it, go after 30 days. These are reports, not
+homes.
 
 Limits, plainly. A report cannot prove that a real box sent it, and the
 relay could replay one it forwarded; the bounds and the caps keep both to

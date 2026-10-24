@@ -9,8 +9,9 @@ import (
 // EnergyDays is how long a date's energy totals are kept.
 const EnergyDays = 30
 
-// EnergyInit creates only daily totals: one row per date, a count and six
-// sums. No report, address or time of arrival goes on disk.
+// EnergyInit creates only daily totals: one row per date, a count, six sums,
+// and for each sum how many reports had any of it. No report, address or time
+// of arrival goes on disk.
 func (r *Registry) EnergyInit() error {
 	_, err := r.db.Exec(`CREATE TABLE IF NOT EXISTS energy_days (
 		date TEXT PRIMARY KEY,
@@ -20,7 +21,13 @@ func (r *Registry) EnergyInit() error {
 		grid_export_kwh INTEGER NOT NULL,
 		battery_charge_kwh INTEGER NOT NULL,
 		battery_discharge_kwh INTEGER NOT NULL,
-		vehicle_charge_kwh INTEGER NOT NULL)`)
+		vehicle_charge_kwh INTEGER NOT NULL,
+		pv_generation_reports INTEGER NOT NULL,
+		grid_import_reports INTEGER NOT NULL,
+		grid_export_reports INTEGER NOT NULL,
+		battery_charge_reports INTEGER NOT NULL,
+		battery_discharge_reports INTEGER NOT NULL,
+		vehicle_charge_reports INTEGER NOT NULL)`)
 	return err
 }
 
@@ -28,16 +35,28 @@ func (r *Registry) EnergyInit() error {
 // means the date already holds energywire.MaxReports.
 func (r *Registry) EnergyAdd(rep energywire.Report) (bool, error) {
 	s := rep.Sums()
-	res, err := r.db.Exec(`INSERT INTO energy_days VALUES (?, 1, ?, ?, ?, ?, ?, ?)
+	var had [6]int
+	for i, v := range s {
+		if v > 0 {
+			had[i] = 1
+		}
+	}
+	res, err := r.db.Exec(`INSERT INTO energy_days VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(date) DO UPDATE SET reports = reports + 1,
 			pv_generation_kwh = pv_generation_kwh + excluded.pv_generation_kwh,
 			grid_import_kwh = grid_import_kwh + excluded.grid_import_kwh,
 			grid_export_kwh = grid_export_kwh + excluded.grid_export_kwh,
 			battery_charge_kwh = battery_charge_kwh + excluded.battery_charge_kwh,
 			battery_discharge_kwh = battery_discharge_kwh + excluded.battery_discharge_kwh,
-			vehicle_charge_kwh = vehicle_charge_kwh + excluded.vehicle_charge_kwh
+			vehicle_charge_kwh = vehicle_charge_kwh + excluded.vehicle_charge_kwh,
+			pv_generation_reports = pv_generation_reports + excluded.pv_generation_reports,
+			grid_import_reports = grid_import_reports + excluded.grid_import_reports,
+			grid_export_reports = grid_export_reports + excluded.grid_export_reports,
+			battery_charge_reports = battery_charge_reports + excluded.battery_charge_reports,
+			battery_discharge_reports = battery_discharge_reports + excluded.battery_discharge_reports,
+			vehicle_charge_reports = vehicle_charge_reports + excluded.vehicle_charge_reports
 		WHERE reports < ?`,
-		rep.Date, s[0], s[1], s[2], s[3], s[4], s[5], energywire.MaxReports)
+		rep.Date, s[0], s[1], s[2], s[3], s[4], s[5], had[0], had[1], had[2], had[3], had[4], had[5], energywire.MaxReports)
 	if err != nil {
 		return false, err
 	}
@@ -45,17 +64,22 @@ func (r *Registry) EnergyAdd(rep energywire.Report) (bool, error) {
 	return n == 1, err
 }
 
-// EnergyDay is one date's totals, sums in energywire.Fields order.
+// EnergyDay is one date's totals, sums in energywire.Fields order. Had counts,
+// for each sum, the reports with any of it: a sum of five reports that only
+// one had any of is that one home's.
 type EnergyDay struct {
 	Date    string
 	Reports int64
 	Sums    [6]int64
+	Had     [6]int64
 }
 
 // EnergyTotals reads the dates from first to last, both included.
 func (r *Registry) EnergyTotals(first, last string) (map[string]EnergyDay, error) {
 	rows, err := r.rd.Query(`SELECT date, reports, pv_generation_kwh, grid_import_kwh, grid_export_kwh,
-		battery_charge_kwh, battery_discharge_kwh, vehicle_charge_kwh
+		battery_charge_kwh, battery_discharge_kwh, vehicle_charge_kwh,
+		pv_generation_reports, grid_import_reports, grid_export_reports,
+		battery_charge_reports, battery_discharge_reports, vehicle_charge_reports
 		FROM energy_days WHERE date >= ? AND date <= ? LIMIT ?`, first, last, EnergyDays+1)
 	if err != nil {
 		return nil, err
@@ -64,7 +88,8 @@ func (r *Registry) EnergyTotals(first, last string) (map[string]EnergyDay, error
 	out := map[string]EnergyDay{}
 	for rows.Next() {
 		var d EnergyDay
-		if err := rows.Scan(&d.Date, &d.Reports, &d.Sums[0], &d.Sums[1], &d.Sums[2], &d.Sums[3], &d.Sums[4], &d.Sums[5]); err != nil {
+		if err := rows.Scan(&d.Date, &d.Reports, &d.Sums[0], &d.Sums[1], &d.Sums[2], &d.Sums[3], &d.Sums[4], &d.Sums[5],
+			&d.Had[0], &d.Had[1], &d.Had[2], &d.Had[3], &d.Had[4], &d.Had[5]); err != nil {
 			return nil, err
 		}
 		out[d.Date] = d

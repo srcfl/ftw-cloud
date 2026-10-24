@@ -166,7 +166,9 @@ func (s *Service) Keys(w http.ResponseWriter, r *http.Request) {
 // Public is GET /v1/energy/public: the closed dates of the last EnergyDays,
 // newest first. A date shows only once no report may name it any more, so
 // two readings never differ by one report. A date with fewer than Minimum
-// reports shows null.
+// reports shows null, and so does a sum that between one and Minimum-1 of
+// them had any of: five reports with one car is that car's charge. A sum
+// nobody had any of shows 0.
 func (s *Service) Public(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "public, max-age=60")
 	if r.Method != http.MethodGet {
@@ -187,7 +189,7 @@ func (s *Service) Public(w http.ResponseWriter, r *http.Request) {
 		day, row := totals[date], map[string]any{"date": date, "reports": nil}
 		for i, name := range energywire.Fields {
 			row[name] = nil
-			if day.Reports >= Minimum {
+			if day.Reports >= Minimum && (day.Had[i] == 0 || day.Had[i] >= Minimum) {
 				row[name] = day.Sums[i]
 			}
 		}
