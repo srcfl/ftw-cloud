@@ -512,3 +512,46 @@ consumers replace the old archive rather than adding both. It needs no hourly
 energy activation. Updated Core sends it only after the current project
 statistics answer; legacy versions retain their existing daily-report setting. Averaging seven complete UTC days gives an estimate of active
 reporting installations, never people or all installations ever made.
+
+## Anonymous daily energy
+
+Energy on stats.ftw.energy comes from a separate report that is not personal
+data to this service, so it needs no C8 activation. Once per closed UTC day,
+1 to 12 hours after it closes, a box sends the date and six whole-kWh sums:
+solar generation, grid import and export, battery charge and discharge, and
+vehicle charge. Nothing else, and no field the fleet report carries. A day
+with a gap in the box's energy ledger is skipped. Core sends it only under
+the fleet report's answer and never for a site a partner controls
+(`go/internal/energyreport` in srcfl/ftw).
+
+The box seals the report with Oblivious HTTP (RFC 9458) to the gateway key
+its release pins, and posts it to an independent relay
+([deploy/ohttp.md](deploy/ohttp.md)). The relay sees the box's address and a
+ciphertext of fixed length. `POST /v1/ohttp` (`internal/energy`) sees the
+report and the relay's address. It answers a sealed 204, or 400 for anything
+but the one padded request with one valid report: exact fields, at most
+1,000 kWh each, a date in the last three closed days. It adds the sums to
+that date's row and keeps nothing per report: no row, logged body or
+address. All requests share one rate budget, and a date takes at most
+100,000 reports. `GET /.well-known/ohttp-gateway` serves the key
+configuration for the relay operator and for anyone checking the pin.
+
+`GET /v1/energy/public` lists the closed dates of the last 30 days, newest
+first: the report count and the six sums. A date appears only once no report
+may name it any more, so two readings never differ by one report. A date with
+fewer than 5 reports shows null, as `/v1/fleet/public` does. Rows go after 30
+days. These are reports, not homes.
+
+Limits, plainly. A report cannot prove that a real box sent it, and the
+relay could replay one it forwarded; the bounds and the cap keep both to
+noise. Privacy Pass-style tokens are the later fix and are not built. The
+relay and Sourceful together could join reports to addresses by time. This
+service also holds readings from homes with the readable copy on, including
+48 hours of history tiles, from which the same daily sums could be computed;
+the gateway does not do this and keeps nothing to match with, but that is a
+rule in code, not one the cryptography enforces.
+
+Open for Fredrik: whether reports that are anonymous to Sourceful still need
+the owner's yes under the ePrivacy rule on reading terminal equipment
+(Swedish LEK 9:28). The design keeps the existing yes, so it is covered
+either way.
