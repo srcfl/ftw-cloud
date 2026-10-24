@@ -457,8 +457,11 @@ Anonymous box reports use `POST /v1/fleet`, or, from a Core release that
 names a relay, `POST /v1/ohttp` (see "Anonymous daily reports" below). The
 direct route sees the box's address; it stays for older releases and can go
 one stable Core release after the first that pins the relay. Either way it
-accepts only the seven `ftw.fleet/1` fields and reduces each report into
-bounded daily counts for 90 days. It stores no raw report, address or home id. An operator can read
+accepts only the seven `ftw.fleet/1` fields, or `ftw.fleet/2`, which adds four
+health buckets: the slowest plan of the box's last day, how many plans fell
+back, the share of driver polls that failed, and the newest update of its
+last week. It reduces each report into bounded daily counts, one per field
+and never their combination, for 90 days. It stores no raw report, address or home id. An operator can read
 `/fleet/stats` only on the loopback metrics listener, with
 `docker exec ftw-cloud-ftwcloudd-1 ftwcloudd fleet`. These counts measure
 reports, not unique boxes.
@@ -511,7 +514,7 @@ public multi-shard totals need an explicit safe collector.
 
 The separate anonymous daily-report feed is `GET /v1/fleet/public`. It exposes
 only daily counts and dimension labels with at least 5 reports, for at most
-90 days. It contains imported relay history and new reports received by Cloud;
+90 days. It leaves the health counts out; only `/v1/ops` carries them. It contains imported relay history and new reports received by Cloud;
 consumers replace the old archive rather than adding both. It needs no hourly
 energy activation. Updated Core sends it only after the current project
 statistics answer; legacy versions retain their existing daily-report setting. Averaging seven complete UTC days gives an estimate of active

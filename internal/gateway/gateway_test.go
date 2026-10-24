@@ -129,8 +129,19 @@ func TestAFleetReportAddsToTheFleetTotals(t *testing.T) {
 	}
 	var r fleetwire.Report
 	_ = json.Unmarshal([]byte(fleet), &r)
-	if r.Schema != fleetwire.Schema {
+	if r.Schema != fleetwire.SchemaV1 {
 		t.Fatal("fixture")
+	}
+	// The report that says how the box ran takes the same way, and its
+	// health is counted beside the shape.
+	withHealth := strings.Replace(strings.TrimSuffix(fleet, "}"), `"ftw.fleet/1"`, `"ftw.fleet/2"`, 1) +
+		`,"plan_solve":"1-5s","plan_fallbacks":"0","driver_errors":"0-1%","update":"failed"}`
+	if got := send(t, s, cfg, inner(withHealth).Marshal(reportwire.RequestSize)); got != http.StatusNoContent {
+		t.Fatalf("status %d for an ftw.fleet/2 report", got)
+	}
+	view, err = reg.FleetView(now)
+	if err != nil || view.Days[0].Reports != 2 || view.Days[0].Update["failed"] != 1 || view.Days[0].Solve["1-5s"] != 1 {
+		t.Fatalf("fleet %+v %v", view, err)
 	}
 }
 
