@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/srcfl/ftw/go/protocol/cloudwire"
 )
 
 // Conn is a message connection: gorilla/websocket's method set.
@@ -62,4 +63,13 @@ func Kind(conn Conn, want int) int {
 // protocol: a binary message, or one of QUIC's.
 func Data(messageType int) bool {
 	return messageType == websocket.BinaryMessage || messageType == Bulk || messageType == Datagram
+}
+
+// Transport is the registry's name for conn's transport: what a Carrier
+// reports, and websocket for a plain WebSocket.
+func Transport(conn Conn) string {
+	if c, ok := conn.(Carrier); ok {
+		return c.Transport()
+	}
+	return cloudwire.TransportWebSocket
 }

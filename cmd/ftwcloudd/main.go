@@ -44,6 +44,7 @@ import (
 	"github.com/srcfl/ftw-cloud/internal/mcp"
 	"github.com/srcfl/ftw-cloud/internal/metrics"
 	"github.com/srcfl/ftw-cloud/internal/oauth"
+	"github.com/srcfl/ftw-cloud/internal/ops"
 	"github.com/srcfl/ftw-cloud/internal/push"
 	"github.com/srcfl/ftw-cloud/internal/quicdoor"
 	"github.com/srcfl/ftw-cloud/internal/registry"
@@ -104,6 +105,7 @@ func serve(args []string) error {
 	shardsPath := fs.String("shards", "", "shard directory, JSON; without it this instance holds every home")
 	statsPolicy := fs.String("statistics-policy", "", "approved statistics policy; empty keeps hourly collection off pending C8 sign-off")
 	metricsAddr := fs.String("metrics-listen", defaultMetricsAddr, "loopback address for /metrics; empty turns it off")
+	opsKey := fs.String("ops-key-sha256", "", "hex SHA-256 of the key the project stats Worker reads /v1/ops with; empty serves no one")
 	restartRate := fs.Int("restart-rate", defaultRestartRate, "sockets a second the next instance can take after a restart; sets the spread of the redial")
 	restartMin := fs.Duration("restart-spread-min", 15*time.Second, "the shortest spread: longer than the port stays closed while the next container starts")
 	h3 := fs.Bool("h3", true, "also serve HTTP/3 on the same address over UDP, and say so in Alt-Svc")
@@ -179,9 +181,17 @@ func serve(args []string) error {
 	if err != nil {
 		return err
 	}
+	// The service's own hours, kept 90 days for Sourceful's internal view.
+	opsSvc, err := ops.New(reg, shards.Self())
+	if err != nil {
+		return err
+	}
+	if err := opsSvc.UseKey(*opsKey); err != nil {
+		log.Error("ops-key-sha256 is not 64 hex digits; /v1/ops stays off, and the hours are kept", "err", err)
+	}
 	tokens := token.New(st, reg, log)
 	tokens.Shards = shards
-	srv := &server.Server{Store: st, Registry: reg, Uplink: up, Tokens: tokens, Fleet: fleetSvc, Gateway: gatewaySvc, Statistics: usageSvc, Log: log}
+	srv := &server.Server{Store: st, Registry: reg, Uplink: up, Tokens: tokens, Fleet: fleetSvc, Gateway: gatewaySvc, Statistics: usageSvc, Ops: opsSvc, Log: log}
 
 	// Assistants: the authorization server, with agent keys in ftwkeysd.
 	agentKeys := keys.Dial(*keysSocket)
@@ -348,6 +358,10 @@ func serve(args []string) error {
 		}
 	}
 	go metrics.Default.Summarise(ctx, os.Stdout, shards.Self(), time.Minute)
+	// The same series, an hour at a time, into the registry. A deploy hands
+	// over the hour so far after the drain, so the drain is in it.
+	keeper := metrics.Default.NewKeeper(opsSvc, func(err error) { log.Warn("an hour of metrics was not kept", "err", err) })
+	go keeper.Run(ctx)
 
 	// A deploy: stop accepting, tell every box and phone to come back within
 	// a spread the next instance can take, let the queued alerts go, then
@@ -382,9 +396,13 @@ func serve(args []string) error {
 			left += d.WaitClosed(time.Until(deadline))
 		}
 		log.Info("drained for a restart", "sockets", sockets, "still_open", left, "spread", spread)
+		drains.Inc()
+		drainedSockets.Add(int64(sockets))
+		drainLeftOpen.Add(int64(left))
 		if left := pushSvc.Flush(3 * time.Second); left > 0 {
 			log.Warn("alerts queued or waiting to go again at exit; they are lost", "count", left)
 		}
+		keeper.Close()
 		stopPush()
 	}()
 	if door != nil {
@@ -424,6 +442,13 @@ type drainer interface {
 
 // drainWait bounds the wait for the clients' answers to the drain's close.
 const drainWait = 2 * time.Second
+
+// What a deploy's drain did, kept in the hour it ends.
+var (
+	drains         = metrics.Default.Counter("ftwcloud_drains_total", "Drains for a restart.")
+	drainedSockets = metrics.Default.Counter("ftwcloud_drained_sockets_total", "Sockets a drain closed with 4503, handshakes included.")
+	drainLeftOpen  = metrics.Default.Counter("ftwcloud_drain_left_open_total", "Sockets whose clients had not answered the drain's close when it stopped waiting.")
+)
 
 // defaultRestartRate is how many sockets a second one instance takes on
 // the host, with room to spare: deploy/README.md, "Load", has the numbers.

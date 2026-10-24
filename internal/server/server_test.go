@@ -16,6 +16,7 @@ import (
 	"github.com/srcfl/ftw-cloud/internal/appsession"
 	"github.com/srcfl/ftw-cloud/internal/fleet"
 	"github.com/srcfl/ftw-cloud/internal/gateway"
+	"github.com/srcfl/ftw-cloud/internal/ops"
 	"github.com/srcfl/ftw-cloud/internal/registry"
 	"github.com/srcfl/ftw-cloud/internal/statistics"
 	"github.com/srcfl/ftw-cloud/internal/store"
@@ -51,6 +52,15 @@ func newServer(t *testing.T) (*Server, string) {
 	if s.Gateway, err = gateway.New(reg, testGateway(t)); err != nil {
 		t.Fatal(err)
 	}
+	// The internal feed with a key set: a request without it reads nothing.
+	opsSvc, err := ops.New(reg, "s1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := opsSvc.UseKey("9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"); err != nil {
+		t.Fatal(err)
+	}
+	s.Ops = opsSvc
 	up.Statistics = true
 	s.Statistics.(*statistics.Service).Enabled = true
 	// A home with readings in it, held the way a box's uplink holds them.

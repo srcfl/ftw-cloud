@@ -32,8 +32,21 @@ import (
 	"sync"
 	"time"
 
+	"github.com/srcfl/ftw-cloud/internal/metrics"
 	"github.com/srcfl/ftw-cloud/internal/oauth"
 )
+
+// What the service counts of assistants, summed over every home and agent.
+var (
+	mcpOutcomes = map[string]*metrics.Counter{}
+	mcpCall     = metrics.Default.Histogram("ftwcloud_mcp_call_seconds", "From a tool's start to its result, the box's answer included.")
+)
+
+func init() {
+	for _, o := range []string{"refused", "rate_limited", "ok", "tool_error", "failed", "unknown_tool", "unsupported", "step_up", "busy"} {
+		mcpOutcomes[o] = metrics.Default.Counter("ftwcloud_mcp_total", "MCP requests refused before a call, and tool calls, by outcome.", "outcome", o)
+	}
+}
 
 // Versions.
 const (
@@ -196,10 +209,12 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	_ = http.NewResponseController(w).SetReadDeadline(time.Now().Add(10 * time.Second))
 	grant, aerr := s.auth.Authenticate(r)
 	if aerr != nil {
+		mcpOutcomes["refused"].Inc()
 		oauth.Challenge(w, profileAuthError(r, aerr))
 		return
 	}
 	if !s.limit.allow(grant.Subject.Home+"/"+grant.Subject.Agent, s.now()) {
+		mcpOutcomes["rate_limited"].Inc()
 		w.Header().Set("Retry-After", "1")
 		writeRPCError(w, http.StatusTooManyRequests, nil, codeInternal, "too many requests; slow down", nil)
 		return
@@ -375,6 +390,7 @@ type callParams struct {
 
 func (s *Server) call(w http.ResponseWriter, r *http.Request, id json.RawMessage, p callParams, g *oauth.Grant, modern bool) {
 	if unsupportedDiagnostic(p.Name) {
+		mcpOutcomes["unsupported"].Inc()
 		result := toolError("This connector does not provide this operation (E_UNSUPPORTED). Use measurement_diagnostics, health_get or logs_tail.")
 		result["structuredContent"] = map[string]any{"source": "service", "data": map[string]any{"available": false, "code": "E_UNSUPPORTED", "operation": p.Name, "alternatives": []string{"measurement_diagnostics", "health_get", "logs_tail"}}}
 		writeResult(w, id, modern, result)
@@ -385,6 +401,7 @@ func (s *Server) call(w http.ResponseWriter, r *http.Request, id json.RawMessage
 		t = nil
 	}
 	if t == nil {
+		mcpOutcomes["unknown_tool"].Inc()
 		status := http.StatusOK
 		if modern {
 			status = http.StatusBadRequest
@@ -395,6 +412,7 @@ func (s *Server) call(w http.ResponseWriter, r *http.Request, id json.RawMessage
 	required := t.requiredScopes()
 	if slices.ContainsFunc(required, func(scope string) bool { return !g.Has(scope) }) {
 		// Step up: the client asks the owner for the right, then retries.
+		mcpOutcomes["step_up"].Inc()
 		scopes := append(slices.Clone(g.Scopes), required...)
 		slices.Sort(scopes)
 		scopes = slices.Compact(scopes)
@@ -410,6 +428,7 @@ func (s *Server) call(w http.ResponseWriter, r *http.Request, id json.RawMessage
 	case s.inflight <- struct{}{}:
 		defer func() { <-s.inflight }()
 	default:
+		mcpOutcomes["busy"].Inc()
 		writeResult(w, id, modern, toolError("FTW Cloud is busy. Try again in a moment."))
 		return
 	}
@@ -418,22 +437,29 @@ func (s *Server) call(w http.ResponseWriter, r *http.Request, id json.RawMessage
 		args = json.RawMessage("{}")
 	}
 	ctx := r.Context()
+	start := time.Now()
 	data, err := t.run(ctx, &callCtx{s: s, grant: g, rpcID: string(id)}, args)
+	mcpCall.Since(start)
 	if err != nil {
 		var ue userError
+		outcome := "tool_error"
 		if !errors.As(err, &ue) {
 			s.log.Warn("a tool call failed", "tool", t.name, "err", err)
 			ue = userError("The call failed inside FTW Cloud.")
+			outcome = "failed"
 		}
+		mcpOutcomes[outcome].Inc()
 		writeResult(w, id, modern, toolError(string(ue)))
 		return
 	}
 	if failure, ok := data.(failedToolData); ok {
+		mcpOutcomes["tool_error"].Inc()
 		result := toolResult(g.Subject.Home, failure.data)
 		result["isError"] = true
 		writeResult(w, id, modern, result)
 		return
 	}
+	mcpOutcomes["ok"].Inc()
 	writeResult(w, id, modern, toolResult(g.Subject.Home, data))
 }
 

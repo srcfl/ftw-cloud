@@ -30,6 +30,9 @@ services:
       - -noise-key=/run/secrets/noise/noise.key
       - -ohttp-key=/run/secrets/ohttp/ohttp.key
       - -keys-socket=/run/ftw-cloud-keys/keys.sock
+      # The SHA-256 of the key the stats Worker reads /v1/ops with: no
+      # secret. Empty turns the feed off; the hours are kept all the same.
+      - -ops-key-sha256=${FTW_CLOUD_OPS_KEY_SHA256:-}
     environment:
       # /source publishes it, so anyone can compare it with what CI built.
       FTW_CLOUD_IMAGE: ${FTW_CLOUD_IMAGE}

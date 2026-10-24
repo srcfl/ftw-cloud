@@ -26,8 +26,8 @@ to it yet.
 - What the service holds follows the newest roster's grant, never `hello`:
   the readable copy can turn on or off while the uplink stays up.
 - The registry (SQLite) holds the home id, the box key, the signed roster,
-  owners' suspensions, APNs registrations, the hashes of extension tokens
-  and when an away box's alert is due. A box whose owner turns the readable
+  owners' suspensions, APNs registrations, the hashes of extension tokens,
+  when an away box's alert is due, and the service's own hourly counts. A box whose owner turns the readable
   copy off gets that copy deleted and a signed receipt (`purged {what:
   "copy"}`); a box whose link ends gets its home deleted and a receipt.
 - **Room to grow.** Each home lives on one shard; an instance that does not
@@ -36,7 +36,8 @@ to it yet.
   one instance holds every home. A deploy closes every socket with 4503 and
   a spread, so boxes and phones come back over seconds rather than at once.
   `/metrics` on loopback and one log line a minute count what the service
-  does without naming a home. `deploy/README.md` has the load numbers and
+  does without naming a home; the registry keeps the same counts an hour
+  at a time for 90 days ([Internal operations](#internal-operations)). `deploy/README.md` has the load numbers and
   when to add a shard.
 - **A restart forgets no one.** At start the service reads every signed
   roster back from the registry and checks it with the home's key, so a
@@ -585,3 +586,48 @@ OHTTP should be outside GDPR, but reading data from the owner's equipment to
 make them may still need consent under the ePrivacy rule (Swedish LEK,
 chapter 9, section 28). If it does, neither the opt-out for boxes without
 Cloud nor the requirement with Cloud holds.
+
+## Internal operations
+
+Sourceful runs the service and the fleet from one internal view: the private
+page of stats.ftw.energy, behind Cloudflare Access. It needs no system of
+its own. The service keeps its counts; the stats Worker pulls them once an
+hour into its D1 database.
+
+**What the service keeps.** Every hour `internal/metrics` hands the hour to
+the registry (`ops_hours`, one row an hour): how much each counter rose,
+each gauge's low, mean and high over the minutes sampled, each latency's
+buckets, how much of the hour a process ran, and how many processes started
+in it. A deploy hands over its part of the hour after the drain, and the
+next process adds the rest to the same row. The series are the ones
+`/metrics` serves: sockets by kind and by transport (QUIC or WebSocket),
+homes held and connected, bytes written to boxes and phones, tun frames and
+bytes, drops by reason, push queues and the answers of Apple and of browsers'
+push services, MCP requests and tool calls by outcome and their time,
+handshake and forward latency, the drain's sockets and the Go runtime.
+Hours go after 90 days, at each write and at upkeep.
+
+**What it serves.** `GET /v1/ops` answers only the key the Worker holds,
+`Authorization: Bearer <key>`. The service holds the key's SHA-256
+(`-ops-key-sha256`), which is no secret; without it the route answers 404
+to everyone, and the hours are kept all the same. An answer carries at most
+a week of settled hours (`?since=`, five minutes after an hour ends), and the
+exact totals of the anonymous fleet and energy reports for closed days: a
+fleet day once it has ended, an energy date once no report may name it, as
+`/v1/energy/public` has it. Below the public group size of 5 too, but never
+an open day, so two answers never differ by one report. `/v1/ops` is
+`ftw.cloud-ops/1`; the Worker refuses any field it does not name.
+
+**Why none of it is about a household.** Each series sums over the whole
+process. A label is a word fixed in the code, never a home, a device, a key
+or an address (`TestCountsNameNobody`), and no series is made for a home
+(`TestAnHourOfCountsNamesNobody`). The fleet and energy days are totals of
+reports that carry no id and keep nothing per report. The limits, plainly:
+while the fleet is a handful of homes, an hour's phone count or a closed
+day's single report says something about those few, and staff who know
+them could guess. The feed gives nobody more than the totals, and nobody
+outside Access sees them. [privacy/internal-operations.md](privacy/internal-operations.md)
+has the argument and the retention in full.
+
+Per-home data stays where it is: in memory for the home's own phones, and in
+support access only when an owner opts in for a ticket.

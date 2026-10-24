@@ -215,6 +215,23 @@ closed port, so the spread's floor can drop to a few seconds.
   Logs (the `awslogs` log driver, and `logs:CreateLogStream` and
   `logs:PutLogEvents` for the instance role, which the owner adds), each
   field is a metric in the `FTWCloud` namespace, by shard.
+- **The hours, for 90 days.** The registry keeps the same counts an hour
+  at a time, and the private page of stats.ftw.energy reads them from
+  `/v1/ops` once an hour ([README](../README.md#internal-operations)). To
+  turn the feed on, make a key and give it to both ends:
+
+  ```bash
+  key=$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '=')
+  printf %s "$key" | npx wrangler secret put CLOUD_OPS_KEY --config stats/wrangler.jsonc   # in srcfl/ftw-webapp
+  printf %s "$key" | shasum -a 256 | cut -d' ' -f1                                         # FTW_CLOUD_OPS_KEY_SHA256
+  ```
+
+  Put the hash in `/etc/ftw-cloud/compose.env` as
+  `FTW_CLOUD_OPS_KEY_SHA256=`; the next deploy serves the feed. The hash is
+  no secret, the key is: it lives only in the Worker. Until the service has
+  a hash the Worker logs `awaiting key on Cloud`; while the two differ, a
+  401. A hash that is not 64 hex digits is logged at start and leaves the
+  feed off; the service runs. To rotate, do all three again.
 - What to watch: `forward_seconds_*_p99` (time inside the service),
   `drops_*` (any rise), `push_queued_alert`, `homes_connected`,
   `go_memory_bytes`.

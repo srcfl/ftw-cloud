@@ -42,8 +42,8 @@ maintains it.
   Memory holds live readings, and only while the roster's
   grant serves a copy; SQLite holds only the home id, the box key, the signed
   roster, owners' suspensions, tombstones, APNs registrations, the hashes of
-  extension tokens when each away box's alert is due, browser notice sent markers and
-  anonymous daily fleet and energy totals. Browser endpoints and box-encrypted offline
+  extension tokens when each away box's alert is due, browser notice sent markers,
+  anonymous daily fleet and energy totals, and the service's own hourly counts. Browser endpoints and box-encrypted offline
   notices live only in the signed roster. Nothing logs
   addresses.
 - **A phone can only narrow, or talk to its own box.** On `/v1/app` it can
@@ -70,6 +70,10 @@ maintains it.
   one, because other parties' clients follow no redirect.
 - **Counts name nobody.** `/metrics` listens on loopback only, and it and
   the minute's log line sum over all homes: no home id, device or address.
+  The registry keeps the same sums an hour at a time for 90 days, and
+  `/v1/ops` serves them, with the closed fleet and energy day totals, only to
+  the stats Worker's key. A label is a word fixed in the code
+  (`TestCountsNameNobody`); never add one that could hold a home.
 - **A deploy drains.** On SIGTERM every socket, handshakes included, hears
   4503 with a spread before the process exits, and no drained box starts
   `box.unreachable`. A part that holds sockets is a `drainer` in

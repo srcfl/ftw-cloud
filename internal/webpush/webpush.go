@@ -17,10 +17,20 @@ import (
 	"strings"
 	"time"
 
+	"github.com/srcfl/ftw-cloud/internal/metrics"
 	"github.com/srcfl/ftw-cloud/internal/registry"
 	"github.com/srcfl/ftw/go/protocol"
 	"github.com/srcfl/ftw/go/protocol/cloudwire"
 )
+
+// Push services' answers per browser, summed over every home.
+var results = map[string]*metrics.Counter{}
+
+func init() {
+	for _, r := range []string{"ok", "refused", "retry"} {
+		results[r] = metrics.Default.Counter("ftwcloud_webpush_total", "Push services' answers per browser, by result.", "result", r)
+	}
+}
 
 type Service struct {
 	reg    *registry.Registry
@@ -172,17 +182,22 @@ func (s *Service) Send(ctx context.Context, home string) (took int, retry bool) 
 		req.Header.Set("Authorization", row.Auth)
 		resp, e := s.client.Do(req)
 		if e != nil {
+			results["retry"].Inc()
 			retry = true
 			continue
 		}
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1024))
 		_ = resp.Body.Close()
 		if resp.StatusCode == 429 || resp.StatusCode >= 500 {
+			results["retry"].Inc()
 			retry = true
 			continue
 		}
 		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			results["ok"].Inc()
 			took++
+		} else {
+			results["refused"].Inc()
 		}
 		// Terminal refusals (including expired subscriptions) do not repeat.
 		if s.reg.WebPushMark(home, due, mark) != nil {
