@@ -70,7 +70,7 @@ func TestBothReportsReachTheirTotalsThroughARelay(t *testing.T) {
 	yesterday := time.Now().UTC().AddDate(0, 0, -1).Format(time.DateOnly)
 	report := energywire.Report{Schema: energywire.Schema, Date: yesterday, PVGeneration: 12, GridImport: 30, GridExport: 4, BatteryCharge: 9, BatteryDischarge: 8}
 	energyBody, _ := json.Marshal(report)
-	fleetBody, _ := json.Marshal(fleetwire.Report{Schema: fleetwire.Schema, Version: "v0.146.0", Channel: "stable", Drivers: []string{"sungrow"}, Battery: "5-15", Zone: "SE4", Age: "1-6m"})
+	fleetBody, _ := json.Marshal(fleetwire.Report{Schema: fleetwire.SchemaV1, Version: "v0.146.0", Channel: "stable", Drivers: []string{"sungrow"}, Battery: "5-15", Zone: "SE4", Age: "1-6m"})
 	// Three energy reports and two fleet reports, each alone.
 	for i, body := range [][]byte{energyBody, fleetBody, energyBody, fleetBody, energyBody} {
 		id := make([]byte, reportwire.IDBytes)

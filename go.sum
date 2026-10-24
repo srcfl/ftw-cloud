@@ -52,14 +52,8 @@ github.com/quic-go/quic-go v0.63.0 h1:LIFGHI4PFUhhw2dDD1ARHdCff143ffMHwZtbnbuJ78
 github.com/quic-go/quic-go v0.63.0/go.mod h1:RAro2j2yN9a9EiPACLHT9IB2NXCvGQmmo/alT0yYI0w=
 github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec h1:W09IVJc94icq4NjY3clb7Lk8O1qJ8BdBEF8z0ibU0rE=
 github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec/go.mod h1:qqbHyh8v60DhA7CoWK5oRCqLrMHRGoxYCSS9EjAz6Eo=
-github.com/srcfl/ftw/go/protocol v0.0.0-20261023165843-21e3d16946f1 h1:OCneVMFORT+ejZeiWAQ+66tHIN0IMXX7MtLtNbF6m1U=
-github.com/srcfl/ftw/go/protocol v0.0.0-20261023165843-21e3d16946f1/go.mod h1:VEjr/o0yZijJ1nApuJK+nak6FxJ/fubAUBNOunqNrUU=
-github.com/srcfl/ftw/go/protocol v0.0.0-20261024055601-28fddd802242 h1:ePRqHUvSp+2YQX99v9+uDO956Cj1CvYxGMbcQnXuUY4=
-github.com/srcfl/ftw/go/protocol v0.0.0-20261024055601-28fddd802242/go.mod h1:VEjr/o0yZijJ1nApuJK+nak6FxJ/fubAUBNOunqNrUU=
-github.com/srcfl/ftw/go/protocol v0.0.0-20261024063545-4cfd65f7da95 h1:VMpQKeK7HImzVWeTNIuo2cDl45WFWhFttR/X+hYDOY0=
-github.com/srcfl/ftw/go/protocol v0.0.0-20261024063545-4cfd65f7da95/go.mod h1:VEjr/o0yZijJ1nApuJK+nak6FxJ/fubAUBNOunqNrUU=
-github.com/srcfl/ftw/go/protocol v0.0.0-20261024070811-a7c025e87221 h1:KN4wy7SnAj8x2B+atAQvVVgtklj4io6Y3iLxhoJve94=
-github.com/srcfl/ftw/go/protocol v0.0.0-20261024070811-a7c025e87221/go.mod h1:VEjr/o0yZijJ1nApuJK+nak6FxJ/fubAUBNOunqNrUU=
+github.com/srcfl/ftw/go/protocol v0.0.0-20261024071507-45a3e557cc75 h1:wG64lpwdYEdjEgsz7GLgyTx4++a5eBZhinXwMuuCi7Y=
+github.com/srcfl/ftw/go/protocol v0.0.0-20261024071507-45a3e557cc75/go.mod h1:VEjr/o0yZijJ1nApuJK+nak6FxJ/fubAUBNOunqNrUU=
 github.com/stretchr/testify v1.12.1 h1:EuwCh5fleGS7H32xRwO3wRGT7DxrDhLAT6FF8MpWDWE=
 github.com/stretchr/testify v1.12.1/go.mod h1:MDEgiDPPsNp5cuIrHPPCyornHKgEVbtFUmoNlxoYthg=
 github.com/x448/float16 v0.8.4 h1:qLwI1I70+NjRFUR3zs1JPUCgaCXSh3SW62uAKT1mSBM=

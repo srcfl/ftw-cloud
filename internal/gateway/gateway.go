@@ -152,7 +152,7 @@ func (s *Service) add(msg []byte) int {
 	var added, repeat bool
 	var err error
 	switch reportwire.Schema(report.Body) {
-	case fleetwire.Schema:
+	case fleetwire.Schema, fleetwire.SchemaV1:
 		fleet, decodeErr := fleetwire.Decode(report.Body)
 		if decodeErr != nil {
 			return http.StatusBadRequest

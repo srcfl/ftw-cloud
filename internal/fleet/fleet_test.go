@@ -28,7 +28,7 @@ func TestReportsBecomeOnlyBoundedDailyTotalsAcrossARestart(t *testing.T) {
 	}
 	now := time.Now().UTC().Truncate(24 * time.Hour)
 	svc.now = func() time.Time { return now }
-	report := fleetwire.Report{Schema: fleetwire.Schema, Version: "v0.146.0", Channel: "stable", Drivers: []string{}, Battery: "none", Zone: "SE4", Age: "unknown"}
+	report := fleetwire.Report{Schema: fleetwire.SchemaV1, Version: "v0.146.0", Channel: "stable", Drivers: []string{}, Battery: "none", Zone: "SE4", Age: "unknown"}
 	raw, _ := json.Marshal(report)
 	var wg sync.WaitGroup
 	for range 100 {

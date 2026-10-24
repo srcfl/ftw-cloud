@@ -346,3 +346,35 @@ func keys(m map[string]json.RawMessage) []string {
 	slices.Sort(out)
 	return out
 }
+
+// The health counts of reports that carry them come exact in the feed's
+// closed fleet days; a day without any has no health fields.
+func TestTheFeedCarriesHealthCounts(t *testing.T) {
+	s, reg := newService(t, hash(key))
+	yesterday := now.UTC().AddDate(0, 0, -1)
+	for _, raw := range []string{
+		`{"schema":"ftw.fleet/2","ftw_version":"v0.155.1","channel":"stable","drivers":["sungrow"],"battery_kwh":"5-15","price_zone":"SE3","install_age":"1-6m","plan_solve":"1-5s","plan_fallbacks":"0","driver_errors":"0-1%","update":"ok"}`,
+		`{"schema":"ftw.fleet/1","ftw_version":"v0.155.1","channel":"stable","drivers":["sungrow"],"battery_kwh":"5-15","price_zone":"SE3","install_age":"1-6m"}`,
+	} {
+		r, err := fleetwire.Decode([]byte(raw))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if ok, err := reg.FleetPut(r, yesterday); !ok || err != nil {
+			t.Fatal(ok, err)
+		}
+	}
+	if ok, err := reg.FleetPut(fleetwire.Report{Schema: fleetwire.SchemaV1, Version: "unknown", Channel: "unknown", Drivers: []string{}, Battery: "none", Zone: "unknown", Age: "unknown"}, yesterday.AddDate(0, 0, -1)); !ok || err != nil {
+		t.Fatal(ok, err)
+	}
+	var f struct {
+		Days []map[string]json.RawMessage `json:"fleet_days"`
+	}
+	_ = json.Unmarshal(get(s, Path, "Bearer "+key).Body.Bytes(), &f)
+	if len(f.Days) != 2 || len(f.Days[0]) != 12 || string(f.Days[0]["update"]) != `{"ok":1}` || string(f.Days[0]["plan_solve"]) != `{"1-5s":1}` {
+		t.Fatalf("the newest day: %v", f.Days)
+	}
+	if _, ok := f.Days[1]["plan_solve"]; ok || len(f.Days[1]) != 8 {
+		t.Fatalf("a day of older reports has health fields: %v", f.Days[1])
+	}
+}
