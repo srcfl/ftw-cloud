@@ -51,10 +51,9 @@ type Service struct {
 	now   func() time.Time
 }
 
-// New keeps hours in reg. keySHA256 is the hex SHA-256 of the key the feed
-// answers to, which is no secret: it does not help anyone make the key.
-// Empty serves no one, and the hours are kept all the same.
-func New(reg *registry.Registry, keySHA256, shard string) (*Service, error) {
+// New keeps hours in reg. Until UseKey takes a key, the feed serves no one,
+// and the hours are kept all the same.
+func New(reg *registry.Registry, shard string) (*Service, error) {
 	if err := reg.OpsInit(); err != nil {
 		return nil, err
 	}
@@ -67,15 +66,27 @@ func New(reg *registry.Registry, keySHA256, shard string) (*Service, error) {
 	if err := reg.OpsPrune(time.Now()); err != nil {
 		return nil, err
 	}
-	s := &Service{reg: reg, shard: shard, now: time.Now}
-	if keySHA256 != "" {
-		key, err := hex.DecodeString(keySHA256)
-		if err != nil || len(key) != sha256.Size {
-			return nil, errors.New("ops: the key's hash is not 64 hex digits")
-		}
-		s.key = key
+	return &Service{reg: reg, shard: shard, now: time.Now}, nil
+}
+
+// UseKey makes the feed answer the key whose SHA-256 is keySHA256, in hex,
+// which is no secret: it does not help anyone make the key. Spaces, line
+// ends and quotes around it, as an env file may leave them, are dropped.
+// Empty turns the feed off. A hash that is not 64 hex digits turns it off
+// too and is an error to log: a typo in an internal setting must not stop
+// the service.
+func (s *Service) UseKey(keySHA256 string) error {
+	s.key = nil
+	h := strings.Trim(keySHA256, " \t\r\n\"'")
+	if h == "" {
+		return nil
 	}
-	return s, nil
+	key, err := hex.DecodeString(h)
+	if err != nil || len(key) != sha256.Size {
+		return errors.New("ops: the key's hash is not 64 hex digits")
+	}
+	s.key = key
+	return nil
 }
 
 // PutHour adds h to the hour kept for its start.

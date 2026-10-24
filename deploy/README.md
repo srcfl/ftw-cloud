@@ -230,7 +230,8 @@ closed port, so the spread's floor can drop to a few seconds.
   `FTW_CLOUD_OPS_KEY_SHA256=`; the next deploy serves the feed. The hash is
   no secret, the key is: it lives only in the Worker. Until the service has
   a hash the Worker logs `awaiting key on Cloud`; while the two differ, a
-  401. To rotate, do all three again.
+  401. A hash that is not 64 hex digits is logged at start and leaves the
+  feed off; the service runs. To rotate, do all three again.
 - What to watch: `forward_seconds_*_p99` (time inside the service),
   `drops_*` (any rise), `push_queued_alert`, `homes_connected`,
   `go_memory_bytes`.

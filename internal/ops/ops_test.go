@@ -36,8 +36,11 @@ func newService(t *testing.T, keyHash string) (*Service, *registry.Registry) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = reg.Close() })
-	s, err := New(reg, keyHash, "s1")
+	s, err := New(reg, "s1")
 	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.UseKey(keyHash); err != nil {
 		t.Fatal(err)
 	}
 	s.now = func() time.Time { return now }
@@ -97,12 +100,22 @@ func TestTheFeedAnswersOnlyTheKey(t *testing.T) {
 	if w := get(off, Path, "Bearer "+key); w.Code != http.StatusNotFound {
 		t.Fatalf("no key configured: %d", w.Code)
 	}
-	reg, _ := registry.Open(filepath.Join(t.TempDir(), "registry.db"))
-	defer reg.Close()
-	for _, bad := range []string{"00", strings.Repeat("g", 64), hash(key) + "00"} {
-		if _, err := New(reg, bad, "s1"); err == nil {
+	// A hash that is not one is an error to log, and the feed stays off; the
+	// service still starts. Quotes and a line end an env file leaves are
+	// not part of the hash.
+	for _, bad := range []string{"00", strings.Repeat("g", 64), hash(key) + "00", "'" + hash(key)[1:] + "'"} {
+		if err := s.UseKey(bad); err == nil {
 			t.Fatalf("a hash of %q was taken", bad)
 		}
+		if w := get(s, Path, "Bearer "+key); w.Code != http.StatusNotFound {
+			t.Fatalf("after %q the feed answers %d", bad, w.Code)
+		}
+	}
+	if err := s.UseKey(`"` + hash(key) + "\"\r\n"); err != nil {
+		t.Fatal(err)
+	}
+	if w := get(s, Path, "Bearer "+key); w.Code != http.StatusOK {
+		t.Fatalf("a quoted hash with a line end: %d", w.Code)
 	}
 }
 

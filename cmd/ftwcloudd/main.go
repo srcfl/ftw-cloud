@@ -182,9 +182,12 @@ func serve(args []string) error {
 		return err
 	}
 	// The service's own hours, kept 90 days for Sourceful's internal view.
-	opsSvc, err := ops.New(reg, *opsKey, shards.Self())
+	opsSvc, err := ops.New(reg, shards.Self())
 	if err != nil {
 		return err
+	}
+	if err := opsSvc.UseKey(*opsKey); err != nil {
+		log.Error("ops-key-sha256 is not 64 hex digits; /v1/ops stays off, and the hours are kept", "err", err)
 	}
 	tokens := token.New(st, reg, log)
 	tokens.Shards = shards

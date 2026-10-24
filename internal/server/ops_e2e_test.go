@@ -22,7 +22,7 @@ import (
 // service had before the traffic: none is made for a home.
 func TestAnHourOfCountsNamesNobody(t *testing.T) {
 	s := newStack(t)
-	svc, err := ops.New(s.reg, "", "s1")
+	svc, err := ops.New(s.reg, "s1")
 	if err != nil {
 		t.Fatal(err)
 	}
