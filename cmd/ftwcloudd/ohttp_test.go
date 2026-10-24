@@ -59,12 +59,18 @@ func TestAGatewayKeyLoadsAsThePinSays(t *testing.T) {
 
 	// A second block cut short, as a rotation pasted in part leaves it, is
 	// refused rather than quietly left unloaded.
-	cut := filepath.Join(dir, "cut.key")
-	if err := os.WriteFile(cut, append(a, b[:len(b)/2]...), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := loadOHTTPKeys(cut); err == nil || !strings.Contains(err.Error(), "after its last whole key") {
-		t.Fatalf("a cut second key: %v", err)
+	for name, data := range map[string][]byte{
+		"cut after a whole key":  append(append([]byte{}, a...), b[:len(b)/2]...),
+		"cut before a whole key": append(append([]byte{}, b[:len(b)/2]...), a...),
+		"text between keys":      append(append(append([]byte{}, a...), []byte("note\n")...), b...),
+	} {
+		cut := filepath.Join(dir, "cut.key")
+		if err := os.WriteFile(cut, data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := loadOHTTPKeys(cut); err == nil || !strings.Contains(err.Error(), "not a whole PKCS #8 key") {
+			t.Fatalf("%s: %v", name, err)
+		}
 	}
 }
 

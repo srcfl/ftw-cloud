@@ -3,6 +3,7 @@ package registry
 import (
 	"crypto/sha256"
 	"database/sql"
+	"errors"
 	"time"
 
 	"github.com/srcfl/ftw/go/protocol/energywire"
@@ -57,6 +58,18 @@ func (r *Registry) once(day string, id []byte, add func(*sql.Tx) (bool, error)) 
 		return false, false, err
 	}
 	return true, false, tx.Commit()
+}
+
+// ReportSeen reports whether a report's id was counted already, without
+// recording it, so a repeat can be answered before any budget is spent.
+func (r *Registry) ReportSeen(day string, id []byte) (bool, error) {
+	sum := sha256.Sum256(id)
+	var one int
+	err := r.rd.QueryRow(`SELECT 1 FROM report_ids WHERE day = ? AND id = ?`, day, sum[:16]).Scan(&one)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	return err == nil, err
 }
 
 // ReportsPrune drops ids older than ReportIDDays.

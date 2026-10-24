@@ -135,12 +135,19 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // add reads the one request the gateway answers and adds its report to the
 // day totals of its kind, once: a report whose id was counted already is
-// answered 204 and adds nothing, so a replay or a retry is harmless.
+// answered 204, adds nothing and spends no budget, so a replay or a retry is
+// harmless and cannot crowd out real reports.
 func (s *Service) add(msg []byte) int {
 	now := s.now()
 	report, ok := reportwire.Read(msg)
 	if !ok || !reportwire.Fresh(report.Day, now) {
 		return http.StatusBadRequest
+	}
+	switch seen, err := s.reg.ReportSeen(report.Day, report.ID); {
+	case err != nil:
+		return http.StatusServiceUnavailable
+	case seen:
+		return http.StatusNoContent
 	}
 	var added, repeat bool
 	var err error

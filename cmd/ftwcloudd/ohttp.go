@@ -32,16 +32,21 @@ func loadOHTTPKeys(path string) (*ohttp.Gateway, error) {
 	if err != nil {
 		return nil, fmt.Errorf("ohttp key: %w", err)
 	}
+	// Each key is one whole PEM block, with nothing but blank space around
+	// it. Anything else, such as a block cut short in a rotation, is refused
+	// wherever it sits: pem.Decode would skip it and load the rest.
+	const begin, end = "-----BEGIN PRIVATE KEY-----", "-----END PRIVATE KEY-----"
 	var keys []ohttp.Key
-	for {
-		var block *pem.Block
-		block, raw = pem.Decode(raw)
-		if block == nil {
-			break
+	for rest := bytes.TrimSpace(raw); len(rest) > 0; rest = bytes.TrimSpace(rest) {
+		stop := bytes.Index(rest, []byte(end))
+		if !bytes.HasPrefix(rest, []byte(begin)) || stop < 0 || bytes.Count(rest[:stop], []byte("-----BEGIN")) != 1 {
+			return nil, fmt.Errorf("ohttp key: %s holds data that is not a whole PKCS #8 key", path)
 		}
-		if block.Type != "PRIVATE KEY" {
-			return nil, fmt.Errorf("ohttp key: %s holds a %s, not a PKCS #8 private key", path, block.Type)
+		block, after := pem.Decode(rest[:stop+len(end)])
+		if block == nil || len(bytes.TrimSpace(after)) > 0 {
+			return nil, fmt.Errorf("ohttp key: %s holds data that is not a whole PKCS #8 key", path)
 		}
+		rest = rest[stop+len(end):]
 		parsed, err := x509.ParsePKCS8PrivateKey(block.Bytes)
 		if err != nil {
 			return nil, fmt.Errorf("ohttp key: %w", err)
@@ -51,11 +56,6 @@ func loadOHTTPKeys(path string) (*ohttp.Gateway, error) {
 			return nil, fmt.Errorf("ohttp key: %s holds a key that is not X25519", path)
 		}
 		keys = append(keys, ohttp.Key{ID: ohttpKeyID(x.PublicKey().Bytes()), Private: x})
-	}
-	// A block cut short, as a rotation pasted in part would leave it, must
-	// not leave the new key quietly unloaded.
-	if len(bytes.TrimSpace(raw)) > 0 {
-		return nil, fmt.Errorf("ohttp key: %s has data after its last whole key", path)
 	}
 	if len(keys) == 0 {
 		return nil, fmt.Errorf("ohttp key: %s holds no key", path)

@@ -223,6 +223,24 @@ func TestAReportCountsOnceHoweverOftenItArrives(t *testing.T) {
 	}
 }
 
+// A repeat is answered before any budget is spent, so one captured request
+// sent many times cannot crowd out the real reports.
+func TestARepeatSpendsNoBudget(t *testing.T) {
+	s, reg, cfg := newService(t)
+	sealed, _, _ := ohttp.Encapsulate(cfg, inner(fleet).Marshal(reportwire.RequestSize))
+	for i := range 2 * int(burst) {
+		if w := post(s, sealed, ohttp.RequestType); w.Code != http.StatusOK {
+			t.Fatalf("repeat %d: %d", i, w.Code)
+		}
+	}
+	if got := send(t, s, cfg, inner(fleet).Marshal(reportwire.RequestSize)); got != http.StatusNoContent {
+		t.Fatalf("a new report after repeats: %d", got)
+	}
+	if view, _ := reg.FleetView(now); len(view.Days) != 1 || view.Days[0].Reports != 2 {
+		t.Fatalf("fleet %+v", view)
+	}
+}
+
 // A request sent before yesterday is refused, so a captured one cannot be
 // posted again once its id is forgotten. Yesterday's still counts.
 func TestAnOldRequestIsRefused(t *testing.T) {
