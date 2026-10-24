@@ -28,6 +28,13 @@ utfall och deras tid, handskakningar, dräneringar och Go-körtiden.
 En flottdag visas när den är slut, ett energidatum när ingen rapport längre
 får nämna det. Därför skiljer sig två hämtningar aldrig med en enda rapport.
 
+Rapporter i formatet `ftw.fleet/2` säger också grovt hur boxen gick: den
+långsammaste planen och antalet reservplaner under boxens senaste dygn,
+andelen misslyckade drivrutinsläsningar och utfallet av den senaste
+uppdateringen den senaste veckan. Varje mått är några fasta ord. Cloud räknar
+dem per dag och fält, aldrig i kombination, och den offentliga vyn visar dem
+inte. Argumentet för att de inte pekar ut en box står i srcfl/ftw#1821.
+
 ## Vem ser den
 
 Bara den som Cloudflare Access släpper in på `stats.ftw.energy/admin*` och
