@@ -567,12 +567,13 @@ homes.
 report, the relay above all, cannot poll the view and see which count it
 moved.
 
-Limits, plainly. A report cannot prove that a real box sent it. Anyone with
-the public key configuration can post reports, and the relay can drop some.
-One real report and four all-zero fakes would publish that home's six sums
-under "5 reports". The floor of five counts reports, not boxes. This is an
-open design question for Fredrik; bounds and caps do not solve it.
-Privacy Pass-style tokens would; they are not built. The
+Limits, plainly. The floor of five counts reports, not boxes; Fredrik
+accepted this on 24 October 2026. A report cannot prove that a real box sent
+it. The relay alone can drop the other reports and add fakes to isolate one
+home's day, and that shows on our side as missing reports. Anyone else can
+do it only on a day when one real home reported. Rejecting replays and
+listing closed days only remove the cheap attacks. Anonymous tokens (Privacy
+Pass) are the later fix, once the fleet grows or someone shows a need. The
 relay and Sourceful together could join reports to addresses by time. This
 service also holds readings from homes with the readable copy on, including
 48 hours of history tiles, from which the same daily sums could be computed;
