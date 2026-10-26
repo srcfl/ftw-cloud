@@ -37,9 +37,20 @@ type pageError struct {
 	Title string
 	Text  string
 	// Back is the client's error response, as a link the person may follow
-	// to BackHost.
-	Back     string
+	// to BackHost. It is built only from a redirect URI checkRedirect
+	// accepted, so it is marked safe: html/template would otherwise blank
+	// the one custom scheme allowed (cursorRedirect).
+	Back     template.URL
 	BackHost string
+}
+
+// redirectShown is where the consent page says the window goes back to. The
+// Cursor callback keeps its scheme, so it does not read like a website.
+func redirectShown(u *url.URL) string {
+	if u.String() == cursorRedirect {
+		return "cursor://" + u.Host
+	}
+	return asciiHostPort(u)
 }
 
 func (s *Server) consentPage(w http.ResponseWriter, rid string, c consent) {
@@ -53,7 +64,7 @@ func (s *Server) consentPage(w http.ResponseWriter, rid string, c consent) {
 	}
 	u, _ := url.Parse(c.RedirectURI)
 	d := pageData{Nonce: randomToken(16), RID: rid, Name: c.ClientName, Host: c.ClientHost, Verified: c.Verified, FromDocument: isCIMD(c.ClientID),
-		RedirectHost: asciiHostPort(u), Local: u.Scheme == "http" && isLoopback(u.Hostname()),
+		RedirectHost: redirectShown(u), Local: localRedirect(u),
 		Code: showCode(c.Code), Link: appLink(rid, c.Offer)}
 	for _, sc := range splitScope(c.Scope) {
 		d.Scopes = append(d.Scopes, scopeWords[sc])
