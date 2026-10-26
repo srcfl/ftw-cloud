@@ -65,11 +65,29 @@ func (s *Server) resolveClient(ctx context.Context, id string) (client, error) {
 	return client{ID: c.ID, Name: c.Name, Host: host, RedirectURIs: c.RedirectURIs, AuthMethod: c.AuthMethod, secret: c.Secret}, nil
 }
 
+// cursorRedirect is the one custom-scheme redirect URI FTW Cloud accepts:
+// Cursor's desktop app, which Grok Bot and the Cursor IDE use to finish an
+// MCP sign-in. It must match byte for byte; no other custom scheme, host,
+// path, query or casing of it passes. Its client still needs PKCE S256 at
+// /authorize and the same redirect URI again at /token.
+const cursorRedirect = "cursor://anysphere.cursor-mcp/oauth/callback"
+
+// localRedirect reports whether a redirect URI that checkRedirect accepted
+// ends at a program on the owner's computer rather than a website: loopback
+// http, or the Cursor callback, which whatever app claimed the cursor:
+// scheme receives. The owner is warned to approve only what they started.
+func localRedirect(u *url.URL) bool {
+	return u.String() == cursorRedirect || u.Scheme == "http" && isLoopback(u.Hostname())
+}
+
 // checkRedirect holds a redirect URI to the rules: https, or http to this
 // computer's loopback for a client that runs on it. No fragment and no
-// credentials. Custom schemes are refused, as the MCP spec asks, and so is
-// a host with no ASCII form (asciiHost).
+// credentials. Custom schemes are refused, as the MCP spec asks, except the
+// exact cursorRedirect, and so is a host with no ASCII form (asciiHost).
 func checkRedirect(raw string) error {
+	if raw == cursorRedirect {
+		return nil
+	}
 	u, err := url.Parse(raw)
 	if err != nil || u.User != nil || u.Fragment != "" || strings.Contains(raw, "#") || u.Host == "" || len(raw) > 2048 {
 		return fmt.Errorf("redirect URI %q is not allowed", raw)

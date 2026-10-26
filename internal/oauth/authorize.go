@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"fmt"
+	"html/template"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -84,7 +85,7 @@ func (s *Server) serveAuthorize(w http.ResponseWriter, r *http.Request) {
 		}
 		u, _ := url.Parse(redirect)
 		s.authorizePage(w, http.StatusBadRequest, pageError{Title: "This request cannot go on",
-			Text: "FTW Cloud cannot connect this assistant: " + desc + ".", Back: back, BackHost: asciiHostPort(u)})
+			Text: "FTW Cloud cannot connect this assistant: " + desc + ".", Back: template.URL(back), BackHost: asciiHostPort(u)})
 	}
 	if len(req.state) > 1024 {
 		fail("invalid_request", "state is too long")
@@ -283,7 +284,7 @@ func (s *Server) view(c consent) requestView {
 	}
 	return requestView{Offer: c.Offer, Status: status, Code: c.Code,
 		Client:   clientView{ID: c.ClientID, Name: c.ClientName, Host: c.ClientHost, Verified: c.Verified},
-		Redirect: redirectView{Host: redirectHost(u), Local: u.Scheme == "http" && isLoopback(u.Hostname())},
+		Redirect: redirectView{Host: redirectHost(u), Local: localRedirect(u)},
 		Scopes:   splitScope(c.Scope),
 		Agent:    agentKeyView{Key: base64.RawURLEncoding.EncodeToString(c.AgentKey), ID: cloudwire.DeviceID(c.AgentKey)},
 		Expires:  c.Expires.UnixMilli()}
