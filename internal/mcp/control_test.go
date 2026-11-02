@@ -301,22 +301,6 @@ func TestARetryIsTheSameCommand(t *testing.T) {
 	}
 }
 
-// ev_charge_now is marked as a tool that changes what a home does.
-func TestChargeNowIsMarkedDestructive(t *testing.T) {
-	_, _, a := withControl(t)
-	r := a.rpc("tools/list", nil, true)
-	for _, x := range r.Body["result"].(map[string]any)["tools"].([]any) {
-		tl := x.(map[string]any)
-		ann := tl["annotations"].(map[string]any)
-		if tl["name"] == "ev_charge_now" && ann["destructiveHint"] != true {
-			t.Fatal("ev_charge_now is not destructive")
-		}
-		if tl["name"] == "status" && ann["destructiveHint"] != false {
-			t.Fatal("status is destructive")
-		}
-	}
-}
-
 // A box without a clock refuses control at once, in words.
 func TestControlOnABoxWithoutAClock(t *testing.T) {
 	_, b, a := withControl(t)

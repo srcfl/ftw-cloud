@@ -28,7 +28,7 @@ func setupTools() []*tool {
 	commit["confirmed"] = map[string]any{"type": "boolean", "description": "True only after the user reviewed this exact checked draft, its changes and any restart, and confirmed saving it"}
 	definitions := []setupToolDef{
 		{"setup_begin", "Begin owner-approved system setup", protocol.MsgSetupStatus,
-			"Use when the user asks to configure a new or existing box. Request the separate setup and diagnostic grant together, then read the box's current draft and guide. This read changes nothing and never resets existing work. If no box is connected, guide the owner through Start assistant setup on its local page and approve this connection there. Then read setup_schema and follow the returned guide.", object(nil), true},
+			"Use when the user asks to configure a new or existing box. Reads the box's current draft and guide; it changes nothing and never resets existing work. It needs the separate setup and diagnostic grant, so the client may first ask the owner to approve that access. If no box is connected, guide the owner through Start assistant setup on its local page and approve this connection there. Then read setup_schema and follow the returned guide.", object(nil), true},
 		{"setup_schema", "Start or understand system setup", protocol.MsgSetupSchema,
 			"Use only when the user wants to set up or change an installation. Read the complete configuration schema, driver catalogue and workflow from the connected box. Ordinary status/history/control need no setup interview.", object(nil), true},
 		{"setup_status", "Resume system setup", protocol.MsgSetupStatus,
@@ -52,8 +52,8 @@ func setupTools() []*tool {
 	definitions = append(definitions,
 		setupToolDef{
 			"setup_discover", "Find equipment for setup", protocol.MsgSetupEdit,
-			"Only after the user agrees: scan the connected box's local network and optionally fingerprint compatible devices. Bound to the current draft revision. Results are observations to review; this does not select equipment or apply configuration.",
-			object(map[string]any{"revision": revision, "confirmed": confirmed, "fingerprint": map[string]any{"type": "boolean", "description": "Also run read-only device fingerprints"}}, "revision", "confirmed"), false},
+			"Only after the user agrees: scan the connected box's local network and optionally fingerprint compatible devices. Bound to the current draft revision. Results are observations to review; this changes neither the draft nor any device, and does not select equipment or apply configuration.",
+			object(map[string]any{"revision": revision, "confirmed": confirmed, "fingerprint": map[string]any{"type": "boolean", "description": "Also run read-only device fingerprints"}}, "revision", "confirmed"), true},
 		setupToolDef{
 			"setup_test", "Test a draft equipment connection", protocol.MsgSetupEdit,
 			"After the user agrees, briefly run the selected draft driver to read equipment. Uses this draft's credentials and keeps any token rotation in the draft. Device writes and control hooks are blocked; a driver that needs an undeclared authentication or subscription write may need attention. Connection and readings do not prove actuation. Read setup_status afterward because credential rotation can advance the draft revision.",
@@ -70,8 +70,13 @@ func setupTools() []*tool {
 		if d.name == "setup_begin" {
 			scope = protocol.ScopeSetupWrite
 		}
+		// Every setup write overwrites or deletes something: draft answers,
+		// the whole draft, a draft credential, live settings or the running
+		// process. The three preparations reach past the box's records: the
+		// local network, the device address in the draft, a vendor's sign-in.
+		_, openWorld := preparation[d.name]
 		result = append(result, &tool{name: d.name, title: d.title, description: d.description + dataNote,
-			scope: scope, input: d.input, readOnly: d.readOnly, destructive: d.message == protocol.MsgSetupCommit || d.message == protocol.MsgSetupRestart,
+			scope: scope, input: d.input, readOnly: d.readOnly, destructive: !d.readOnly, openWorld: openWorld,
 			run: func(ctx context.Context, cc *callCtx, args json.RawMessage) (any, error) {
 				if !json.Valid(args) || len(args) > protocol.SetupRequestBytes {
 					return nil, userError("Keep each setup patch below 10 KiB and use successive draft revisions.")
