@@ -26,9 +26,14 @@ type tool struct {
 	scope                    string
 	input                    map[string]any
 	readOnly                 bool
-	// destructive is a tool that can change what a home does.
+	// destructive is a write that can overwrite, delete or cancel
+	// something, at once or when the owner approves it.
 	destructive bool
-	run         func(ctx context.Context, cc *callCtx, args json.RawMessage) (any, error)
+	// openWorld is a tool that reaches past the home's box and its records:
+	// the local network, a device address the draft names, or a vendor's
+	// sign-in.
+	openWorld bool
+	run       func(ctx context.Context, cc *callCtx, args json.RawMessage) (any, error)
 }
 
 // Setup writes need the diagnostic reads that let the assistant understand
@@ -116,7 +121,7 @@ func (s *Server) listing() []map[string]any {
 				"readOnlyHint":    t.readOnly,
 				"destructiveHint": t.destructive,
 				"idempotentHint":  t.readOnly,
-				"openWorldHint":   false,
+				"openWorldHint":   t.openWorld,
 			},
 		})
 	}

@@ -11,6 +11,8 @@ import (
 func carGoalTool() *tool {
 	return &tool{
 		name: "car_goal_request", title: "Ask for a car charging goal", scope: oauth.ScopeGoalsRequest,
+		// Approved, it replaces or clears the car's schedule.
+		destructive: true,
 		description: "Ask for a lasting car charging goal after the user confirms the car, target and departure time. Use the opaque car id from cars_list or charger_id from chargers_list, exactly one. Confirm the box time zone before converting local HH:MM into minutes after midnight. During setup, read runtime_timezone in setup_schema; otherwise use the known installation time zone or ask the owner to check it. Do not assume the assistant client time zone. days is a weekday mask: Monday=1 through Sunday=64; 0 means once at the next ready time, 127 means every day. A new goal replaces the previous schedule. Nothing changes until the owner approves in Settings → Access on the local box or in the FTW app. Read requests_list, then cars_list to check the outcome.",
 		input: object(map[string]any{
 			"car":             map[string]any{"type": "string", "description": "Opaque car id from cars_list"},

@@ -110,6 +110,8 @@ func controlTools() []*tool {
 		{
 			name:  "goal_request",
 			title: "Ask for a lasting change",
+			// Approved, it replaces a setting.
+			destructive: true,
 			description: "Ask the owner for a lasting change: the home's mode, the planning style, solar-only charging at a charger, or a correction of the car's charge level. " +
 				"Nothing changes until an owner confirms it in Settings → Access on the local box or in the FTW app; requests_list shows how it ended. Put your reason, in your own words, in why.",
 			scope: oauth.ScopeGoalsRequest,
